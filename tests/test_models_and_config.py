@@ -34,6 +34,53 @@ def test_route_identity_changes_with_api_version(route: RouteConfig) -> None:
     assert changed.identity_hash != route.identity_hash
 
 
+def test_route_identity_binds_safe_request_defaults(route: RouteConfig) -> None:
+    changed = RouteConfig(
+        id=route.id,
+        provider=route.provider,
+        adapter=route.adapter,
+        model=route.model,
+        base_url=route.base_url,
+        auth=route.auth,
+        input_usd_per_million=1,
+        output_usd_per_million=2,
+        request_defaults={"stream_options": {"include_usage": True}},
+    )
+    assert changed.identity_hash != route.identity_hash
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "model",
+        "messages",
+        "stream",
+        "max_tokens",
+        "max_completion_tokens",
+        "n",
+        "provider",
+        "temperature",
+        "tools",
+        "response_format",
+    ],
+)
+def test_request_defaults_cannot_override_identity_or_cost_fields(
+    route: RouteConfig, key: str
+) -> None:
+    with pytest.raises(ValueError, match="protected request fields"):
+        RouteConfig(
+            id=route.id,
+            provider=route.provider,
+            adapter=route.adapter,
+            model=route.model,
+            base_url=route.base_url,
+            auth=route.auth,
+            input_usd_per_million=1,
+            output_usd_per_million=2,
+            request_defaults={key: "override"},
+        )
+
+
 def test_credentials_cannot_be_extra_headers(route: RouteConfig) -> None:
     with pytest.raises(ValueError, match="credentials belong"):
         RouteConfig(

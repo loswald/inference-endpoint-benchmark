@@ -1,4 +1,4 @@
-# Data handling and publication notice
+# Data handling and release-review notice
 
 The default workloads are synthetic and deterministic. Users may replace them, but doing so changes
 the data-governance boundary.
@@ -14,7 +14,7 @@ The durable ledger stores:
 The live process necessarily holds request and response content in memory long enough to send and
 score it. Custom scorers should return a scalar and diagnostics without embedding response text.
 
-Before publication:
+The generated report is a release candidate, not publication approval. Before any external release:
 
 1. inspect the exact run configuration and route labels for private account information;
 2. recursively scan every artifact for secrets and local paths;
@@ -23,3 +23,6 @@ Before publication:
    any request-level records authorized for release;
 5. state all censored, invalid, anomalous, and untested cells.
 
+No PDF builder, publication gate, legal review, or organization-specific secret scanner is included.
+The public campaign serializer uses an explicit allowlist and omits operational fields, but this is
+defense in depth—not proof that a full run directory is safe to publish.

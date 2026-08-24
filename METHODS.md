@@ -33,23 +33,27 @@ ceiling produces measured queue delay.
 
 After a healthy epoch, offered RPS increases by a fixed additive amount. After two unhealthy epochs,
 it is multiplied by the configured decrease factor. The highest healthy candidate receives three
-separated confirmation epochs followed by a 50%-rate recovery epoch.
+confirmation epochs separated by low-load epochs. A 50%-rate recovery epoch is run and labelled only
+when a two-epoch overload was actually observed.
 
 Default epoch health requires:
 
-- at least 99% successful completed requests;
-- no more than 1% rate-limited requests;
-- no more than 1% combined server errors and timeouts;
+- at least 99% of completed logical requests ending successfully;
+- no more than 1% of physical attempts rate-limited, including intermediate retries;
+- no more than 1% of physical attempts ending in a server error, timeout, or transport error;
+- p95 TTFT and end-to-end latency no greater than twice their low-load baselines when those baseline
+  metrics are observable;
 - end-of-epoch drain no larger than 10% of the epoch or one second.
 
 These short epochs locate a knee. They do not establish sustained capacity.
 
 ## Sustained soaks
 
-A soak consists of four independent 30-second analysis blocks by default. All blocks must pass the
-health gate before the tested rate may be described as soak-verified. Capacity above or below the
-tested rate is not inferred. Quality tasks can be paired at baseline and load by adding the same task
-cell to both phases.
+A soak consists of four 30-second analysis blocks by default. The runner records the tested rate and
+block health, but the report does not automatically certify sustainable capacity. Capacity above or
+below the tested rate is not inferred. The current runner also does not construct paired low-load and
+near-load quality trials, so low-load quality scores must not be interpreted as evidence that quality
+is unchanged under saturation.
 
 ## Metrics
 
@@ -58,12 +62,22 @@ All clocks are client-side monotonic clocks. Units are stored and printed explic
 - **TTFT:** request start to first content-bearing SSE event.
 - **End-to-end latency:** request start through complete response drain.
 - **Decode proxy:** provider-reported completion tokens divided by `(end-to-end seconds − TTFT)`.
-  This includes client transport/drain overhead and is not direct server decode compute.
-- **Effective input/output TPM:** successful provider-reported tokens divided by analysis-block wall
-  minutes.
+  This includes client transport/drain overhead and is not direct server decode compute. The
+  primary proxy requires at least eight billed completion tokens, two content-bearing events, and
+  10 ms after TTFT; observations failing the gate remain recorded but are not headline decode data.
+- **Offered RPM:** scheduled arrivals divided by the scheduled arrival-window minutes.
+- **Completed/effective RPM:** completed or successful requests divided by full block wall minutes,
+  including response drain after the arrival window.
+- **Physical-attempt RPM:** every provider send, including intermediate retries, divided by the same
+  full block wall minutes. Attempt-level 429, server-error, timeout, and transport-error counts are
+  reported separately from final logical-request outcomes.
+- **Effective input/output TPM:** successful provider-reported tokens divided by full block wall
+  minutes, including drain. A block with any successful request missing usage is censored from TPM.
 - **Goodput:** successful requests or tokens per wall minute, including queueing and failures in the
   denominator interval.
-- **Quality-adjusted goodput:** successful units multiplied by deterministic task score, per minute.
+
+Quality-adjusted goodput is not emitted because the current runner does not produce a valid paired
+quality-under-load estimand.
 
 SSE event spans are never converted to token/s: an SSE event can contain zero, one, or many tokens.
 Fewer than two content events cannot even define an event span. The number and timestamps of events
@@ -73,12 +87,15 @@ remain diagnostic evidence only.
 
 - Request latency and decode-proxy summaries use request-level percentile bootstrap intervals.
 - Success probabilities use Wilson 95% intervals.
-- Load rates use independent epochs or soak blocks as bootstrap units.
+- Load rates and load success proportions use a paired epoch/block bootstrap of the ratio of summed
+  units to summed denominators. They do not use individual requests as independent load samples.
 - Tokens within a response are never treated as independent observations.
 - p99 is withheld below 1,000 eligible requests.
 
 Intervals characterize the sampled route, time, region, account, workload, and load. They do not
-erase systematic provider/time effects.
+erase systematic provider/time effects. The block bootstrap assumes block-level exchangeability;
+adjacent soak blocks and adaptively selected AIMD epochs can remain temporally correlated, so sparse
+intervals are conditional and exploratory rather than proof of day-wide capacity.
 
 ## Validity and outliers
 
@@ -86,7 +103,8 @@ Every terminal attempt is preserved. Metric-specific eligibility prevents one de
 otherwise useful evidence: a response with missing usage may support latency but not TPM. Invalid,
 censored, and anomalous observations appear in `outlier-audit.jsonl`. A matched-cell 3×IQR rule flags
 valid extremes for investigation but never removes them. No winsorization, trimming, or undocumented
-timeout deletion occurs.
+timeout deletion occurs. Decode proxies already classified as anomalous are excluded from the
+primary decode summary but retained in the audit; matched-cell valid extremes remain included.
 
 ## Cache stratification
 
@@ -99,5 +117,5 @@ cached tokens. Cached, uncached, and uncontrolled rows are never pooled in TTFT/
 The client cannot directly measure server-side prefill compute, GPU utilization, batching, queue
 depth, or routing unless the provider exposes trustworthy server timings. Context rejection after a
 429/timeout/5xx is inconclusive, not a hard context boundary. A route-specific capability rejection
-does not describe other checkpoints or providers.
-
+does not describe other checkpoints or providers. The current report is an evidence package, not a
+PDF, production recommendation, publication gate, or completeness certificate.

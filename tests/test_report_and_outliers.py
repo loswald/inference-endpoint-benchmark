@@ -76,12 +76,16 @@ def test_audit_preserves_valid_extreme_and_report_has_contract(tmp_path, route) 
     assert extreme["preserved"] is True
     summary = summarize_rows(rows)
     assert summary[0]["latency_p50_n"] == 5
+    assert summary[0]["cache_read_reported_n"] == 0
+    assert summary[0]["cache_read_unknown_n"] == 5
+    assert summary[0]["cache_miss_n"] == 0
     ledger.close()
     report = generate_report(tmp_path)
     assert report.exists()
     contract = json.loads((tmp_path / "report" / "metric-contract.json").read_text())
     assert contract["sse_event_span"]["eligible_for_token_rate"] is False
     assert (tmp_path / "report" / "outlier-audit.jsonl").exists()
+    assert (tmp_path / "report" / "reproducibility-manifest.json").exists()
 
 
 def test_outlier_schema_requires_preservation() -> None:
@@ -95,10 +99,11 @@ def test_outlier_schema_requires_preservation() -> None:
     assert schema["properties"]["preserved"] == {"const": True}
 
 
-def test_load_summary_uses_blocks_for_rpm_and_tpm() -> None:
+def test_load_summary_does_not_trust_event_token_totals_without_request_ledger() -> None:
     events = []
-    for _index in range(4):
+    for index in range(4):
         payload = {
+            "epoch_id": f"epoch-{index}",
             "route_id": "r",
             "shape": "short_short",
             "phase": "soak_block",
@@ -114,9 +119,10 @@ def test_load_summary_uses_blocks_for_rpm_and_tpm() -> None:
         events.append({"kind": "load_epoch", "payload_json": json.dumps(payload)})
     row = summarize_load_events(events)[0]
     assert row["successful_rpm"] == 60
-    assert row["successful_input_tpm"] == 6_000
-    assert row["successful_output_tpm"] == 1_200
-    assert row["successful_output_tpm_n"] == 4
+    assert row["successful_input_tpm"] is None
+    assert row["successful_output_tpm"] is None
+    assert row["successful_output_tpm_n"] == 0
+    assert row["tpm_reporting_state"] == "censored_no_complete_usage_block"
 
 
 def test_plots_require_a_matched_multi_route_cell(tmp_path) -> None:

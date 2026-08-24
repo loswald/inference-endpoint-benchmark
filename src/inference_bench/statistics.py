@@ -100,12 +100,78 @@ def block_rate_interval(
     unit_name: str,
     seed: int = 1,
 ) -> Estimate:
-    """Bootstrap independent load blocks, never individual output tokens."""
+    """Bootstrap paired independent blocks using a ratio-of-sums estimand.
+
+    Unequal block durations commonly arise from post-arrival response drain. Averaging block rates
+    would give a short block the same weight as a long block; the ratio of summed units to summed
+    wall time retains the intended aggregate-throughput denominator.
+    """
     if len(successful_units) != len(block_seconds):
         raise ValueError("block vectors must have equal length")
-    rates = [
-        units / (seconds / 60)
+    pairs = [
+        (float(units), float(seconds))
         for units, seconds in zip(successful_units, block_seconds, strict=True)
-        if seconds > 0
+        if math.isfinite(units) and units >= 0 and math.isfinite(seconds) and seconds > 0
     ]
-    return mean_interval(rates, unit=f"{unit_name}/minute", seed=seed)
+    return _paired_block_ratio_interval(
+        pairs,
+        numerator_scale=60.0,
+        unit=f"{unit_name}/minute",
+        seed=seed,
+        method="epoch/block-bootstrap-ratio-of-sums",
+    )
+
+
+def block_proportion_interval(
+    successes: Sequence[float], totals: Sequence[float], *, seed: int = 1
+) -> Estimate:
+    """Estimate a load-block success proportion with blocks as sampling units."""
+    if len(successes) != len(totals):
+        raise ValueError("block vectors must have equal length")
+    pairs = [
+        (float(success), float(total))
+        for success, total in zip(successes, totals, strict=True)
+        if math.isfinite(success)
+        and math.isfinite(total)
+        and total > 0
+        and 0 <= success <= total
+    ]
+    return _paired_block_ratio_interval(
+        pairs,
+        numerator_scale=1.0,
+        unit="proportion",
+        seed=seed,
+        method="epoch/block-bootstrap-ratio-of-sums",
+    )
+
+
+def _paired_block_ratio_interval(
+    pairs: Sequence[tuple[float, float]],
+    *,
+    numerator_scale: float,
+    unit: str,
+    seed: int,
+    method: str,
+    draws: int = 2_000,
+) -> Estimate:
+    if not pairs:
+        return Estimate(None, None, None, 0, unit, method)
+
+    def ratio(sample: Sequence[tuple[float, float]]) -> float:
+        return numerator_scale * sum(pair[0] for pair in sample) / sum(
+            pair[1] for pair in sample
+        )
+
+    point = ratio(pairs)
+    if len(pairs) == 1:
+        return Estimate(point, None, None, 1, unit, "single-block-no-CI")
+    rng = random.Random(seed)
+    samples = [ratio([rng.choice(pairs) for _ in pairs]) for _ in range(draws)]
+    return Estimate(
+        point,
+        quantile(samples, 0.025),
+        quantile(samples, 0.975),
+        len(pairs),
+        unit,
+        method,
+    )

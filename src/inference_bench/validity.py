@@ -4,11 +4,15 @@ import math
 
 from .models import InferenceResult, ValidityAssessment
 
-MIN_DECODE_PROXY_SECONDS = 1e-3
+MIN_DECODE_PROXY_SECONDS = 1e-2
+MIN_DECODE_PROXY_TOKENS = 8
+MIN_DECODE_PROXY_CONTENT_EVENTS = 2
 EXTREME_DECODE_PROXY_TOKENS_PER_SECOND = 10_000.0
 
 
-def assess_result(result: InferenceResult) -> ValidityAssessment:
+def assess_result(
+    result: InferenceResult, *, expected_rejection: bool = False
+) -> ValidityAssessment:
     """Classify one result without deleting or mutating the observation.
 
     Eligibility is metric-specific. For example, a success with missing usage can still support
@@ -18,6 +22,7 @@ def assess_result(result: InferenceResult) -> ValidityAssessment:
     invalid: list[str] = []
     censored: list[str] = []
     anomalous: list[str] = []
+    informational: list[str] = []
 
     numeric = {
         "total_seconds": result.total_seconds,
@@ -63,7 +68,15 @@ def assess_result(result: InferenceResult) -> ValidityAssessment:
             invalid.append("cache_read_input_tokens_exceeds_input_tokens")
 
     success = result.status == "success"
-    if not success:
+    expected_4xx = bool(
+        expected_rejection
+        and result.http_status is not None
+        and 400 <= result.http_status < 500
+        and result.http_status not in {402, 429}
+    )
+    if expected_4xx:
+        informational.append("expected_validation_rejection_observed")
+    if not success and not expected_4xx:
         censored.append(f"request_{result.status}")
     if success and not result.usage_complete:
         censored.append("provider_usage_missing")
@@ -73,17 +86,19 @@ def assess_result(result: InferenceResult) -> ValidityAssessment:
     proxy_duration: float | None = None
     if result.ttft_seconds is not None:
         proxy_duration = result.total_seconds - result.ttft_seconds
-    if success and (result.output_tokens or 0) > 1:
+    if success and (result.output_tokens or 0) >= MIN_DECODE_PROXY_TOKENS:
         if proxy_duration is None:
             censored.append("decode_proxy_missing_ttft")
+        elif result.content_event_count < MIN_DECODE_PROXY_CONTENT_EVENTS:
+            censored.append("decode_proxy_insufficient_content_events")
         elif proxy_duration < MIN_DECODE_PROXY_SECONDS:
             invalid.append("decode_proxy_near_zero_with_multiple_tokens")
         elif result.output_tokens is not None:
             proxy_tps = result.output_tokens / proxy_duration
             if proxy_tps > EXTREME_DECODE_PROXY_TOKENS_PER_SECOND:
                 anomalous.append("decode_proxy_extreme_tokens_per_second")
-    else:
-        censored.append("decode_proxy_requires_multiple_output_tokens")
+    elif success:
+        censored.append("decode_proxy_requires_meaningful_output_tokens")
 
     # SSE event spans are retained for transport diagnostics only. Event count does not affect the
     # request-minus-TTFT proxy: fewer than two events simply makes the unused event-span undefined.
@@ -97,7 +112,7 @@ def assess_result(result: InferenceResult) -> ValidityAssessment:
     else:
         classification = "valid"
 
-    latency_eligible = success and not any(
+    latency_eligible = (success or expected_4xx) and not any(
         reason
         for reason in invalid
         if reason.startswith(("total_", "ttft_", "headers_", "time_to_headers_"))
@@ -113,15 +128,17 @@ def assess_result(result: InferenceResult) -> ValidityAssessment:
     decode_eligible = (
         latency_eligible
         and usage_eligible
-        and (result.output_tokens or 0) > 1
+        and (result.output_tokens or 0) >= MIN_DECODE_PROXY_TOKENS
+        and result.content_event_count >= MIN_DECODE_PROXY_CONTENT_EVENTS
         and proxy_duration is not None
         and proxy_duration >= MIN_DECODE_PROXY_SECONDS
         and "decode_proxy_near_zero_with_multiple_tokens" not in invalid
+        and "decode_proxy_extreme_tokens_per_second" not in anomalous
     )
     quality_eligible = success and not invalid
     return ValidityAssessment(
         classification=classification,  # type: ignore[arg-type]
-        reasons=tuple(dict.fromkeys([*invalid, *censored, *anomalous])),
+        reasons=tuple(dict.fromkeys([*invalid, *censored, *anomalous, *informational])),
         latency_eligible=latency_eligible,
         usage_eligible=usage_eligible,
         decode_eligible=decode_eligible,
@@ -130,7 +147,7 @@ def assess_result(result: InferenceResult) -> ValidityAssessment:
 
 
 def decode_proxy_tokens_per_second(result: InferenceResult) -> float | None:
-    """Comparable per-request proxy: completion_tokens / (request_seconds - TTFT).
+    """Comparable billed-token proxy: completion_tokens / (request_seconds - TTFT).
 
     This is client-observed and includes transport/drain overhead. It is not direct server decode
     compute. Event-span timing is deliberately not used because SSE events can batch many tokens.

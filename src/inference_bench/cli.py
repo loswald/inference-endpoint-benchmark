@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from .config import CampaignConfig, load_config
-from .engine import BenchmarkEngine
+from .engine import BenchmarkEngine, PaymentRequiredLatched
 from .ledger import BudgetExceeded, Ledger, TimeLimitReached
 from .load import run_aimd, run_soak
 from .models import RequestSpec, canonical_json
@@ -25,6 +25,7 @@ async def _run_static(
     static_rps = float(config.suites.get("static", {}).get("offered_rps", 1.0))
     semaphore = asyncio.Semaphore(config.concurrency)
     stop = asyncio.Event()
+    executing_tasks: set[asyncio.Task[object]] = set()
     loop = asyncio.get_running_loop()
     started = loop.time()
 
@@ -36,14 +37,42 @@ async def _run_static(
         async with semaphore:
             if stop.is_set():
                 return
+            current = asyncio.current_task()
+            if current is not None:
+                executing_tasks.add(current)
             try:
-                await engine.execute(spec, queue_delay_seconds=loop.time() - arrived)
-            except (BudgetExceeded, TimeLimitReached):
+                result = await engine.execute(spec, queue_delay_seconds=loop.time() - arrived)
+            except (BudgetExceeded, TimeLimitReached, PaymentRequiredLatched):
+                stop.set()
+                return
+            finally:
+                if current is not None:
+                    executing_tasks.discard(current)
+            if result is not None and result.http_status == 402:
                 stop.set()
 
     tasks = [asyncio.create_task(one(index, spec)) for index, spec in enumerate(specs)]
     if tasks:
-        await asyncio.gather(*tasks)
+        all_done = asyncio.gather(*tasks, return_exceptions=True)
+        stop_waiter = asyncio.create_task(stop.wait())
+        done, _ = await asyncio.wait(
+            {all_done, stop_waiter}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if stop_waiter in done and stop.is_set() and not all_done.done():
+            for task in tasks:
+                if not task.done() and task not in executing_tasks:
+                    task.cancel()
+        outcomes = await all_done
+        stop_waiter.cancel()
+        await asyncio.gather(stop_waiter, return_exceptions=True)
+        unexpected = [
+            outcome
+            for outcome in outcomes
+            if isinstance(outcome, BaseException)
+            and not isinstance(outcome, asyncio.CancelledError)
+        ]
+        if unexpected:
+            raise unexpected[0]
     return stop.is_set()
 
 
@@ -88,7 +117,7 @@ async def run_campaign(config: CampaignConfig, output: Path) -> None:
                         ledger.record_event("campaign_terminal", {"reason": "launch_guard"})
                         return
         ledger.record_event("campaign_terminal", {"reason": "plan_completed"})
-    except (BudgetExceeded, TimeLimitReached) as exc:
+    except (BudgetExceeded, TimeLimitReached, PaymentRequiredLatched) as exc:
         ledger.record_event(
             "campaign_terminal", {"reason": type(exc).__name__, "message": str(exc)}
         )

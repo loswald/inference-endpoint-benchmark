@@ -2,13 +2,13 @@
 
 A small, provider-neutral harness for measuring hosted language-model endpoints under realistic
 load. It records request-level latency and token usage, maps context/output/capability boundaries,
-runs open-loop AIMD saturation tests and sustained soaks, scores deterministic quality tasks, and
-builds matched-cell reports with uncertainty intervals.
+runs open-loop AIMD saturation tests and fixed-rate soak blocks, scores deterministic low-load
+quality tasks, and builds matched-cell reports with uncertainty intervals.
 
 The harness is designed to answer engineering questions—not to manufacture a leaderboard:
 
 - What request rate and token throughput did this exact route sustain for this exact workload?
-- How do time to first token, decode speed, reliability, and quality change near saturation?
+- How do time to first token, decode speed, and reliability change across offered load?
 - Which documented capabilities work through the tested API surface?
 - Where do context and requested-output limits accept, degrade, or reject?
 - Which conclusions are measured, censored, anomalous, or still untested?
@@ -65,16 +65,20 @@ The standard workload shapes are:
 | `short_long` | 256 tokens | route-relative, capped by config | output TPM / decoding |
 | `mixed` | deterministic heterogeneous mix | mixed | production-like contention |
 
-Actual provider-reported token usage—not prompt estimates—drives settled cost and effective TPM.
+Provider-reported token usage drives usage-based settled cost and effective TPM when it is complete.
+Missing usage is conservatively costed and censored from TPM; it is never converted to zero tokens.
 
 ## Scientific boundaries
 
 - Arrivals are open-loop: scheduled arrival time is independent of completion time. Queue delay is
   retained, so coordinated omission cannot hide overload.
 - AIMD epochs locate a capacity knee. They are not called “sustainable” by themselves.
-- A fixed-rate sustained claim requires a completed soak and all predeclared health gates.
-- Confidence intervals use independent requests for request metrics and independent epochs/blocks
-  for load metrics. Output tokens are never treated as independent samples.
+- Soak blocks are fixed-rate evidence, not an automatic sustainable-capacity certificate. A
+  sustained claim requires a predeclared endpoint × workload rate, adequate independent blocks,
+  complete usage, and all health gates; the report generator does not make that claim for you.
+- Confidence intervals use requests for request metrics and epochs/blocks for load metrics. Output
+  tokens are never treated as independent samples; load intervals carry an explicit block-level
+  exchangeability assumption.
 - p99 is withheld below 1,000 eligible observations.
 - The client cannot directly observe server-side prefill compute. `TTFT - transport baseline` is at
   most an end-to-end prefill proxy and is labelled that way.
@@ -102,6 +106,15 @@ be regenerated from SQLite. See [DATA-HANDLING.md](DATA-HANDLING.md).
 Reports compare matched endpoint × suite × workload cells only. Figures carry units, sample counts,
 and 95% intervals. Capacity trajectories use route-specific small multiples. The report generator
 does not create heterogeneous global scores or rank endpoints tested on different workloads.
+
+The generated package is Markdown, CSV, JSON/JSONL, and PNG. It includes a reproducibility manifest
+with artifact hashes and the software identifiers available to the reporting process. It does not
+build a PDF, certify publication readiness, or replace a human claim/privacy/secret review.
+
+`campaign.public.json` is deliberately sanitized through an explicit allowlist. It preserves route
+identity hashes but omits arbitrary request defaults, header values, authentication transport
+details, URL queries/credentials, and unknown extension fields. Keep the private source campaign
+configuration separately if exact operational reproduction requires omitted fields.
 
 ## Development
 

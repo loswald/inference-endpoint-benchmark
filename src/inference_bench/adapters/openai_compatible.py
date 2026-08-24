@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import copy
 import hashlib
 import json
 import os
@@ -60,11 +62,11 @@ def _status(http_status: int) -> str:
 
 def build_payload(route: RouteConfig, request: RequestSpec) -> dict[str, Any]:
     payload: dict[str, Any] = {
+        **copy.deepcopy(route.request_defaults),
         "model": route.model,
         "messages": materialize_messages(request),
         "stream": request.stream,
         "max_tokens": request.max_output_tokens,
-        **route.request_defaults,
     }
     for key, value in (
         ("temperature", request.temperature),
@@ -80,6 +82,14 @@ def build_payload(route: RouteConfig, request: RequestSpec) -> dict[str, Any]:
         payload["stop"] = list(request.stop)
     if request.tools:
         payload["tools"] = list(request.tools)
+    if request.stream:
+        # OpenAI-compatible providers commonly require this flag to return the final usage chunk.
+        # A route can add other stream options, but cannot replace the measured stream setting.
+        options = payload.setdefault("stream_options", {"include_usage": True})
+        if isinstance(options, dict):
+            options.setdefault("include_usage", True)
+    else:
+        payload.pop("stream_options", None)
     if route.adapter == "openrouter":
         # Exact serving identity is mandatory: one upstream, no fallback.
         payload["provider"] = {
@@ -107,10 +117,13 @@ class OpenAICompatibleAdapter:
         started_utc = _utc_now()
         started = time.perf_counter()
         try:
-            if request.stream:
-                return await self._stream(route, request, payload, started_utc, started)
-            return await self._single(route, request, payload, started_utc, started)
-        except httpx.TimeoutException:
+            # httpx read timeouts reset after each received chunk.  The outer deadline instead
+            # bounds the full response stream, including a provider that trickles indefinitely.
+            async with asyncio.timeout(request.timeout_seconds):
+                if request.stream:
+                    return await self._stream(route, request, payload, started_utc, started)
+                return await self._single(route, request, payload, started_utc, started)
+        except (TimeoutError, httpx.TimeoutException):
             ended = time.perf_counter()
             return InferenceResult(
                 logical_id=request.logical_id,
@@ -141,47 +154,98 @@ class OpenAICompatibleAdapter:
         started_utc: str,
         started: float,
     ) -> InferenceResult:
-        response = await self.client.post(
+        # Use streaming transport even for a non-streaming JSON body so header arrival is measured
+        # before body drain. `client.post()` eagerly reads the body and would falsely label
+        # time-to-complete as time-to-headers.
+        async with self.client.stream(
+            "POST",
             route.base_url,
             headers=_headers(route),
             json=payload,
             timeout=request.timeout_seconds,
-        )
-        headers_at = time.perf_counter()
-        raw = await response.aread()
-        ended = time.perf_counter()
-        retained = _retained(response.headers)
-        if response.status_code >= 300:
-            return self._error(request, response, raw, started_utc, started, headers_at, ended)
-        data = json.loads(raw)
-        choice = (data.get("choices") or [{}])[0]
-        message = choice.get("message") or {}
-        usage = data.get("usage") or {}
-        prompt_details = usage.get("prompt_tokens_details") or {}
-        return InferenceResult(
-            logical_id=request.logical_id,
-            status="success",
-            http_status=response.status_code,
-            started_at_utc=started_utc,
-            ended_at_utc=_utc_now(),
-            total_seconds=ended - started,
-            time_to_headers_seconds=headers_at - started,
-            ttft_seconds=ended - started,
-            decode_seconds=None,
-            input_tokens=_int_or_none(usage.get("prompt_tokens") or usage.get("input_tokens")),
-            output_tokens=_int_or_none(
-                usage.get("completion_tokens") or usage.get("output_tokens")
-            ),
-            cache_read_input_tokens=_int_or_none(
-                prompt_details.get("cached_tokens") or usage.get("cache_read_input_tokens")
-            ),
-            cache_state=str(request.metadata.get("cache_state", "uncontrolled")),  # type: ignore[arg-type]
-            finish_reason=choice.get("finish_reason"),
-            output_text=str(message.get("content") or ""),
-            tool_calls=tuple(message.get("tool_calls") or ()),
-            provider_request_id=retained.get("x-request-id") or retained.get("request-id"),
-            retained_headers=retained,
-        )
+        ) as response:
+            headers_at = time.perf_counter()
+            raw = await response.aread()
+            ended = time.perf_counter()
+            retained = _retained(response.headers)
+            if response.status_code >= 300:
+                return self._error(
+                    request, response, raw, started_utc, started, headers_at, ended
+                )
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                return self._protocol_error(
+                    request,
+                    response,
+                    raw,
+                    started_utc,
+                    started,
+                    headers_at,
+                    ended,
+                    "invalid_json_success_body",
+                )
+            if not isinstance(data, dict):
+                return self._protocol_error(
+                    request,
+                    response,
+                    raw,
+                    started_utc,
+                    started,
+                    headers_at,
+                    ended,
+                    "non_object_json_success_body",
+                )
+            choices = data.get("choices")
+            if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+                return self._protocol_error(
+                    request,
+                    response,
+                    raw,
+                    started_utc,
+                    started,
+                    headers_at,
+                    ended,
+                    "missing_or_invalid_choice",
+                )
+            choice = choices[0]
+            message = choice.get("message") or {}
+            if not isinstance(message, dict):
+                return self._protocol_error(
+                    request,
+                    response,
+                    raw,
+                    started_utc,
+                    started,
+                    headers_at,
+                    ended,
+                    "invalid_choice_message",
+                )
+            usage = data.get("usage") or {}
+            if not isinstance(usage, dict):
+                usage = {}
+            return InferenceResult(
+                logical_id=request.logical_id,
+                status="success",
+                http_status=response.status_code,
+                started_at_utc=started_utc,
+                ended_at_utc=_utc_now(),
+                total_seconds=ended - started,
+                time_to_headers_seconds=headers_at - started,
+                # Non-streaming has no first-token observation.
+                ttft_seconds=None,
+                decode_seconds=None,
+                input_tokens=_usage_count(usage, "prompt_tokens", "input_tokens"),
+                output_tokens=_usage_count(usage, "completion_tokens", "output_tokens"),
+                cache_read_input_tokens=_cache_read_count(usage),
+                cache_state=str(request.metadata.get("cache_state", "uncontrolled")),  # type: ignore[arg-type]
+                finish_reason=choice.get("finish_reason"),
+                output_text=str(message.get("content") or ""),
+                tool_calls=tuple(message.get("tool_calls") or ()),
+                provider_request_id=retained.get("x-request-id")
+                or retained.get("request-id"),
+                retained_headers=retained,
+            )
 
     async def _stream(
         self,
@@ -195,6 +259,7 @@ class OpenAICompatibleAdapter:
         tool_calls: list[dict[str, Any]] = []
         event_offsets: list[float] = []
         usage: dict[str, Any] = {}
+        malformed_events: list[str] = []
         finish_reason: str | None = None
         first_content_at: float | None = None
         headers_at: float | None = None
@@ -220,13 +285,20 @@ class OpenAICompatibleAdapter:
                 try:
                     event = json.loads(data_text)
                 except json.JSONDecodeError:
+                    malformed_events.append(data_text)
                     continue
-                if event.get("usage"):
+                if not isinstance(event, dict):
+                    malformed_events.append(data_text)
+                    continue
+                if isinstance(event.get("usage"), dict):
                     usage = event["usage"]
                 choices = event.get("choices") or []
-                if not choices:
+                if not isinstance(choices, list) or not choices:
                     continue
                 choice = choices[0]
+                if not isinstance(choice, dict):
+                    malformed_events.append(data_text)
+                    continue
                 finish_reason = choice.get("finish_reason") or finish_reason
                 delta = choice.get("delta") or {}
                 piece = delta.get("content")
@@ -246,6 +318,33 @@ class OpenAICompatibleAdapter:
         # arbitrary token counts per event; that produced fake six-figure token/s measurements.
         # The validity layer derives the comparable request proxy from total_seconds - TTFT.
         decode_proxy = None if ttft is None else max(0.0, (ended - started) - ttft)
+        if malformed_events:
+            malformed_digest = hashlib.sha256(
+                "\n".join(malformed_events).encode("utf-8", errors="replace")
+            ).hexdigest()
+            return InferenceResult(
+                logical_id=request.logical_id,
+                status="server_error",
+                http_status=response.status_code,
+                started_at_utc=started_utc,
+                ended_at_utc=_utc_now(),
+                total_seconds=ended - started,
+                time_to_headers_seconds=(
+                    None if headers_at is None else headers_at - started
+                ),
+                ttft_seconds=ttft,
+                decode_seconds=decode_proxy,
+                output_event_offsets_seconds=tuple(event_offsets),
+                input_tokens=_usage_count(usage, "prompt_tokens", "input_tokens"),
+                output_tokens=_usage_count(usage, "completion_tokens", "output_tokens"),
+                cache_read_input_tokens=_cache_read_count(usage),
+                finish_reason=finish_reason,
+                provider_request_id=retained.get("x-request-id")
+                or retained.get("request-id"),
+                retained_headers=retained,
+                error_kind="malformed_sse_json_event",
+                error_body_sha256=malformed_digest,
+            )
         return InferenceResult(
             logical_id=request.logical_id,
             status="success",
@@ -257,14 +356,9 @@ class OpenAICompatibleAdapter:
             ttft_seconds=ttft,
             decode_seconds=decode_proxy,
             output_event_offsets_seconds=tuple(event_offsets),
-            input_tokens=_int_or_none(usage.get("prompt_tokens") or usage.get("input_tokens")),
-            output_tokens=_int_or_none(
-                usage.get("completion_tokens") or usage.get("output_tokens")
-            ),
-            cache_read_input_tokens=_int_or_none(
-                (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
-                or usage.get("cache_read_input_tokens")
-            ),
+            input_tokens=_usage_count(usage, "prompt_tokens", "input_tokens"),
+            output_tokens=_usage_count(usage, "completion_tokens", "output_tokens"),
+            cache_read_input_tokens=_cache_read_count(usage),
             cache_state=str(request.metadata.get("cache_state", "uncontrolled")),  # type: ignore[arg-type]
             finish_reason=finish_reason,
             output_text="".join(content),
@@ -298,6 +392,32 @@ class OpenAICompatibleAdapter:
             error_body_sha256=hashlib.sha256(raw).hexdigest(),
         )
 
+    @staticmethod
+    def _protocol_error(
+        request: RequestSpec,
+        response: httpx.Response,
+        raw: bytes,
+        started_utc: str,
+        started: float,
+        headers_at: float,
+        ended: float,
+        error_kind: str,
+    ) -> InferenceResult:
+        retained = _retained(response.headers)
+        return InferenceResult(
+            logical_id=request.logical_id,
+            status="server_error",
+            http_status=response.status_code,
+            started_at_utc=started_utc,
+            ended_at_utc=_utc_now(),
+            total_seconds=ended - started,
+            time_to_headers_seconds=headers_at - started,
+            provider_request_id=retained.get("x-request-id") or retained.get("request-id"),
+            retained_headers=retained,
+            error_kind=error_kind,
+            error_body_sha256=hashlib.sha256(raw).hexdigest(),
+        )
+
 
 def _int_or_none(value: Any) -> int | None:
     if value is None or isinstance(value, bool):
@@ -306,3 +426,19 @@ def _int_or_none(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _usage_count(usage: dict[str, Any], *keys: str) -> int | None:
+    """Return the first explicitly reported non-null count, preserving a reported zero."""
+    for key in keys:
+        if key in usage and usage[key] is not None:
+            return _int_or_none(usage[key])
+    return None
+
+
+def _cache_read_count(usage: dict[str, Any]) -> int | None:
+    """Keep an explicit zero cache read distinct from an unreported/unknown cache state."""
+    details = usage.get("prompt_tokens_details")
+    if isinstance(details, dict) and details.get("cached_tokens") is not None:
+        return _int_or_none(details["cached_tokens"])
+    return _usage_count(usage, "cache_read_input_tokens")

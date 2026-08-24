@@ -1,13 +1,113 @@
 from __future__ import annotations
 
 import copy
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import yaml
 
 from .models import AuthConfig, RouteConfig, sha256_json
+
+_PUBLIC_CAPABILITY_KEYS = {
+    "caching",
+    "documentation_checked_utc",
+    "json_schema",
+    "logprobs",
+    "parallel_tool_calls",
+    "seed",
+    "stop",
+    "streaming",
+    "structured_output",
+    "tool_calling",
+    "tools",
+    "vision",
+}
+_PUBLIC_SUITE_KEYS = {
+    "static": {"enabled", "offered_rps"},
+    "latency": {"enabled", "repeats", "shapes"},
+    "capability": {
+        "enabled",
+        "temperatures",
+        "top_ps",
+    },
+    "interactions": {
+        "enabled",
+        "temperatures",
+        "top_ps",
+        "stream",
+        "output_tokens",
+    },
+    "context": {"enabled", "percentages"},
+    "output": {"enabled", "fallback_max_output_tokens"},
+    "quality": {"enabled", "repeats"},
+    "cache": {"enabled", "repeats", "prefix_tokens"},
+    "aimd": {
+        "enabled",
+        "shapes",
+        "initial_rps",
+        "additive_rps",
+        "multiplicative_decrease",
+        "epochs",
+        "epoch_seconds",
+        "concurrency",
+        "baseline_rps",
+    },
+    "soak": {
+        "enabled",
+        "shapes",
+        "rate_rps",
+        "rate_rps_by_route",
+        "rate_rps_by_route_shape",
+        "blocks",
+        "block_seconds",
+        "concurrency",
+        "baseline_rps",
+    },
+}
+
+
+def _safe_public_url(value: str) -> str:
+    """Remove credentials, queries, and fragments from an endpoint descriptor."""
+    parsed = urlsplit(value)
+    if not parsed.scheme or not parsed.netloc:
+        return value
+    hostname = parsed.hostname or ""
+    try:
+        parsed_port = parsed.port
+    except ValueError:
+        parsed_port = None
+    port = f":{parsed_port}" if parsed_port is not None else ""
+    return urlunsplit((parsed.scheme, hostname + port, parsed.path, "", ""))
+
+
+def _safe_capabilities(values: dict[str, bool | str]) -> dict[str, bool | str]:
+    public: dict[str, bool | str] = {}
+    for key in sorted(_PUBLIC_CAPABILITY_KEYS & values.keys()):
+        value = values[key]
+        if isinstance(value, bool):
+            public[key] = value
+        elif key == "documentation_checked_utc":
+            public[key] = str(value)
+        elif str(value).lower() in {"supported", "unsupported", "unknown", "partial"}:
+            public[key] = str(value).lower()
+    return public
+
+
+def _safe_suites(values: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    public: dict[str, dict[str, Any]] = {}
+    for suite, allowed in _PUBLIC_SUITE_KEYS.items():
+        config = values.get(suite)
+        if not isinstance(config, dict):
+            continue
+        public[suite] = {
+            key: copy.deepcopy(config[key])
+            for key in sorted(allowed & config.keys())
+            if isinstance(config[key], (bool, int, float, str, list, tuple, dict))
+        }
+    return public
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +127,15 @@ class CampaignConfig:
     def __post_init__(self) -> None:
         if not self.name:
             raise ValueError("campaign.name is required")
+        numeric = (
+            self.max_wall_seconds,
+            self.max_cost_usd,
+            self.launch_reserve_seconds,
+            self.launch_reserve_usd,
+            self.input_token_reservation_factor,
+        )
+        if any(not math.isfinite(value) for value in numeric):
+            raise ValueError("campaign time, cost, reserve, and factor values must be finite")
         if self.max_wall_seconds <= 0 or self.max_cost_usd <= 0:
             raise ValueError("positive time and cost caps are mandatory")
         if self.launch_reserve_seconds < 0 or self.launch_reserve_usd < 0:
@@ -41,10 +150,37 @@ class CampaignConfig:
             raise ValueError("input_token_reservation_factor must be at least 1")
         if len({route.id for route in self.routes}) != len(self.routes):
             raise ValueError("route IDs must be unique")
+        if any(
+            not isinstance(name, str) or not isinstance(value, dict)
+            for name, value in self.suites.items()
+        ):
+            raise ValueError("suites must map names to configuration mappings")
 
     @property
     def identity_hash(self) -> str:
-        return sha256_json(self.public_dict())
+        # Public serialization intentionally omits operational fields that can contain secrets or
+        # private account identifiers. The identity still binds their effects through each route
+        # identity hash and binds the complete suite configuration without publishing it.
+        return sha256_json(
+            {
+                "campaign": {
+                    "name": self.name,
+                    "seed": self.seed,
+                    "max_wall_seconds": self.max_wall_seconds,
+                    "max_cost_usd": self.max_cost_usd,
+                    "launch_reserve_seconds": self.launch_reserve_seconds,
+                    "launch_reserve_usd": self.launch_reserve_usd,
+                    "concurrency": self.concurrency,
+                    "retries": self.retries,
+                    "input_token_reservation_factor": self.input_token_reservation_factor,
+                },
+                "routes": [
+                    {"id": route.id, "identity_hash": route.identity_hash}
+                    for route in self.routes
+                ],
+                "suites": self.suites,
+            }
+        )
 
     def public_dict(self) -> dict[str, Any]:
         return {
@@ -65,11 +201,9 @@ class CampaignConfig:
                     "provider": route.provider,
                     "adapter": route.adapter,
                     "model": route.model,
-                    "base_url": route.base_url,
+                    "base_url": _safe_public_url(route.base_url),
                     "auth": {
                         "env": route.auth.env,
-                        "header": route.auth.header,
-                        "prefix": route.auth.prefix,
                     },
                     "region": route.region,
                     "api_family": route.api_family,
@@ -81,14 +215,36 @@ class CampaignConfig:
                     "input_usd_per_million": route.input_usd_per_million,
                     "output_usd_per_million": route.output_usd_per_million,
                     "cached_input_usd_per_million": route.cached_input_usd_per_million,
-                    "capabilities": route.capabilities,
-                    "extra_headers": route.extra_headers,
-                    "request_defaults": route.request_defaults,
+                    "capabilities": _safe_capabilities(route.capabilities),
+                    "omitted_operational_fields": sorted(
+                        name
+                        for name, present in {
+                            "auth_transport": bool(route.auth.header or route.auth.prefix),
+                            "extra_headers": bool(route.extra_headers),
+                            "request_defaults": bool(route.request_defaults),
+                            "base_url_query_or_credentials": (
+                                _safe_public_url(route.base_url) != route.base_url
+                            ),
+                        }.items()
+                        if present
+                    ),
                     "identity_hash": route.identity_hash,
                 }
                 for route in self.routes
             ],
-            "suites": copy.deepcopy(self.suites),
+            "suites": _safe_suites(self.suites),
+            "public_serialization": {
+                "schema_version": "campaign-public/v1",
+                "policy": "explicit-allowlist",
+                "note": (
+                    "Operational auth transport, arbitrary headers, request defaults, URL query "
+                    "parameters, and unknown extension fields are intentionally omitted."
+                ),
+                "hash_commitment_warning": (
+                    "Route identity hashes still commit to omitted operational fields. Never put "
+                    "credentials or low-entropy private values in those fields."
+                ),
+            },
         }
 
 

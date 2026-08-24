@@ -2,8 +2,36 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass, field
 from typing import Any, Literal
+
+# These fields define the measured request itself or can multiply its billed output.  Allowing
+# generic route defaults to set them would let configuration silently disagree with the immutable
+# route/request identity and the pre-send cost reservation.
+PROTECTED_REQUEST_DEFAULT_KEYS = frozenset(
+    {
+        "model",
+        "messages",
+        "prompt",
+        "input",
+        "stream",
+        "max_tokens",
+        "max_completion_tokens",
+        "max_output_tokens",
+        "n",
+        "best_of",
+        "provider",
+        "temperature",
+        "top_p",
+        "seed",
+        "stop",
+        "tools",
+        "tool_choice",
+        "response_format",
+        "logprobs",
+    }
+)
 
 
 def canonical_json(value: Any) -> str:
@@ -23,7 +51,7 @@ class AuthConfig:
     def __post_init__(self) -> None:
         if not self.env or not self.env.replace("_", "").isalnum():
             raise ValueError("auth.env must be an environment-variable name")
-        if "\n" in self.header or "\r" in self.header:
+        if any(character in self.header or character in self.prefix for character in "\r\n"):
             raise ValueError("invalid authentication header")
 
 
@@ -57,7 +85,9 @@ class RouteConfig:
             raise ValueError("OpenRouter routes must pin upstream_provider")
         for name in ("context_tokens", "max_output_tokens"):
             value = getattr(self, name)
-            if value is not None and value <= 0:
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value <= 0
+            ):
                 raise ValueError(f"{name} must be positive")
         for name in (
             "input_usd_per_million",
@@ -65,11 +95,46 @@ class RouteConfig:
             "cached_input_usd_per_million",
         ):
             value = getattr(self, name)
-            if value is not None and value < 0:
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value < 0
+            ):
                 raise ValueError(f"{name} must be nonnegative")
         blocked = {"authorization", "api-key", "x-api-key"}
         if any(key.lower() in blocked for key in self.extra_headers):
             raise ValueError("credentials belong in auth, not extra_headers")
+        if any(
+            key.casefold() in {self.auth.header.casefold(), "content-type"}
+            for key in self.extra_headers
+        ):
+            raise ValueError("extra_headers cannot override authentication or content type")
+        if any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in self.extra_headers.items()
+        ):
+            raise ValueError("extra_headers must map strings to strings")
+        if any(not isinstance(key, str) for key in self.request_defaults):
+            raise ValueError("request_defaults keys must be strings")
+        protected = sorted(
+            str(key)
+            for key in self.request_defaults
+            if str(key).lower() in PROTECTED_REQUEST_DEFAULT_KEYS
+        )
+        if protected:
+            raise ValueError(
+                "request_defaults cannot override protected request fields: "
+                + ", ".join(protected)
+            )
+        stream_options = self.request_defaults.get("stream_options")
+        if stream_options is not None and (
+            not isinstance(stream_options, dict)
+            or stream_options.get("include_usage", True) is not True
+        ):
+            raise ValueError(
+                "request_defaults.stream_options must be a mapping with include_usage=true"
+            )
 
     @property
     def identity_hash(self) -> str:
@@ -79,6 +144,10 @@ class RouteConfig:
                 "adapter": self.adapter,
                 "model": self.model,
                 "base_url": self.base_url,
+                "auth_transport": {
+                    "header": self.auth.header,
+                    "prefix": self.auth.prefix,
+                },
                 "region": self.region,
                 "api_family": self.api_family,
                 "api_version": self.api_version,
@@ -90,12 +159,16 @@ class RouteConfig:
                 "output_usd_per_million": self.output_usd_per_million,
                 "cached_input_usd_per_million": self.cached_input_usd_per_million,
                 "capabilities": self.capabilities,
+                "extra_headers": self.extra_headers,
+                "request_defaults": self.request_defaults,
             }
         )
 
     def worst_case_cost(self, input_tokens: int, output_tokens: int) -> float:
         if self.input_usd_per_million is None or self.output_usd_per_million is None:
             raise ValueError(f"route {self.id} has incomplete pricing")
+        if input_tokens < 0 or output_tokens < 0:
+            raise ValueError("token counts must be nonnegative")
         return (
             input_tokens * self.input_usd_per_million + output_tokens * self.output_usd_per_million
         ) / 1_000_000
@@ -105,6 +178,8 @@ class RouteConfig:
     ) -> float:
         if self.input_usd_per_million is None or self.output_usd_per_million is None:
             raise ValueError(f"route {self.id} has incomplete pricing")
+        if input_tokens < 0 or output_tokens < 0 or cache_read_input_tokens < 0:
+            raise ValueError("token counts must be nonnegative")
         cached = min(max(0, cache_read_input_tokens), input_tokens)
         uncached = input_tokens - cached
         cached_price = (
@@ -143,9 +218,16 @@ class RequestSpec:
     def __post_init__(self) -> None:
         if not self.logical_id or not self.route_id or not self.suite or not self.cell_id:
             raise ValueError("request identity fields are required")
-        if self.planned_input_tokens < 0 or self.max_output_tokens <= 0:
+        if (
+            isinstance(self.planned_input_tokens, bool)
+            or not isinstance(self.planned_input_tokens, int)
+            or isinstance(self.max_output_tokens, bool)
+            or not isinstance(self.max_output_tokens, int)
+            or self.planned_input_tokens < 0
+            or self.max_output_tokens <= 0
+        ):
             raise ValueError("token counts must be nonnegative/positive")
-        if self.timeout_seconds <= 0:
+        if not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
 
     def payload_material(self) -> dict[str, Any]:
@@ -209,7 +291,12 @@ class InferenceResult:
     error_kind: str | None = None
     error_body_sha256: str | None = None
     cost_usd: float | None = None
-    cost_basis: Literal["provider_usage", "reserved_upper_bound", "unpriced"] = "unpriced"
+    cost_basis: Literal[
+        "provider_usage",
+        "provider_usage_cache_unknown_upper_bound",
+        "reserved_upper_bound",
+        "unpriced",
+    ] = "unpriced"
     queue_delay_seconds: float = 0.0
 
     @property

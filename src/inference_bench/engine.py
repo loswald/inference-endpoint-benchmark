@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import math
 import random
+import time
 from datetime import UTC, datetime
 from typing import Any
 
@@ -28,12 +29,21 @@ def deterministic_request_id(spec: RequestSpec, attempt_index: int) -> str:
     return "req_" + hashlib.sha256(material.encode()).hexdigest()[:32]
 
 
+class PaymentRequiredLatched(RuntimeError):
+    """Raised after one HTTP 402 so the campaign cannot launch additional provider traffic."""
+
+
 class BenchmarkEngine:
     def __init__(self, config: CampaignConfig, ledger: Ledger) -> None:
         self.config = config
         self.ledger = ledger
         self.routes = {route.id: route for route in config.routes}
         self.adapters: dict[str, Any] = {}
+        # The latch is durable across process restarts; a prior 402 is never forgotten merely
+        # because the runner was resumed.
+        self.payment_required_latched = any(
+            row.get("http_status") == 402 for row in self.ledger.rows()
+        )
 
     async def close(self) -> None:
         for adapter in self.adapters.values():
@@ -60,6 +70,8 @@ class BenchmarkEngine:
         scheduled_at_utc: str | None = None,
         queue_delay_seconds: float = 0.0,
     ) -> InferenceResult | None:
+        if self.payment_required_latched:
+            raise PaymentRequiredLatched("HTTP 402 latch is active; no further sends are allowed")
         route = self.routes[spec.route_id]
         existing = self.ledger.attempts_for_logical(spec.logical_id)
         if any(row["state"] == "unknown" for row in existing):
@@ -72,6 +84,10 @@ class BenchmarkEngine:
 
         last: InferenceResult | None = None
         for attempt in range(start_attempt, self.config.retries + 2):
+            if self.payment_required_latched:
+                raise PaymentRequiredLatched(
+                    "HTTP 402 latch is active; no further retries are allowed"
+                )
             self.check_time_guard(spec.timeout_seconds)
             reserved_input_tokens = math.ceil(
                 spec.planned_input_tokens * self.config.input_token_reservation_factor
@@ -91,8 +107,27 @@ class BenchmarkEngine:
             if not claimed:
                 continue
             try:
-                adapter = self.adapters.setdefault(route.adapter, adapter_for(route.adapter))
-                result = await adapter.infer(route, spec)
+                # Do not use dict.setdefault(adapter_for(...)): its eager default expression would
+                # allocate a fresh AsyncClient on every request and leak the unused clients.
+                adapter = self.adapters.get(route.adapter)
+                if adapter is None:
+                    adapter = adapter_for(route.adapter)
+                    self.adapters[route.adapter] = adapter
+                adapter_started_utc = _utc_now()
+                adapter_started = time.perf_counter()
+                try:
+                    async with asyncio.timeout(spec.timeout_seconds):
+                        result = await adapter.infer(route, spec)
+                except TimeoutError:
+                    result = InferenceResult(
+                        logical_id=spec.logical_id,
+                        status="timeout",
+                        http_status=None,
+                        started_at_utc=adapter_started_utc,
+                        ended_at_utc=_utc_now(),
+                        total_seconds=time.perf_counter() - adapter_started,
+                        error_kind="hard_request_deadline",
+                    )
             except AdapterUnavailable as exc:
                 now = _utc_now()
                 result = InferenceResult(
@@ -105,20 +140,38 @@ class BenchmarkEngine:
                     error_kind=type(exc).__name__,
                 )
             result.queue_delay_seconds = queue_delay_seconds
-            if result.usage_complete:
+            usage_billable = bool(
+                result.usage_complete
+                and result.input_tokens is not None
+                and result.output_tokens is not None
+                and result.input_tokens >= 0
+                and result.output_tokens >= 0
+                and (
+                    result.cache_read_input_tokens is None
+                    or 0 <= result.cache_read_input_tokens <= result.input_tokens
+                )
+            )
+            if usage_billable:
                 result.cost_usd = route.actual_cost(
                     int(result.input_tokens or 0),
                     int(result.output_tokens or 0),
                     int(result.cache_read_input_tokens or 0),
                 )
-                result.cost_basis = "provider_usage"
+                result.cost_basis = (
+                    "provider_usage_cache_unknown_upper_bound"
+                    if route.cached_input_usd_per_million is not None
+                    and result.cache_read_input_tokens is None
+                    else "provider_usage"
+                )
             else:
                 # Failed and usage-incomplete calls can still be billed. Settle the conservative
                 # reservation instead of pretending they cost zero.
                 result.cost_usd = reservation
                 result.cost_basis = "reserved_upper_bound"
             result.cache_state = str(spec.metadata.get("cache_state", "uncontrolled"))  # type: ignore[assignment]
-            validity = assess_result(result)
+            validity = assess_result(
+                result, expected_rejection=bool(spec.metadata.get("expected_rejection"))
+            )
             quality_score, diagnostics = score_result(spec, result)
             self.ledger.finish(
                 request_id=request_id,
@@ -128,6 +181,14 @@ class BenchmarkEngine:
                 quality_diagnostics=diagnostics,
             )
             last = result
+            if result.http_status == 402:
+                if not self.payment_required_latched:
+                    self.payment_required_latched = True
+                    self.ledger.record_event(
+                        "http_402_latched",
+                        {"request_id": request_id, "route_id": route.id},
+                    )
+                break
             if result.status not in {"rate_limited", "server_error", "timeout", "transport_error"}:
                 break
             if attempt <= self.config.retries:

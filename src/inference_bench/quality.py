@@ -31,8 +31,8 @@ def score_result(spec: RequestSpec, result: InferenceResult) -> tuple[float | No
     elif scorer == "tool_city_reykjavik":
         serialized = json.dumps(result.tool_calls, ensure_ascii=False).lower()
         score = float("lookup_weather" in serialized and "reyk" in serialized)
-    elif scorer == "contains_white":
-        score = float("white" in text.lower())
+    elif scorer == "exact_blue":
+        score = float(text.casefold().rstrip(".") == "blue")
     elif scorer == "context_markers":
         nonce = str(spec.metadata["nonce"])
         score = float(all(f"{nonce}-{letter}" in text for letter in "ABC"))

@@ -2,23 +2,41 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import struct
+import zlib
 from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
 from .models import RequestSpec, RouteConfig
 
-# 1x1 RGB PNG. It is intentionally tiny: capability discovery should not conflate image support
-# with payload-size limits. Image-envelope tests belong in a separate configured cell.
-SMALL_PNG_DATA_URI = (
-    "data:image/png;base64,"
-    + base64.b64encode(
-        bytes.fromhex(
-            "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de"
-            "0000000c4944415408d763f8cfc000000301010018dd8db10000000049454e44ae426082"
-        )
-    ).decode()
-)
+
+def _png_chunk(kind: bytes, payload: bytes) -> bytes:
+    return (
+        struct.pack(">I", len(payload))
+        + kind
+        + payload
+        + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+    )
+
+
+def solid_rgb_png_data_uri(
+    *, width: int = 64, height: int = 64, rgb: tuple[int, int, int] = (0, 0, 255)
+) -> str:
+    """Create the exact vision stimulus in code so pixels, prompt, and scorer cannot diverge."""
+    if width <= 0 or height <= 0 or any(channel not in range(256) for channel in rgb):
+        raise ValueError("invalid RGB PNG dimensions or channel")
+    scanline = b"\x00" + bytes(rgb) * width
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+        + _png_chunk(b"IDAT", zlib.compress(scanline * height, level=9))
+        + _png_chunk(b"IEND", b"")
+    )
+    return "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+
+
+VISION_BLUE_PNG_DATA_URI = solid_rgb_png_data_uri()
 
 
 def _words(target_tokens: int, seed: str) -> str:
@@ -164,8 +182,11 @@ def plan_capability(route: RouteConfig, config: dict[str, Any], *, seed: int) ->
         )
     )
     image_content = [
-        {"type": "text", "text": "What is the dominant color? Reply white."},
-        {"type": "image_url", "image_url": {"url": SMALL_PNG_DATA_URI}},
+        {
+            "type": "text",
+            "text": "This image is one solid color. Reply with only its basic color name.",
+        },
+        {"type": "image_url", "image_url": {"url": VISION_BLUE_PNG_DATA_URI}},
     ]
     probes.append(
         replace(
@@ -173,7 +194,7 @@ def plan_capability(route: RouteConfig, config: dict[str, Any], *, seed: int) ->
             logical_id=f"capability:{route.id}:vision",
             cell_id="vision_small_png",
             messages=({"role": "user", "content": image_content},),
-            metadata={"quality": "contains_white"},
+            metadata={"quality": "exact_blue"},
         )
     )
     probes.extend(
