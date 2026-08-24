@@ -18,6 +18,7 @@ def _result(**updates):
         output_event_offsets_seconds=(0.5,),
         input_tokens=100,
         output_tokens=30,
+        reasoning_tokens=0,
     )
     values.update(updates)
     return InferenceResult(**values)
@@ -86,7 +87,7 @@ def test_resolved_but_suspicious_proxy_is_anomalous_and_quarantined() -> None:
     assert not assessment.decode_eligible
 
 
-def test_expected_validation_4xx_is_classified_as_observed_rejection() -> None:
+def test_expected_validation_4xx_is_neutral_censored_observation() -> None:
     result = _result(
         status="client_error",
         http_status=400,
@@ -97,6 +98,22 @@ def test_expected_validation_4xx_is_classified_as_observed_rejection() -> None:
         output_tokens=None,
     )
     assessment = assess_result(result, expected_rejection=True)
-    assert assessment.classification == "valid"
-    assert assessment.latency_eligible
+    assert assessment.classification == "censored"
+    assert not assessment.latency_eligible
     assert not assessment.usage_eligible
+    assert "expected_probe_observed_validation_http_status" in assessment.reasons
+
+
+def test_parameter_acceptance_client_error_is_neutral_not_unexpected() -> None:
+    result = _result(
+        status="client_error",
+        http_status=400,
+        ttft_seconds=None,
+        decode_seconds=None,
+        output_event_offsets_seconds=(),
+        input_tokens=None,
+        output_tokens=None,
+    )
+    assessment = assess_result(result, parameter_acceptance_only=True)
+    assert "parameter_acceptance_probe_observed_client_error" in assessment.reasons
+    assert "unexpected_client_error" not in assessment.reasons

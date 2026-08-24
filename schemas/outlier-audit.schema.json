@@ -4,7 +4,7 @@
   "title": "Inference benchmark request-level outlier audit",
   "type": "object",
   "required": [
-    "request_id", "route_id", "suite", "cell_id", "cache_state",
+    "request_id", "route_id", "suite", "cell_id", "cache_state", "warm_state",
     "audit_class", "reasons", "excluded_estimands", "preserved"
   ],
   "properties": {
@@ -14,6 +14,9 @@
     "cell_id": {"type": "string", "minLength": 1},
     "cache_state": {
       "enum": ["cached_trial", "uncached_trial", "uncontrolled"]
+    },
+    "warm_state": {
+      "enum": ["standalone_diagnostic_only", "uncontrolled_not_paired"]
     },
     "audit_class": {
       "enum": ["invalid", "censored", "anomalous", "valid_extreme"]
@@ -26,4 +29,3 @@
   },
   "additionalProperties": false
 }
-

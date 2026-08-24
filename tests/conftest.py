@@ -20,10 +20,19 @@ def route() -> RouteConfig:
         model="model-a",
         base_url="https://example.invalid/v1/chat/completions",
         auth=AuthConfig(env="TEST_API_KEY"),
+        quota_scope="test-project",
+        region="test-region",
+        api_version="test-v1",
+        model_version="test-model-v1",
         context_tokens=8_192,
         max_output_tokens=2_048,
         input_usd_per_million=1.0,
         output_usd_per_million=2.0,
+        documentation_source_url="https://example.invalid/documentation",
+        pricing_source_url="https://example.invalid/pricing",
+        evidence_retrieved_at_utc="2026-08-24T00:00:00Z",
+        evidence_bundle_sha256="a" * 64,
+        capabilities={"documentation_checked_utc": "2026-08-24T00:00:00Z"},
     )
 
 
@@ -39,5 +48,6 @@ def campaign(route: RouteConfig) -> CampaignConfig:
         concurrency=4,
         retries=1,
         routes=(route,),
-        suites={},
+        client_location="test-client",
+        suites={"latency": {"enabled": True, "repeats": 1, "shapes": ["short_short"]}},
     )

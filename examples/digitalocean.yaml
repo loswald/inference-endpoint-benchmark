@@ -1,44 +1,70 @@
 campaign:
   name: digitalocean-example
   seed: 20260824
-  max_wall_seconds: 3600
+  max_wall_seconds: 21600
   max_cost_usd: 20
   launch_reserve_seconds: 180
   launch_reserve_usd: 2
   concurrency: 16
   retries: 2
   input_token_reservation_factor: 1.5
+  client_location: replace-with-client-region
 
-# Example values are a dated reproducibility snapshot, not a live catalog. Re-check the official
-# DigitalOcean model catalog and pricing before every paid run. Add one route entry per exact model.
+# This file demonstrates the transport shape; it is intentionally not a live catalog or price
+# sheet. Replace every `replace-with-*` identity and both null price fields from dated provider
+# documentation before a paid run. Planning and live preflight refuse these placeholders. Add one
+# route entry per exact documented deployment.
 routes:
-  - id: do-deepseek-v4-flash-0731
+  - id: do-example-route
     provider: digitalocean
     adapter: digitalocean
-    model: deepseek-v4-flash-0731
+    model: replace-with-exact-model-id
     base_url: https://inference.do-ai.run/v1/chat/completions
     auth:
       env: DIGITALOCEAN_API_TOKEN
       header: Authorization
       prefix: "Bearer "
-    region: not_reported
+    region: replace-with-exact-region-or-provider_does_not_expose_region
     api_family: chat_completions
-    api_version: v1
-    model_version: "0731"
-    context_tokens: 1048576
-    max_output_tokens: 1048576
-    input_usd_per_million: 0.080
-    output_usd_per_million: 0.252
+    api_version: replace-with-exact-api-version
+    model_version: replace-with-exact-model-version
+    quota_scope: replace-with-project-or-account-quota-scope
+    context_tokens: null
+    max_output_tokens: null
+    output_limit_field: max_tokens
+    # `omit` is maximally compatible but censors TPM when the provider does not return stream
+    # usage. Change to `try` or `required` only after dated route documentation/testing.
+    stream_usage_mode: omit
+    # Full-stream deadline per request. Raise deliberately for slow 4K+ output or very-long-context
+    # cells; the plan and campaign identity record the exact value.
+    request_timeout_seconds: 900
+    http2: false
+    connection_reuse: true
+    transport_max_connections: 64
+    # Fail-closed placeholders: a plan cannot be built until both values are replaced from a
+    # dated provider price sheet. Never substitute illustrative numbers in a spend guard.
+    input_usd_per_million: null
+    output_usd_per_million: null
     # Set only when the current price sheet publishes a distinct cached-input rate.
     cached_input_usd_per_million: null
+    # Create and retain a canonical evidence bundle containing the exact dated documentation and
+    # price/limit snapshot used to populate this route. The lowercase SHA-256 is identity-bound.
+    documentation_source_url: replace-with-HTTPS-documentation-source-without-query
+    pricing_source_url: replace-with-HTTPS-pricing-source-without-query
+    evidence_retrieved_at_utc: replace-with-UTC-timestamp
+    evidence_bundle_sha256: replace-with-lowercase-SHA256-of-retained-evidence-bundle
     capabilities:
       streaming: true
-      vision: false
-      documentation_checked_utc: "2026-08-24"
+      vision: provider_documentation_must_be_checked
+      documentation_checked_utc: replace-with-UTC-date
 
 suites:
   static:
     offered_rps: 1
+  warmup:
+    enabled: true
+    repeats: 2
+    shapes: [short_short]
   latency:
     enabled: true
     repeats: 10
@@ -62,16 +88,33 @@ suites:
   aimd:
     enabled: true
     shapes: [short_short, long_short, short_long, mixed]
+    # Nominal sustained-load targets. `fail` prevents silent cross-route clipping; use `clip`
+    # deliberately when route-specific realized targets are acceptable in separate matched cells.
+    long_input_tokens: 100000
+    long_input_overflow: fail
+    long_output_tokens: 4096
+    long_output_overflow: fail
     initial_rps: 0.25
     additive_rps: 0.25
     multiplicative_decrease: 0.5
+    bracket_epochs: 8
+    bracket_multiplier: 2
+    max_rps: 32
     epochs: 12
     epoch_seconds: 20
+    baseline_rps: 0.1
+    baseline_samples: 20
     concurrency: 64
   soak:
     enabled: true
     shapes: [short_short, long_short, short_long, mixed]
+    long_input_tokens: 100000
+    long_input_overflow: fail
+    long_output_tokens: 4096
+    long_output_overflow: fail
     rate_rps: 0.25
     blocks: 4
     block_seconds: 30
+    baseline_rps: 0.1
+    baseline_samples: 20
     concurrency: 64

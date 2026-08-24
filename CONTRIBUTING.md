@@ -13,9 +13,12 @@ Before opening a pull request:
 ```bash
 ruff check .
 pytest
-inference-bench plan examples/digitalocean.yaml
+inference-bench plan examples/provider-stubs.yaml
 ```
+
+`inference-bench plan examples/digitalocean.yaml` is a deliberate fail-closed check: the public
+template has null prices and placeholder route metadata, so it must refuse planning until a local
+copy is filled from current provider documentation.
 
 Never commit a live run directory, credential, private prompt/output, provider response body, raw
 header dump, account identifier, or signed URL.
-

@@ -8,6 +8,7 @@ campaign:
   concurrency: 2
   retries: 0
   input_token_reservation_factor: 1.5
+  client_location: replace-with-client-region
 
 # `plan` accepts these routes and labels them placeholders. `run` refuses them before reserving or
 # sending anything. Replace with tested native adapters, exact regions/API families, and real prices.
@@ -21,6 +22,9 @@ routes:
     region: us-east-1
     api_family: converse
     api_version: not_reported
+    model_version: replace-with-exact-model-version
+    quota_scope: replace-with-account-quota-scope
+    transport_max_connections: 2
     input_usd_per_million: 1.0
     output_usd_per_million: 1.0
 

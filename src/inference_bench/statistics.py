@@ -66,6 +66,21 @@ def mean_interval(values: Sequence[float], *, unit: str, seed: int = 1) -> Estim
     return bootstrap_interval(values, statistics.mean, unit=unit, seed=seed)
 
 
+def block_median_interval(values: Sequence[float], *, unit: str, seed: int = 1) -> Estimate:
+    """Percentile bootstrap whose independent sampling units are epochs/blocks."""
+
+    estimate = bootstrap_interval(values, statistics.median, unit=unit, seed=seed)
+    method = "single-block-no-CI" if estimate.n == 1 else "epoch/block-bootstrap-percentile"
+    return Estimate(
+        estimate.estimate,
+        estimate.lower_95,
+        estimate.upper_95,
+        estimate.n,
+        estimate.unit,
+        method,
+    )
+
+
 def quantile_interval(
     values: Sequence[float], probability: float, *, unit: str, seed: int = 1
 ) -> Estimate:
@@ -84,7 +99,9 @@ def wilson_interval(successes: int, total: int, *, unit: str = "proportion") -> 
     denominator = 1 + z * z / total
     centre = (p + z * z / (2 * total)) / denominator
     half = z * math.sqrt(p * (1 - p) / total + z * z / (4 * total * total)) / denominator
-    return Estimate(p, max(0.0, centre - half), min(1.0, centre + half), total, unit, "Wilson-95")
+    lower = 0.0 if successes == 0 else max(0.0, centre - half)
+    upper = 1.0 if successes == total else min(1.0, centre + half)
+    return Estimate(p, lower, upper, total, unit, "Wilson-95")
 
 
 def qualified_p99(values: Sequence[float], *, unit: str, seed: int = 1) -> Estimate:
@@ -131,10 +148,7 @@ def block_proportion_interval(
     pairs = [
         (float(success), float(total))
         for success, total in zip(successes, totals, strict=True)
-        if math.isfinite(success)
-        and math.isfinite(total)
-        and total > 0
-        and 0 <= success <= total
+        if math.isfinite(success) and math.isfinite(total) and total > 0 and 0 <= success <= total
     ]
     return _paired_block_ratio_interval(
         pairs,
@@ -158,9 +172,7 @@ def _paired_block_ratio_interval(
         return Estimate(None, None, None, 0, unit, method)
 
     def ratio(sample: Sequence[tuple[float, float]]) -> float:
-        return numerator_scale * sum(pair[0] for pair in sample) / sum(
-            pair[1] for pair in sample
-        )
+        return numerator_scale * sum(pair[0] for pair in sample) / sum(pair[1] for pair in sample)
 
     point = ratio(pairs)
     if len(pairs) == 1:
