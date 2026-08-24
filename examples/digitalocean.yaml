@@ -1,0 +1,77 @@
+campaign:
+  name: digitalocean-example
+  seed: 20260824
+  max_wall_seconds: 3600
+  max_cost_usd: 20
+  launch_reserve_seconds: 180
+  launch_reserve_usd: 2
+  concurrency: 16
+  retries: 2
+  input_token_reservation_factor: 1.5
+
+# Example values are a dated reproducibility snapshot, not a live catalog. Re-check the official
+# DigitalOcean model catalog and pricing before every paid run. Add one route entry per exact model.
+routes:
+  - id: do-deepseek-v4-flash-0731
+    provider: digitalocean
+    adapter: digitalocean
+    model: deepseek-v4-flash-0731
+    base_url: https://inference.do-ai.run/v1/chat/completions
+    auth:
+      env: DIGITALOCEAN_API_TOKEN
+      header: Authorization
+      prefix: "Bearer "
+    region: not_reported
+    api_family: chat_completions
+    api_version: v1
+    model_version: "0731"
+    context_tokens: 1048576
+    max_output_tokens: 1048576
+    input_usd_per_million: 0.080
+    output_usd_per_million: 0.252
+    # Set only when the current price sheet publishes a distinct cached-input rate.
+    cached_input_usd_per_million: null
+    capabilities:
+      streaming: true
+      vision: false
+      documentation_checked_utc: "2026-08-24"
+
+suites:
+  static:
+    offered_rps: 1
+  latency:
+    enabled: true
+    repeats: 10
+    shapes: [short_short, long_short, short_long, mixed]
+  capability:
+    enabled: true
+  interactions:
+    enabled: true
+  context:
+    enabled: true
+    percentages: [1, 10, 25, 50, 75, 90, 95, 99]
+  output:
+    enabled: true
+  quality:
+    enabled: true
+    repeats: 3
+  cache:
+    enabled: true
+    repeats: 5
+    prefix_tokens: 4096
+  aimd:
+    enabled: true
+    shapes: [short_short, long_short, short_long, mixed]
+    initial_rps: 0.25
+    additive_rps: 0.25
+    multiplicative_decrease: 0.5
+    epochs: 12
+    epoch_seconds: 20
+    concurrency: 64
+  soak:
+    enabled: true
+    shapes: [short_short, long_short, short_long, mixed]
+    rate_rps: 0.25
+    blocks: 4
+    block_seconds: 30
+    concurrency: 64

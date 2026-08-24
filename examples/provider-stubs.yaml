@@ -1,0 +1,28 @@
+campaign:
+  name: native-adapter-contract-example
+  seed: 1
+  max_wall_seconds: 600
+  max_cost_usd: 5
+  launch_reserve_seconds: 60
+  launch_reserve_usd: 1
+  concurrency: 2
+  retries: 0
+  input_token_reservation_factor: 1.5
+
+# `plan` accepts these routes and labels them placeholders. `run` refuses them before reserving or
+# sending anything. Replace with tested native adapters, exact regions/API families, and real prices.
+routes:
+  - id: bedrock-native-placeholder
+    provider: amazon-bedrock
+    adapter: bedrock_native
+    model: replace-with-exact-model-id
+    base_url: native-sdk
+    auth: {env: AWS_ACCESS_KEY_ID}
+    region: us-east-1
+    api_family: converse
+    api_version: not_reported
+    input_usd_per_million: 1.0
+    output_usd_per_million: 1.0
+
+suites:
+  latency: {enabled: true, repeats: 1, shapes: [short_short]}

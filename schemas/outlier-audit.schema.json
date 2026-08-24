@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/inference-endpoint-benchmark/outlier-audit.schema.json",
+  "title": "Inference benchmark request-level outlier audit",
+  "type": "object",
+  "required": [
+    "request_id", "route_id", "suite", "cell_id", "cache_state",
+    "audit_class", "reasons", "excluded_estimands", "preserved"
+  ],
+  "properties": {
+    "request_id": {"type": "string", "minLength": 1},
+    "route_id": {"type": "string", "minLength": 1},
+    "suite": {"type": "string", "minLength": 1},
+    "cell_id": {"type": "string", "minLength": 1},
+    "cache_state": {
+      "enum": ["cached_trial", "uncached_trial", "uncontrolled"]
+    },
+    "audit_class": {
+      "enum": ["invalid", "censored", "anomalous", "valid_extreme"]
+    },
+    "reasons": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+    "excluded_estimands": {"type": "array", "items": {"type": "string"}},
+    "metric_values": {"type": "object", "additionalProperties": {"type": ["number", "null"]}},
+    "metric_provenance": {"type": "object", "additionalProperties": {"type": "string"}},
+    "preserved": {"const": true}
+  },
+  "additionalProperties": false
+}
+
