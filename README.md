@@ -13,6 +13,15 @@ The harness is designed to answer engineering questions—not to manufacture a l
 - At which tested context and requested-output anchors does the route accept, degrade, or reject?
 - Which conclusions are measured, censored, anomalous, or still untested?
 
+## Field manuals
+
+- [Provider admission](PROVIDER-ADMISSION.md) — freeze current documentation, exact route identity,
+  pricing, limits, credentials, and control requests before a paid campaign.
+- [Experiment design](EXPERIMENT-DESIGN.md) — a compact 24-hour campaign for baselines, AIMD,
+  sustained soaks, capability probes, context boundaries, matched controls, and quality checks.
+- [Visualization contract](VISUALIZATION.md) — rules for honest, legible charts and an explicit audit
+  for surprising latency or token-throughput values.
+
 ## What “provider neutral” means
 
 The benchmark core never imports a cloud SDK. An adapter translates one normalized request into a
