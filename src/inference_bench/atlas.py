@@ -711,6 +711,115 @@ def _build_pdf(
             "reasoning makes it incomparable.",
             styles["AtlasBody"],
         ),
+        Paragraph("Plain-language glossary", styles["AtlasH2"]),
+        Table(
+            [
+                ["Term", "Meaning in this report"],
+                [
+                    "Offered RPS / RPM",
+                    Paragraph(
+                        "Requests the test tried to start per second / minute. This is demand, "
+                        "not completed work.",
+                        styles["AtlasSmall"],
+                    ),
+                ],
+                [
+                    "Successful RPM",
+                    Paragraph(
+                        "Requests completed successfully per minute, measured over the arrival "
+                        "window plus response drain.",
+                        styles["AtlasSmall"],
+                    ),
+                ],
+                [
+                    "Effective input / output TPM",
+                    Paragraph(
+                        "Provider-reported tokens from successful requests per wall-clock minute. "
+                        "A blank means usage reporting was insufficient.",
+                        styles["AtlasSmall"],
+                    ),
+                ],
+                [
+                    "TTFT",
+                    Paragraph(
+                        "Time to first token: request start to the first visible streamed content.",
+                        styles["AtlasSmall"],
+                    ),
+                ],
+                [
+                    "End-to-end latency",
+                    Paragraph(
+                        "Scheduled arrival to final completion, including local queueing, retries, "
+                        "backoff, and response drain.",
+                        styles["AtlasSmall"],
+                    ),
+                ],
+                [
+                    "Decode proxy",
+                    Paragraph(
+                        "Visible output tokens divided by client-observed decoding time. It is not "
+                        "claimed as internal GPU speed and is withheld when incomparable.",
+                        styles["AtlasSmall"],
+                    ),
+                ],
+                [
+                    "Quality-adjusted RPM",
+                    Paragraph(
+                        "Correctly completed predeclared tasks per minute. Transport success alone "
+                        "does not count as correct.",
+                        styles["AtlasSmall"],
+                    ),
+                ],
+                [
+                    "p50 / p95",
+                    Paragraph(
+                        "Median / 95th-percentile observation. p95 is a slow-tail measure; p99 is "
+                        "not reported as reliable without enough samples.",
+                        styles["AtlasSmall"],
+                    ),
+                ],
+                [
+                    "95% interval",
+                    Paragraph(
+                        "An uncertainty interval from independent requests at low load or whole "
+                        "epochs/blocks under load. Tokens are never treated as independent "
+                        "samples.",
+                        styles["AtlasSmall"],
+                    ),
+                ],
+                [
+                    "Right-censored bound",
+                    Paragraph(
+                        "The endpoint stayed healthy at the highest tested rate; its true ceiling "
+                        "may be higher. This is a lower bound, not a discovered maximum.",
+                        styles["AtlasSmall"],
+                    ),
+                ],
+                [
+                    "Inconclusive",
+                    Paragraph(
+                        "The request ran, but throttling, timeout, missing usage, or another "
+                        "measurement condition prevents the intended claim.",
+                        styles["AtlasSmall"],
+                    ),
+                ],
+            ],
+            colWidths=[45 * mm, 123 * mm],
+            repeatRows=1,
+            style=TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), navy),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTNAME", (0, 1), (0, -1), "Helvetica-Bold"),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, pale]),
+                    ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#CBD5E1")),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("FONTSIZE", (0, 0), (-1, -1), 7.8),
+                    ("PADDING", (0, 0), (-1, -1), 4),
+                ]
+            ),
+        ),
         Paragraph("AIMD and sustained load", styles["AtlasH2"]),
         Paragraph(
             "AIMD raises offered load while healthy and halves it after congestion. Its result is "
