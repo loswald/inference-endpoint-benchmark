@@ -604,10 +604,19 @@ class OpenAICompatibleAdapter:
                         malformed_reasons.append("tool_calls_not_array")
                         continue
                     if terminal_choice_count:
+                        if (
+                            choice_finish_reason == terminal_finish_reason_raw
+                            and not piece
+                            and not refusal
+                            and not reasoning_pieces
+                            and not new_tools
+                        ):
+                            # OpenRouter and some direct providers repeat the same empty terminal
+                            # marker before the final usage/DONE event. It carries no additional
+                            # model output and is therefore an idempotent transport marker.
+                            continue
                         if choice_finish_reason is None:
                             malformed_reasons.append("choice_after_terminal_finish")
-                        elif choice_finish_reason == terminal_finish_reason_raw:
-                            malformed_reasons.append("multiple_terminal_finish_reasons")
                         else:
                             malformed_reasons.append("conflicting_terminal_finish_reasons")
                         continue

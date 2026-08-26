@@ -203,8 +203,18 @@ def test_stream_requires_explicit_terminal_signal_and_rejects_conflicting_finish
             'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
         )
     )
-    assert repeated.status == "server_error"
-    assert "multiple_terminal_finish_reasons" in str(repeated.error_kind)
+    assert repeated.status == "success"
+    assert repeated.finish_reason == "stop"
+
+    repeated_with_content = asyncio.run(
+        infer(
+            'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
+            'data: {"choices":[{"index":0,"delta":{"content":"late"},'
+            '"finish_reason":"stop"}]}\n\n'
+        )
+    )
+    assert repeated_with_content.status == "server_error"
+    assert "conflicting_terminal_finish_reasons" in str(repeated_with_content.error_kind)
 
 
 def test_stream_refusal_and_reasoning_only_are_not_provider_failures(monkeypatch, route) -> None:
