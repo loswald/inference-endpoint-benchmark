@@ -53,6 +53,15 @@ def _workload_label(value: str) -> str:
     return labels.get(value, value.replace("_", " ").replace(":", ": "))
 
 
+def _provider_label(value: str) -> str:
+    return {
+        "amazon-bedrock": "Amazon Bedrock",
+        "azure-ai-foundry": "Azure AI Foundry",
+        "google-vertex-ai": "Google Vertex AI",
+        "openrouter": "OpenRouter",
+    }.get(value, value.replace("_", " ").replace("-", " ").title())
+
+
 def _load_family(row: dict[str, Any]) -> str:
     phase = str(row.get("phase") or "")
     if phase == "soak_block":
@@ -870,14 +879,17 @@ def _build_pdf(
 ) -> None:
     from reportlab.lib import colors
     from reportlab.lib.enums import TA_LEFT
-    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.pagesizes import A4, landscape
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import mm
     from reportlab.platypus import (
+        BaseDocTemplate,
+        Frame,
         Image,
+        NextPageTemplate,
         PageBreak,
+        PageTemplate,
         Paragraph,
-        SimpleDocTemplate,
         Spacer,
         Table,
         TableStyle,
@@ -948,21 +960,42 @@ def _build_pdf(
 
     def footer(canvas: Any, document: Any) -> None:
         canvas.saveState()
+        page_width, _ = canvas._pagesize
         canvas.setStrokeColor(colors.HexColor("#CBD5E1"))
-        canvas.line(18 * mm, 12 * mm, A4[0] - 18 * mm, 12 * mm)
+        canvas.line(18 * mm, 12 * mm, page_width - 18 * mm, 12 * mm)
         canvas.setFont("Helvetica", 7.5)
         canvas.setFillColor(slate)
         canvas.drawString(18 * mm, 7.5 * mm, "Inference Endpoint Benchmark - evidence atlas")
-        canvas.drawRightString(A4[0] - 18 * mm, 7.5 * mm, f"Page {document.page}")
+        canvas.drawRightString(page_width - 18 * mm, 7.5 * mm, f"Page {document.page}")
         canvas.restoreState()
 
-    document = SimpleDocTemplate(
+    landscape_a4 = landscape(A4)
+    portrait_frame = Frame(
+        18 * mm,
+        17 * mm,
+        A4[0] - 36 * mm,
+        A4[1] - 34 * mm,
+        id="portrait-frame",
+    )
+    landscape_frame = Frame(
+        18 * mm,
+        17 * mm,
+        landscape_a4[0] - 36 * mm,
+        landscape_a4[1] - 34 * mm,
+        id="landscape-frame",
+    )
+    document = BaseDocTemplate(
         str(path),
         pagesize=A4,
-        leftMargin=18 * mm,
-        rightMargin=18 * mm,
-        topMargin=17 * mm,
-        bottomMargin=17 * mm,
+        pageTemplates=[
+            PageTemplate(id="portrait", pagesize=A4, frames=[portrait_frame], onPage=footer),
+            PageTemplate(
+                id="landscape",
+                pagesize=landscape_a4,
+                frames=[landscape_frame],
+                onPage=footer,
+            ),
+        ],
         title="Inference Endpoint Benchmark - Evidence Atlas",
         author="Sqwish Labs",
     )
@@ -1166,10 +1199,10 @@ def _build_pdf(
         provider_rows: list[list[Any]] = [
             [
                 "Exact route",
-                "Short TTFT p50",
-                "Longest retrieval anchor",
-                "Capability checks passed",
-                "Soak workloads measured",
+                "TTFT p50",
+                "Retrieval anchor",
+                "Capabilities passed",
+                "Soak workloads",
             ]
         ]
         for route in campaign.config.routes:
@@ -1230,7 +1263,7 @@ def _build_pdf(
             )
         story.extend(
             [
-                Paragraph(campaign.provider.replace("_", " ").title(), styles["AtlasH2"]),
+                Paragraph(_provider_label(campaign.provider), styles["AtlasH2"]),
                 Table(
                     provider_rows,
                     colWidths=[47 * mm, 27 * mm, 37 * mm, 31 * mm, 30 * mm],
@@ -1251,24 +1284,30 @@ def _build_pdf(
                 Spacer(1, 3 * mm),
             ]
         )
+    first_figure = True
     for figure in figures:
         from PIL import Image as PILImage
 
         with PILImage.open(figure) as source:
             width, height = source.size
-        max_width = 174 * mm
-        max_height = 238 * mm
+        max_width = 258 * mm
+        max_height = 160 * mm
         scale = min(max_width / width, max_height / height)
         chart = Image(str(figure), width=width * scale, height=height * scale)
         chart.hAlign = "CENTER"
+        page_start: list[Any] = [PageBreak()]
+        if first_figure:
+            page_start = [NextPageTemplate("landscape"), PageBreak()]
+            first_figure = False
         story.extend(
-            [
-                PageBreak(),
+            page_start
+            + [
                 chart,
                 Spacer(1, 2 * mm),
                 Paragraph(_figure_caption(figure.stem), styles["AtlasSmall"]),
             ]
         )
+    story.append(NextPageTemplate("portrait"))
     for route in endpoints:
         route_id = route.id
         latency = next(
@@ -1343,7 +1382,7 @@ def _build_pdf(
                 f"{functional}/{len(endpoint_capabilities)} measured cells",
             ],
             [
-                "Matched time panels / TTFT range",
+                "Time panels / short TTFT range",
                 (
                     "not measured"
                     if not time_ttft
@@ -1426,7 +1465,7 @@ def _build_pdf(
                 ),
             ]
         )
-    document.build(story, onFirstPage=footer, onLaterPages=footer)
+    document.build(story)
 
 
 def generate_atlas(
