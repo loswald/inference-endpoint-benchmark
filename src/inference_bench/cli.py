@@ -23,6 +23,7 @@ from .matrix import load_matrix, matrix_plan, run_matrix
 from .models import TRANSPORT_HEADER_PROFILE, RequestSpec, RouteConfig, canonical_json
 from .plan import build_plan
 from .report import generate_report
+from .soak_config import derive_soak_config
 from .workloads import plan_static_suites
 
 _RETRYABLE_STATUSES = {"rate_limited", "server_error", "timeout", "transport_error"}
@@ -715,6 +716,13 @@ def _parser() -> argparse.ArgumentParser:
     report_matrix.add_argument("matrix", type=Path)
     report_matrix.add_argument("--run-root", action="append", type=Path, required=True)
     report_matrix.add_argument("--output", type=Path, required=True)
+    derive_soak = sub.add_parser(
+        "derive-soak", help="build a two-minute soak config from observed AIMD bounds"
+    )
+    derive_soak.add_argument("source_config", type=Path)
+    derive_soak.add_argument("controller_summary", type=Path)
+    derive_soak.add_argument("--output", type=Path, required=True)
+    derive_soak.add_argument("--fallback-rps", type=float)
     return parser
 
 
@@ -760,6 +768,16 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "report-matrix":
         print(generate_atlas(load_matrix(args.matrix), args.run_root, args.output))
+        return 0
+    if args.command == "derive-soak":
+        print(
+            derive_soak_config(
+                args.source_config,
+                args.controller_summary,
+                args.output,
+                fallback_rps=args.fallback_rps,
+            )
+        )
         return 0
     raise AssertionError("unreachable")
 

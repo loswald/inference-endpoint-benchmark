@@ -187,6 +187,11 @@ inference-bench report-matrix .private/providers.yaml \
   --run-root runs/multi-provider-001 \
   --run-root runs/multi-provider-soak-001 \
   --output published/atlas
+
+# Turn every observed endpoint × workload AIMD lower bound into a two-minute soak campaign.
+# The generated .rates.json explains the evidence used for each candidate rate.
+inference-bench derive-soak provider.yaml runs/provider/report/controller-summary.csv \
+  --output .private/provider-soak.yaml
 ```
 
 Every provider gets its own configuration, wall-clock cap, output directory, and durable ledger.
