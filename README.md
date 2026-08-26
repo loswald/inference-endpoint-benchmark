@@ -192,6 +192,12 @@ inference-bench report-matrix .private/providers.yaml \
 # The generated .rates.json explains the evidence used for each candidate rate.
 inference-bench derive-soak provider.yaml runs/provider/report/controller-summary.csv \
   --output .private/provider-soak.yaml
+
+# Re-render a sanitized DigitalOcean direct-run summary package with the clean atlas style.
+inference-bench report-digitalocean-summary private/do-summary \
+  --capacity-source do-sixhour-aimd-20260824-r1 \
+  --soak-source do-direct-soak-20260823-r1 \
+  --output published/digitalocean-atlas
 ```
 
 Every provider gets its own configuration, wall-clock cap, output directory, and durable ledger.

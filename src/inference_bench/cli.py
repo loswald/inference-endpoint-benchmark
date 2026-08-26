@@ -15,6 +15,7 @@ from pathlib import Path
 
 from .atlas import generate_atlas
 from .config import CampaignConfig, load_config
+from .digitalocean_atlas import generate_digitalocean_atlas
 from .engine import BenchmarkEngine, PaymentRequiredLatched, ReservationOverrunLatched
 from .environment import locked_distribution_versions, validate_run_directory_separation
 from .ledger import BudgetExceeded, Ledger, TimeLimitReached
@@ -723,6 +724,14 @@ def _parser() -> argparse.ArgumentParser:
     derive_soak.add_argument("controller_summary", type=Path)
     derive_soak.add_argument("--output", type=Path, required=True)
     derive_soak.add_argument("--fallback-rps", type=float)
+    digitalocean = sub.add_parser(
+        "report-digitalocean-summary",
+        help="render a clean atlas from a sanitized DigitalOcean direct summary package",
+    )
+    digitalocean.add_argument("summary_dir", type=Path)
+    digitalocean.add_argument("--output", type=Path, required=True)
+    digitalocean.add_argument("--capacity-source", required=True)
+    digitalocean.add_argument("--soak-source", required=True)
     return parser
 
 
@@ -776,6 +785,16 @@ def main(argv: list[str] | None = None) -> int:
                 args.controller_summary,
                 args.output,
                 fallback_rps=args.fallback_rps,
+            )
+        )
+        return 0
+    if args.command == "report-digitalocean-summary":
+        print(
+            generate_digitalocean_atlas(
+                args.summary_dir,
+                args.output,
+                capacity_source=args.capacity_source,
+                soak_source=args.soak_source,
             )
         )
         return 0
