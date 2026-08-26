@@ -306,6 +306,138 @@ def _plot_soak(rows: list[dict[str, Any]], destination: Path) -> list[Path]:
     return created
 
 
+def _plot_load_response(
+    rows: list[dict[str, Any]], route_provider: dict[str, str], destination: Path
+) -> list[Path]:
+    """Plot unconnected endpoint-specific quality and latency response points under load."""
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+
+    phase_colors = {
+        "baseline": "#64748B",
+        "bracket": "#2563EB",
+        "aimd": "#2563EB",
+        "confirmation": "#0F766E",
+        "recovery": "#D97706",
+        "soak_block": "#7C3AED",
+    }
+    created: list[Path] = []
+    providers = sorted(set(route_provider.values()))
+    for provider in providers:
+        provider_routes = sorted(
+            route for route, owner in route_provider.items() if owner == provider
+        )
+        for shape in ("short_short", "long_short", "short_long", "mixed"):
+            selected = [
+                row
+                for row in rows
+                if row.get("route_id") in provider_routes
+                and row.get("shape") == shape
+                and _number(row.get("offered_rps_target")) is not None
+            ]
+            routes = [
+                route
+                for route in provider_routes
+                if any(r.get("route_id") == route for r in selected)
+            ]
+            if not routes:
+                continue
+            figure, axes = plt.subplots(
+                len(routes),
+                2,
+                figsize=(13.5, max(4.2, 2.15 * len(routes) + 1.4)),
+                squeeze=False,
+            )
+            observed_phases: set[str] = set()
+            for row_index, route in enumerate(routes):
+                route_rows = [row for row in selected if row.get("route_id") == route]
+                route_rows.sort(key=lambda row: _number(row.get("offered_rps_target")) or 0)
+                for column, (metric, label) in enumerate(
+                    (
+                        ("quality_mean", "Task quality (0-1)"),
+                        ("arrival_latency_p95_across_blocks", "Arrival-to-finish p95 (s)"),
+                    )
+                ):
+                    axis = axes[row_index][column]
+                    positive_rates: list[float] = []
+                    for row in route_rows:
+                        rate = _number(row.get("offered_rps_target"))
+                        value = _number(row.get(metric))
+                        if rate is None or rate <= 0 or value is None:
+                            continue
+                        phase = str(row.get("phase") or "other")
+                        observed_phases.add(phase)
+                        color = phase_colors.get(phase, "#475569")
+                        low = _number(row.get(f"{metric}_ci95_low"))
+                        high = _number(row.get(f"{metric}_ci95_high"))
+                        yerr = None
+                        if low is not None and high is not None and low <= value <= high:
+                            yerr = [[value - low], [high - value]]
+                        eligible = _integer(row.get("capacity_estimand_blocks_n"))
+                        healthy = _integer(row.get("healthy_blocks_n"))
+                        filled = eligible > 0 and healthy == eligible
+                        axis.errorbar(
+                            rate,
+                            value,
+                            yerr=yerr,
+                            fmt="o",
+                            markerfacecolor=color if filled else "white",
+                            markeredgecolor=color,
+                            ecolor=color,
+                            capsize=2,
+                            markersize=5,
+                            alpha=0.9,
+                        )
+                        positive_rates.append(rate)
+                    if positive_rates and max(positive_rates) / min(positive_rates) >= 10:
+                        axis.set_xscale("log")
+                    if metric == "quality_mean":
+                        axis.set_ylim(-0.04, 1.04)
+                    axis.set_ylabel(label)
+                    axis.set_xlabel("Offered requests/second")
+                    axis.set_title(route, loc="left", fontsize=8.5, fontweight="bold")
+                    _style_axes(axis)
+            legend = [
+                Line2D(
+                    [0],
+                    [0],
+                    marker="o",
+                    linestyle="none",
+                    markerfacecolor=color,
+                    markeredgecolor=color,
+                    label=phase.replace("_", " "),
+                )
+                for phase, color in phase_colors.items()
+                if phase in observed_phases
+            ]
+            if legend:
+                figure.legend(handles=legend, frameon=False, ncol=len(legend), loc="upper right")
+            figure.suptitle(
+                f"Load response - {provider} - {shape.replace('_', ' / ')}",
+                x=0.06,
+                ha="left",
+                fontweight="bold",
+            )
+            figure.text(
+                0.06,
+                0.005,
+                "Filled markers passed the registered healthy-block rule; hollow markers did not. "
+                "Points are not connected because AIMD revisits rates over time.",
+                fontsize=7.5,
+                color="#475569",
+            )
+            figure.tight_layout(rect=(0, 0.025, 1, 0.965))
+            path = destination / f"load-response-{_slug(provider)}-{shape}.png"
+            figure.savefig(path, dpi=210, bbox_inches="tight", facecolor="white")
+            plt.close(figure)
+            created.append(path)
+    return created
+
+
 def _context_percentage(cell_id: str) -> float | None:
     if not cell_id.startswith("context_") or "pct" not in cell_id:
         return None
@@ -768,6 +900,9 @@ def generate_atlas(
     ]
     figures.extend(_plot_latency(tables.get("matched-cell-summary.csv", []), figures_dir))
     figures.extend(_plot_aimd(tables.get("controller-summary.csv", []), figures_dir))
+    figures.extend(
+        _plot_load_response(tables.get("load-block-summary.csv", []), route_provider, figures_dir)
+    )
     figures.extend(_plot_soak(tables.get("load-block-summary.csv", []), figures_dir))
     context = _plot_context(tables.get("matched-cell-summary.csv", []), figures_dir)
     capabilities = _plot_capabilities(tables.get("matched-cell-summary.csv", []), figures_dir)
