@@ -25,7 +25,7 @@ Before displaying an extreme tokens/second or latency value, bind it to one requ
 1. usage is provider-reported, positive, and belongs to one choice rather than an aggregate;
 2. TTFT is a streamed content event, not buffered headers or the final response;
 3. timestamps are monotonic and use one clock and one unit;
-4. the post-TTFT denominator is positive and sufficiently long to be stable;
+4. the post-TTFT denominator spans at least one second; shorter bursts are audited but censored;
 5. hidden reasoning is zero or explicitly stratified for visible decode comparisons;
 6. retries, queue delay, and drain are included in the correct end-to-end estimand;
 7. no token count was estimated from bytes and then labelled provider usage;

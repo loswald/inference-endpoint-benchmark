@@ -47,6 +47,21 @@ def test_near_zero_proxy_with_multiple_tokens_is_invalid() -> None:
     assert not assessment.decode_eligible
 
 
+def test_subsecond_proxy_is_censored_as_a_buffered_or_unstable_burst() -> None:
+    assessment = assess_result(
+        _result(
+            total_seconds=1.0,
+            ttft_seconds=0.5,
+            decode_seconds=0.5,
+            output_tokens=3000,
+            output_event_offsets_seconds=(0.5, 0.99),
+        )
+    )
+    assert assessment.classification == "censored"
+    assert "decode_proxy_observation_window_below_one_second" in assessment.reasons
+    assert not assessment.decode_eligible
+
+
 def test_missing_usage_censors_tpm_but_keeps_latency() -> None:
     assessment = assess_result(_result(input_tokens=None, output_tokens=None))
     assert assessment.classification == "censored"
@@ -75,11 +90,11 @@ def test_extreme_billed_token_proxy_is_preserved_but_not_headline_eligible() -> 
 
 def test_resolved_but_suspicious_proxy_is_anomalous_and_quarantined() -> None:
     result = _result(
-        total_seconds=0.52,
+        total_seconds=1.6,
         ttft_seconds=0.5,
-        decode_seconds=0.02,
-        output_tokens=250,
-        output_event_offsets_seconds=(0.5, 0.51),
+        decode_seconds=1.1,
+        output_tokens=20_000,
+        output_event_offsets_seconds=(0.5, 1.59),
     )
     assessment = assess_result(result)
     assert assessment.classification == "anomalous"

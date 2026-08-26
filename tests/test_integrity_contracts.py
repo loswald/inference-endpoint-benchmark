@@ -1317,10 +1317,10 @@ def test_nonintegral_usage_is_invalid_and_not_billable(monkeypatch, route) -> No
 
 
 def test_reasoning_state_stratifies_and_censors_visible_decode_proxy() -> None:
-    zero = _success("zero")
-    positive = _success("positive")
+    zero = _success("zero", total_seconds=2.0)
+    positive = _success("positive", total_seconds=2.0)
     positive.reasoning_tokens = 4
-    unknown = _success("unknown")
+    unknown = _success("unknown", total_seconds=2.0)
     unknown.reasoning_tokens = None
     assert assess_result(zero).decode_eligible
     assert not assess_result(positive).decode_eligible

@@ -227,6 +227,7 @@ _PUBLIC_VALIDITY_REASONS = frozenset(
         "decode_proxy_missing_ttft",
         "decode_proxy_insufficient_content_events",
         "decode_proxy_near_zero_with_multiple_tokens",
+        "decode_proxy_observation_window_below_one_second",
         "decode_proxy_reasoning_token_state_unknown",
         "decode_proxy_hidden_reasoning_tokens_present",
         "decode_proxy_extreme_tokens_per_second",

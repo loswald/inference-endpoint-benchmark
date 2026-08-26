@@ -10,7 +10,10 @@ from .models import (
     normalize_usage_parse_errors,
 )
 
-MIN_DECODE_PROXY_SECONDS = 1e-2
+# A sub-second post-TTFT interval is dominated by buffering, batching, and clock-denominator
+# instability. Preserve its raw timings, but do not turn it into a public tokens/second claim.
+MIN_DECODE_PROXY_SECONDS = 1.0
+MIN_PHYSICALLY_RESOLVED_DECODE_PROXY_SECONDS = 1e-2
 MIN_DECODE_PROXY_TOKENS = 8
 MIN_DECODE_PROXY_CONTENT_EVENTS = 2
 EXTREME_DECODE_PROXY_TOKENS_PER_SECOND = 10_000.0
@@ -141,8 +144,10 @@ def assess_result(
             censored.append("decode_proxy_missing_ttft")
         elif result.content_event_count < MIN_DECODE_PROXY_CONTENT_EVENTS:
             censored.append("decode_proxy_insufficient_content_events")
-        elif proxy_duration < MIN_DECODE_PROXY_SECONDS:
+        elif proxy_duration < MIN_PHYSICALLY_RESOLVED_DECODE_PROXY_SECONDS:
             invalid.append("decode_proxy_near_zero_with_multiple_tokens")
+        elif proxy_duration < MIN_DECODE_PROXY_SECONDS:
+            censored.append("decode_proxy_observation_window_below_one_second")
         elif result.reasoning_tokens is None:
             censored.append("decode_proxy_reasoning_token_state_unknown")
         elif result.reasoning_tokens > 0:

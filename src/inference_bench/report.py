@@ -53,6 +53,45 @@ def _json(value: str | None, fallback: Any) -> Any:
         return fallback
 
 
+def _post_ttft_seconds(row: dict[str, Any]) -> float | None:
+    try:
+        total = float(row["total_seconds"])
+        ttft = float(row["ttft_seconds"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    duration = total - ttft
+    return duration if math.isfinite(duration) and duration > 0 else None
+
+
+def _decode_proxy_report_eligible(row: dict[str, Any]) -> bool:
+    """Apply the current public decode contract to current and historical ledgers."""
+
+    duration = _post_ttft_seconds(row)
+    return bool(
+        row.get("decode_eligible")
+        and row.get("validity_class") == "valid"
+        and duration is not None
+        and duration >= MIN_DECODE_PROXY_SECONDS
+    )
+
+
+def _decode_proxy_short_window_reason(row: dict[str, Any]) -> str | None:
+    duration = _post_ttft_seconds(row)
+    if (
+        row.get("state") == "terminal"
+        and row.get("status") == "success"
+        and isinstance(row.get("output_tokens"), int)
+        and not isinstance(row.get("output_tokens"), bool)
+        and int(row["output_tokens"]) >= MIN_DECODE_PROXY_TOKENS
+        and int(row.get("content_event_count") or 0) >= MIN_DECODE_PROXY_CONTENT_EVENTS
+        and row.get("reasoning_tokens") == 0
+        and duration is not None
+        and 1e-2 <= duration < MIN_DECODE_PROXY_SECONDS
+    ):
+        return "decode_proxy_observation_window_below_one_second"
+    return None
+
+
 def _estimate_columns(prefix: str, value: Estimate) -> dict[str, Any]:
     return {
         prefix: value.estimate,
@@ -161,8 +200,7 @@ def summarize_rows(rows: list[dict[str, Any]], *, seed: int = 1) -> list[dict[st
         decode_proxy = [
             float(row["output_tokens"]) / (float(row["total_seconds"]) - float(row["ttft_seconds"]))
             for row in items
-            if row["decode_eligible"]
-            and row["validity_class"] == "valid"
+            if _decode_proxy_report_eligible(row)
             and row["output_tokens"] is not None
             and row["ttft_seconds"] is not None
             and float(row["total_seconds"]) - float(row["ttft_seconds"]) > 0
@@ -262,6 +300,9 @@ def summarize_rows(rows: list[dict[str, Any]], *, seed: int = 1) -> list[dict[st
                 and "decode_proxy_extreme_tokens_per_second"
                 in _json(row.get("validity_reasons_json"), [])
                 for row in items
+            ),
+            "decode_short_window_excluded_n": sum(
+                _decode_proxy_short_window_reason(row) is not None for row in items
             ),
             "reasoning_tokens_sum": sum(
                 int(row["reasoning_tokens"])
@@ -1356,7 +1397,7 @@ def _metric_values(row: dict[str, Any]) -> dict[str, float | None]:
         return number if math.isfinite(number) else None
 
     decode = None
-    if (
+    if _decode_proxy_report_eligible(row) and (
         finite(row.get("output_tokens")) is not None
         and finite(row.get("ttft_seconds")) is not None
         and finite(row.get("total_seconds")) is not None
@@ -1392,7 +1433,8 @@ def build_outlier_audit(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             if row.get("state") == "unknown" or incomplete_retry
             else row.get("validity_class")
         )
-        if classification in {"invalid", "censored", "anomalous"}:
+        short_window_reason = _decode_proxy_short_window_reason(row)
+        if classification in {"invalid", "censored", "anomalous"} or short_window_reason:
             excluded: list[str] = []
             if incomplete_retry:
                 excluded.extend(
@@ -1413,7 +1455,7 @@ def build_outlier_audit(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 excluded.append("latency")
             if not row["usage_eligible"]:
                 excluded.extend(["input_tpm", "output_tpm", "cost_per_token"])
-            if not row["decode_eligible"]:
+            if not _decode_proxy_report_eligible(row):
                 excluded.append("decode_proxy_tokens_per_second")
             if not row["quality_eligible"]:
                 excluded.append("quality")
@@ -1424,12 +1466,14 @@ def build_outlier_audit(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "cell_id": row["cell_id"],
                 "cache_state": row["cache_state"],
                 "warm_state": _warm_state(str(row["suite"])),
-                "audit_class": classification,
+                "audit_class": classification if classification != "valid" else "censored",
                 "reasons": (
                     ["incomplete_retry_sequence_guarded_before_final_outcome"]
                     if incomplete_retry
                     else ["unknown_provider_outcome_final_attempt"]
                     if row.get("state") == "unknown"
+                    else [short_window_reason]
+                    if short_window_reason
                     else _json(row.get("validity_reasons_json"), ["unspecified"])
                 ),
                 "excluded_estimands": sorted(set(excluded)),

@@ -138,7 +138,8 @@ All clocks are client-side monotonic clocks. Units are stored and printed explic
 - **Decode proxy:** provider-reported completion tokens divided by `(end-to-end seconds − TTFT)`.
   This includes client transport/drain overhead and is not direct server decode compute. The
   primary proxy requires at least eight billed completion tokens, two content-bearing events, and
-  10 ms after TTFT; observations failing the gate remain recorded but are not headline decode data.
+  one second after TTFT; shorter bursts are preserved in the audit but censored from tokens/second
+  summaries because buffering and denominator instability dominate them.
 - **Offered RPM:** scheduled arrivals divided by the scheduled arrival-window minutes.
 - **Completed/effective RPM:** completed or successful requests divided by full block wall minutes,
   including response drain after the arrival window.
