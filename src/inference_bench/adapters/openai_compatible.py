@@ -370,6 +370,11 @@ class OpenAICompatibleAdapter:
                     "invalid_choice_message",
                 )
             raw_tool_calls: Any = message.get("tool_calls", ())
+            # Azure and several compatible gateways serialize this unused
+            # optional field as JSON null. Null is equivalent to omission;
+            # every other non-array shape remains a protocol error.
+            if raw_tool_calls is None:
+                raw_tool_calls = ()
             tool_calls, tool_error = _normalize_tool_calls(raw_tool_calls)
             if tool_error:
                 return self._protocol_error(
@@ -599,7 +604,9 @@ class OpenAICompatibleAdapter:
                         reasoning_pieces.append(reasoning_piece)
                     if reasoning_invalid:
                         continue
-                    new_tools = delta.get("tool_calls", [])
+                    new_tools = delta.get("tool_calls")
+                    if new_tools is None:
+                        new_tools = []
                     if not isinstance(new_tools, list):
                         malformed_reasons.append("tool_calls_not_array")
                         continue
