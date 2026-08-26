@@ -39,6 +39,44 @@ def _slug(value: str) -> str:
     return "".join(character if character.isalnum() else "-" for character in value).strip("-")
 
 
+def _workload_label(value: str) -> str:
+    labels = {
+        "short_short": "short input / short output",
+        "long_short": "100K input / short output",
+        "short_long": "short input / 4K output",
+        "mixed": "heterogeneous production mix",
+        "mixed:short_short": "production mix: short / short",
+        "mixed:long_short": "production mix: 100K / short",
+        "mixed:short_long": "production mix: short / 4K",
+        "mixed:structured": "production mix: structured task",
+    }
+    return labels.get(value, value.replace("_", " ").replace(":", ": "))
+
+
+def _load_family(row: dict[str, Any]) -> str:
+    phase = str(row.get("phase") or "")
+    if phase == "soak_block":
+        return "soak"
+    if phase in {"baseline", "bracket", "aimd", "confirmation", "recovery"}:
+        return "aimd"
+    return phase or "other"
+
+
+def _latest_run_groups(rows: list[dict[str, Any]], key: Any) -> list[dict[str, Any]]:
+    """Keep complete evidence groups from the latest supplied run root.
+
+    A corrected capacity campaign must supersede the whole earlier trajectory, not merely
+    points that happen to share an offered rate. This prevents incompatible controller
+    criteria from appearing in one chart.
+    """
+
+    latest: dict[tuple[Any, ...], int] = {}
+    for row in rows:
+        group = tuple(key(row))
+        latest[group] = max(latest.get(group, -1), _integer(row.get("run_index")))
+    return [row for row in rows if _integer(row.get("run_index")) == latest[tuple(key(row))]]
+
+
 def _collect(
     matrix: CampaignMatrix, run_roots: Iterable[Path]
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, str]]:
@@ -73,6 +111,63 @@ def _collect(
                     tables[name].append(row)
     if not tables["coverage-ledger.csv"]:
         raise ValueError("no terminal provider reports were found under the supplied run roots")
+
+    # Later roots intentionally supersede earlier evidence for the same experimental family.
+    # Static capability/latency/context rows stay intact while corrected capacity and soak
+    # campaigns replace only their own families.
+    tables["controller-summary.csv"] = _latest_run_groups(
+        tables["controller-summary.csv"],
+        lambda row: (
+            row.get("campaign"),
+            row.get("route_id"),
+            row.get("suite"),
+            row.get("shape"),
+        ),
+    )
+    tables["load-block-summary.csv"] = _latest_run_groups(
+        tables["load-block-summary.csv"],
+        lambda row: (
+            row.get("campaign"),
+            row.get("route_id"),
+            row.get("shape"),
+            _load_family(row),
+        ),
+    )
+    tables["matched-cell-summary.csv"] = _latest_run_groups(
+        tables["matched-cell-summary.csv"],
+        lambda row: (
+            row.get("campaign"),
+            row.get("route_id"),
+            row.get("suite"),
+            row.get("cell_id"),
+            row.get("cache_state"),
+            row.get("reasoning_token_state"),
+        ),
+    )
+    tables["time-variation-summary.csv"] = _latest_run_groups(
+        tables["time-variation-summary.csv"],
+        lambda row: (
+            row.get("campaign"),
+            row.get("route_id"),
+            row.get("shape"),
+            row.get("panel_index"),
+        ),
+    )
+    tables["coverage-ledger.csv"] = _latest_run_groups(
+        tables["coverage-ledger.csv"],
+        lambda row: (
+            row.get("campaign"),
+            row.get("route_id"),
+            row.get("suite"),
+            (
+                "soak"
+                if "soak" in str(row.get("plan_cell_id") or "")
+                else "aimd"
+                if str(row.get("suite") or "") in {"aimd", "load"}
+                else "static"
+            ),
+        ),
+    )
     return dict(tables), route_provider
 
 
@@ -126,6 +221,14 @@ def _shape_from_cell(cell_id: str) -> str | None:
     return prefix if prefix in {"short_short", "long_short", "short_long", "mixed"} else None
 
 
+def _latency_panel(cell_id: str) -> str | None:
+    shape = _shape_from_cell(cell_id)
+    if shape != "mixed":
+        return shape
+    parts = cell_id.split(":")
+    return f"mixed:{parts[1]}" if len(parts) > 1 else "mixed"
+
+
 def _plot_latency(rows: list[dict[str, Any]], destination: Path) -> list[Path]:
     import matplotlib
 
@@ -133,23 +236,36 @@ def _plot_latency(rows: list[dict[str, Any]], destination: Path) -> list[Path]:
     import matplotlib.pyplot as plt
 
     created: list[Path] = []
-    for shape in ("short_short", "long_short", "short_long", "mixed"):
+    panels = (
+        "short_short",
+        "long_short",
+        "short_long",
+        "mixed:short_short",
+        "mixed:long_short",
+        "mixed:short_long",
+        "mixed:structured",
+    )
+    palette = {
+        "azure": "#2563EB",
+        "bedrock": "#EA580C",
+        "vertex": "#DC2626",
+        "openrouter": "#7C3AED",
+    }
+    for shape in panels:
         selected = [
             row
             for row in rows
-            if row.get("suite") == "latency" and _shape_from_cell(str(row.get("cell_id"))) == shape
+            if row.get("suite") == "latency" and _latency_panel(str(row.get("cell_id"))) == shape
         ]
         selected.sort(key=lambda row: (str(row.get("provider")), str(row.get("route_id"))))
         if not selected:
             continue
-        figure, axes = plt.subplots(
-            1, 2, figsize=(13, max(5.0, 0.34 * len(selected) + 1.8)), sharey=True
-        )
+        figure, axes = plt.subplots(1, 2, figsize=(13, max(5.0, 0.36 * len(selected) + 1.6)))
+        labels = [str(row.get("route_id")) for row in selected]
         for axis, metric, label in (
             (axes[0], "ttft_p50", "TTFT p50 (seconds)"),
             (axes[1], "latency_p50", "End-to-end latency p50 (seconds)"),
         ):
-            labels = [str(row.get("route_id")) for row in selected]
             for index, row in enumerate(selected):
                 value = _number(row.get(metric))
                 if value is None:
@@ -162,23 +278,27 @@ def _plot_latency(rows: list[dict[str, Any]], destination: Path) -> list[Path]:
                     index,
                     xerr=xerr,
                     fmt="o",
-                    color="#0F766E",
+                    color=palette.get(str(row.get("provider")), "#0F766E"),
                     ecolor="#64748B",
                     capsize=2.5,
                     markersize=5,
                 )
-            axis.set_yticks(range(len(labels)), labels if axis is axes[0] else [""] * len(labels))
+            axis.set_yticks(range(len(labels)))
+            if axis is axes[0]:
+                axis.set_yticklabels(labels, fontsize=8)
+            else:
+                axis.set_yticklabels([])
             axis.set_xlabel(label)
             axis.invert_yaxis()
             _style_axes(axis)
         figure.suptitle(
-            f"Low-load latency - {shape.replace('_', ' / ')}",
+            f"Low-load latency — {_workload_label(shape)}",
             x=0.08,
             ha="left",
             fontweight="bold",
         )
-        figure.tight_layout()
-        path = destination / f"latency-{shape}.png"
+        figure.tight_layout(rect=(0, 0, 1, 0.95))
+        path = destination / f"latency-{_slug(shape)}.png"
         figure.savefig(path, dpi=210, bbox_inches="tight", facecolor="white")
         plt.close(figure)
         created.append(path)
@@ -199,11 +319,24 @@ def _plot_aimd(rows: list[dict[str, Any]], destination: Path) -> list[Path]:
             continue
         figure, axis = plt.subplots(figsize=(10.8, max(4.8, 0.34 * len(selected) + 1.8)))
         labels = [str(row.get("route_id")) for row in selected]
+        positive_bounds = [
+            value
+            for row in selected
+            if (value := _number(row.get("healthy_lower_bound_rps"))) is not None and value > 0
+        ]
         for index, row in enumerate(selected):
             lower = _number(row.get("healthy_lower_bound_rps"))
             upper = _number(row.get("unhealthy_upper_bound_rps"))
             if lower is None:
-                axis.scatter(0, index, marker="x", color="#DC2626", s=35)
+                axis.text(
+                    0.01,
+                    index,
+                    "not established",
+                    transform=axis.get_yaxis_transform(),
+                    color="#B91C1C",
+                    fontsize=7.5,
+                    va="center",
+                )
                 continue
             confirmed = row.get("confirmation_all_healthy") in (True, "True", "true", "1")
             axis.scatter(
@@ -230,22 +363,25 @@ def _plot_aimd(rows: list[dict[str, Any]], destination: Path) -> list[Path]:
         axis.set_yticks(range(len(labels)), labels)
         axis.invert_yaxis()
         axis.set_xlabel("Offered requests/second")
-        axis.set_title(
-            f"AIMD capacity bounds - {shape.replace('_', ' / ')}",
-            loc="left",
+        if positive_bounds and max(positive_bounds) / min(positive_bounds) >= 10:
+            axis.set_xscale("log")
+        figure.suptitle(
+            f"AIMD capacity bounds — {_workload_label(shape)}",
+            x=0.10,
+            y=0.985,
+            ha="left",
             fontweight="bold",
         )
-        axis.text(
-            0,
-            1.02,
+        figure.text(
+            0.10,
+            0.935,
             "filled circle: three healthy confirmations; square: exploratory; "
             "orange tick: unhealthy upper bound",
-            transform=axis.transAxes,
             fontsize=8,
             color="#475569",
         )
         _style_axes(axis)
-        figure.tight_layout()
+        figure.tight_layout(rect=(0, 0, 1, 0.89))
         path = destination / f"aimd-capacity-{shape}.png"
         figure.savefig(path, dpi=210, bbox_inches="tight", facecolor="white")
         plt.close(figure)
@@ -260,11 +396,15 @@ def _plot_soak(rows: list[dict[str, Any]], destination: Path) -> list[Path]:
     import matplotlib.pyplot as plt
 
     created: list[Path] = []
-    metrics = (
-        ("successful_rpm", "Successful RPM"),
-        ("successful_input_tpm", "Effective input TPM"),
-        ("successful_output_tpm", "Effective output TPM"),
-        ("quality_adjusted_rpm", "Quality-adjusted tasks/minute"),
+    metric_groups = (
+        (
+            ("successful_rpm", "Successful requests/minute"),
+            ("quality_adjusted_rpm", "Correct tasks/minute"),
+        ),
+        (
+            ("successful_input_tpm", "Effective input tokens/minute"),
+            ("successful_output_tpm", "Effective output tokens/minute"),
+        ),
     )
     for shape in ("short_short", "long_short", "short_long", "mixed"):
         selected = [
@@ -273,36 +413,49 @@ def _plot_soak(rows: list[dict[str, Any]], destination: Path) -> list[Path]:
         selected.sort(key=lambda row: (str(row.get("provider")), str(row.get("route_id"))))
         if not selected:
             continue
-        figure, axes = plt.subplots(
-            1, 4, figsize=(17, max(5.0, 0.34 * len(selected) + 1.8)), sharey=True
-        )
         labels = [str(row.get("route_id")) for row in selected]
-        for axis, (metric, label) in zip(axes, metrics, strict=True):
-            for index, row in enumerate(selected):
-                value = _number(row.get(metric))
-                if value is None:
-                    continue
-                low = _number(row.get(f"{metric}_ci95_low"))
-                high = _number(row.get(f"{metric}_ci95_high"))
-                xerr = None if low is None or high is None else [[value - low], [high - value]]
-                axis.errorbar(
-                    value, index, xerr=xerr, fmt="o", color="#0F766E", ecolor="#64748B", capsize=2.5
-                )
-            axis.set_yticks(range(len(labels)), labels if axis is axes[0] else [""] * len(labels))
-            axis.invert_yaxis()
-            axis.set_xlabel(label)
-            _style_axes(axis)
-        figure.suptitle(
-            f"Sustained workload - {shape.replace('_', ' / ')}",
-            x=0.06,
-            ha="left",
-            fontweight="bold",
-        )
-        figure.tight_layout()
-        path = destination / f"soak-{shape}.png"
-        figure.savefig(path, dpi=210, bbox_inches="tight", facecolor="white")
-        plt.close(figure)
-        created.append(path)
+        for group_index, metrics in enumerate(metric_groups, start=1):
+            figure, axes = plt.subplots(1, 2, figsize=(13, max(5.0, 0.36 * len(selected) + 1.6)))
+            for axis, (metric, label) in zip(axes, metrics, strict=True):
+                for index, row in enumerate(selected):
+                    value = _number(row.get(metric))
+                    if value is None:
+                        continue
+                    low = _number(row.get(f"{metric}_ci95_low"))
+                    high = _number(row.get(f"{metric}_ci95_high"))
+                    xerr = (
+                        None
+                        if low is None or high is None
+                        else [[max(0, value - low)], [max(0, high - value)]]
+                    )
+                    axis.errorbar(
+                        value,
+                        index,
+                        xerr=xerr,
+                        fmt="o",
+                        color="#0F766E",
+                        ecolor="#64748B",
+                        capsize=2.5,
+                    )
+                axis.set_yticks(range(len(labels)))
+                if axis is axes[0]:
+                    axis.set_yticklabels(labels, fontsize=8)
+                else:
+                    axis.set_yticklabels([])
+                axis.invert_yaxis()
+                axis.set_xlabel(label)
+                _style_axes(axis)
+            figure.suptitle(
+                f"Two-minute sustained workload — {_workload_label(shape)}",
+                x=0.08,
+                ha="left",
+                fontweight="bold",
+            )
+            figure.tight_layout(rect=(0, 0, 1, 0.95))
+            path = destination / f"soak-{shape}-part-{group_index}.png"
+            figure.savefig(path, dpi=210, bbox_inches="tight", facecolor="white")
+            plt.close(figure)
+            created.append(path)
     return created
 
 
@@ -346,95 +499,104 @@ def _plot_load_response(
             ]
             if not routes:
                 continue
-            figure, axes = plt.subplots(
-                len(routes),
-                2,
-                figsize=(13.5, max(4.2, 2.15 * len(routes) + 1.4)),
-                squeeze=False,
-            )
-            observed_phases: set[str] = set()
-            for row_index, route in enumerate(routes):
-                route_rows = [row for row in selected if row.get("route_id") == route]
-                route_rows.sort(key=lambda row: _number(row.get("offered_rps_target")) or 0)
-                for column, (metric, label) in enumerate(
-                    (
-                        ("quality_mean", "Task quality (0-1)"),
-                        ("arrival_latency_p95_across_blocks", "Arrival-to-finish p95 (s)"),
-                    )
-                ):
-                    axis = axes[row_index][column]
-                    positive_rates: list[float] = []
-                    for row in route_rows:
-                        rate = _number(row.get("offered_rps_target"))
-                        value = _number(row.get(metric))
-                        if rate is None or rate <= 0 or value is None:
-                            continue
-                        phase = str(row.get("phase") or "other")
-                        observed_phases.add(phase)
-                        color = phase_colors.get(phase, "#475569")
-                        low = _number(row.get(f"{metric}_ci95_low"))
-                        high = _number(row.get(f"{metric}_ci95_high"))
-                        yerr = None
-                        if low is not None and high is not None and low <= value <= high:
-                            yerr = [[value - low], [high - value]]
-                        eligible = _integer(row.get("capacity_estimand_blocks_n"))
-                        healthy = _integer(row.get("healthy_blocks_n"))
-                        filled = eligible > 0 and healthy == eligible
-                        axis.errorbar(
-                            rate,
-                            value,
-                            yerr=yerr,
-                            fmt="o",
-                            markerfacecolor=color if filled else "white",
-                            markeredgecolor=color,
-                            ecolor=color,
-                            capsize=2,
-                            markersize=5,
-                            alpha=0.9,
-                        )
-                        positive_rates.append(rate)
-                    if positive_rates and max(positive_rates) / min(positive_rates) >= 10:
-                        axis.set_xscale("log")
-                    if metric == "quality_mean":
-                        axis.set_ylim(-0.04, 1.04)
-                    axis.set_ylabel(label)
-                    axis.set_xlabel("Offered requests/second")
-                    axis.set_title(route, loc="left", fontsize=8.5, fontweight="bold")
-                    _style_axes(axis)
-            legend = [
-                Line2D(
-                    [0],
-                    [0],
-                    marker="o",
-                    linestyle="none",
-                    markerfacecolor=color,
-                    markeredgecolor=color,
-                    label=phase.replace("_", " "),
+            chunks = [routes[index : index + 3] for index in range(0, len(routes), 3)]
+            for part, route_chunk in enumerate(chunks, start=1):
+                figure, axes = plt.subplots(
+                    len(route_chunk),
+                    2,
+                    figsize=(13.5, max(5.3, 2.55 * len(route_chunk) + 1.4)),
+                    squeeze=False,
                 )
-                for phase, color in phase_colors.items()
-                if phase in observed_phases
-            ]
-            if legend:
-                figure.legend(handles=legend, frameon=False, ncol=len(legend), loc="upper right")
-            figure.suptitle(
-                f"Load response - {provider} - {shape.replace('_', ' / ')}",
-                x=0.06,
-                ha="left",
-                fontweight="bold",
-            )
-            figure.text(
-                0.06,
-                0.005,
-                "Filled markers passed the registered healthy-block rule; hollow markers did not. "
-                "Points are not connected because AIMD revisits rates over time.",
-                fontsize=7.5,
-                color="#475569",
-            )
-            figure.tight_layout(rect=(0, 0.025, 1, 0.965))
-            path = destination / f"load-response-{_slug(provider)}-{shape}.png"
-            figure.savefig(path, dpi=210, bbox_inches="tight", facecolor="white")
-            plt.close(figure)
-            created.append(path)
+                observed_phases: set[str] = set()
+                for row_index, route in enumerate(route_chunk):
+                    route_rows = [row for row in selected if row.get("route_id") == route]
+                    route_rows.sort(key=lambda row: _number(row.get("offered_rps_target")) or 0)
+                    for column, (metric, label) in enumerate(
+                        (
+                            ("quality_mean", "Task quality (0–1)"),
+                            ("arrival_latency_p95_across_blocks", "Arrival-to-finish p95 (s)"),
+                        )
+                    ):
+                        axis = axes[row_index][column]
+                        positive_rates: list[float] = []
+                        for row in route_rows:
+                            rate = _number(row.get("offered_rps_target"))
+                            value = _number(row.get(metric))
+                            if rate is None or rate <= 0 or value is None:
+                                continue
+                            phase = str(row.get("phase") or "other")
+                            observed_phases.add(phase)
+                            color = phase_colors.get(phase, "#475569")
+                            low = _number(row.get(f"{metric}_ci95_low"))
+                            high = _number(row.get(f"{metric}_ci95_high"))
+                            yerr = None
+                            if low is not None and high is not None and low <= value <= high:
+                                yerr = [[value - low], [high - value]]
+                            eligible = _integer(row.get("capacity_estimand_blocks_n"))
+                            healthy = _integer(row.get("healthy_blocks_n"))
+                            filled = eligible > 0 and healthy == eligible
+                            axis.errorbar(
+                                rate,
+                                value,
+                                yerr=yerr,
+                                fmt="o",
+                                markerfacecolor=color if filled else "white",
+                                markeredgecolor=color,
+                                ecolor=color,
+                                capsize=2,
+                                markersize=5,
+                                alpha=0.9,
+                            )
+                            positive_rates.append(rate)
+                        if positive_rates and max(positive_rates) / min(positive_rates) >= 10:
+                            axis.set_xscale("log")
+                        if metric == "quality_mean":
+                            axis.set_ylim(-0.04, 1.04)
+                        axis.set_ylabel(label)
+                        axis.set_xlabel("Offered requests/second")
+                        axis.set_title(route, loc="left", fontsize=9, fontweight="bold")
+                        _style_axes(axis)
+                legend = [
+                    Line2D(
+                        [0],
+                        [0],
+                        marker="o",
+                        linestyle="none",
+                        markerfacecolor=color,
+                        markeredgecolor=color,
+                        label=phase.replace("_", " "),
+                    )
+                    for phase, color in phase_colors.items()
+                    if phase in observed_phases
+                ]
+                if legend:
+                    figure.legend(
+                        handles=legend,
+                        frameon=False,
+                        ncol=len(legend),
+                        loc="upper center",
+                        bbox_to_anchor=(0.5, 0.955),
+                    )
+                figure.suptitle(
+                    f"Load response — {provider} — {_workload_label(shape)}",
+                    x=0.06,
+                    y=0.995,
+                    ha="left",
+                    fontweight="bold",
+                )
+                figure.text(
+                    0.06,
+                    0.005,
+                    "Filled markers passed the healthy-block rule; hollow markers did not. "
+                    "Points are unconnected because AIMD revisits rates.",
+                    fontsize=7.5,
+                    color="#475569",
+                )
+                figure.tight_layout(rect=(0, 0.03, 1, 0.90))
+                path = destination / (f"load-response-{_slug(provider)}-{shape}-part-{part}.png")
+                figure.savefig(path, dpi=210, bbox_inches="tight", facecolor="white")
+                plt.close(figure)
+                created.append(path)
     return created
 
 
@@ -481,6 +643,111 @@ def _plot_context(rows: list[dict[str, Any]], destination: Path) -> Path | None:
     figure.savefig(path, dpi=210, bbox_inches="tight", facecolor="white")
     plt.close(figure)
     return path
+
+
+def _plot_time_variation(rows: list[dict[str, Any]], destination: Path) -> list[Path]:
+    """Plot matched sequential panels as endpoint-specific small multiples.
+
+    Lines connect only repeated observations of the same endpoint and workload. This preserves
+    the time sequence without producing a cross-endpoint spaghetti chart.
+    """
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    created: list[Path] = []
+    providers = sorted({str(row.get("provider")) for row in rows if row.get("provider")})
+    for provider in providers:
+        provider_rows = [row for row in rows if row.get("provider") == provider]
+        for shape in ("short_short", "long_short", "short_long", "mixed"):
+            shape_rows = [row for row in provider_rows if row.get("shape") == shape]
+            routes = sorted({str(row.get("route_id")) for row in shape_rows})
+            for part, route_chunk in enumerate(
+                (routes[index : index + 3] for index in range(0, len(routes), 3)),
+                start=1,
+            ):
+                if not route_chunk:
+                    continue
+                figure, axes = plt.subplots(
+                    len(route_chunk),
+                    2,
+                    figsize=(13.2, max(5.2, 2.45 * len(route_chunk) + 1.5)),
+                    squeeze=False,
+                )
+                for row_index, route in enumerate(route_chunk):
+                    route_rows = sorted(
+                        (row for row in shape_rows if row.get("route_id") == route),
+                        key=lambda row: _integer(row.get("panel_index")),
+                    )
+                    for column, (metric, label) in enumerate(
+                        (("ttft_p50", "TTFT p50 (s)"), ("latency_p50", "Latency p50 (s)"))
+                    ):
+                        axis = axes[row_index][column]
+                        eligible = [
+                            row for row in route_rows if _number(row.get(metric)) is not None
+                        ]
+                        x = [_integer(row.get("panel_index")) + 1 for row in eligible]
+                        y = [_number(row.get(metric)) or 0 for row in eligible]
+                        low = [
+                            _number(row.get(f"{metric}_ci95_low"))
+                            if _number(row.get(f"{metric}_ci95_low")) is not None
+                            else value
+                            for row, value in zip(eligible, y, strict=True)
+                        ]
+                        high = [
+                            _number(row.get(f"{metric}_ci95_high"))
+                            if _number(row.get(f"{metric}_ci95_high")) is not None
+                            else value
+                            for row, value in zip(eligible, y, strict=True)
+                        ]
+                        if eligible:
+                            axis.errorbar(
+                                x,
+                                y,
+                                yerr=[
+                                    [
+                                        max(0, value - bound)
+                                        for value, bound in zip(y, low, strict=True)
+                                    ],
+                                    [
+                                        max(0, bound - value)
+                                        for value, bound in zip(y, high, strict=True)
+                                    ],
+                                ],
+                                fmt="o-",
+                                color="#0F766E",
+                                ecolor="#64748B",
+                                linewidth=1.4,
+                                capsize=2.5,
+                            )
+                            axis.set_xticks(sorted(set(x)))
+                        axis.set_xlabel("Matched panel (equal spacing)")
+                        axis.set_ylabel(label)
+                        axis.set_title(route, loc="left", fontsize=9, fontweight="bold")
+                        _style_axes(axis)
+                figure.suptitle(
+                    f"Intra-session variation — {provider} — {_workload_label(shape)}",
+                    x=0.06,
+                    y=0.995,
+                    ha="left",
+                    fontweight="bold",
+                )
+                figure.text(
+                    0.06,
+                    0.006,
+                    "Same prompts and offered load in every panel; whiskers are request-level "
+                    "95% intervals. This is an intra-session panel, not a 24-hour claim.",
+                    fontsize=7.5,
+                    color="#475569",
+                )
+                figure.tight_layout(rect=(0, 0.035, 1, 0.95))
+                path = destination / f"time-{_slug(provider)}-{shape}-part-{part}.png"
+                figure.savefig(path, dpi=210, bbox_inches="tight", facecolor="white")
+                plt.close(figure)
+                created.append(path)
+    return created
 
 
 _CAPABILITY_PREFIXES = (
@@ -552,6 +819,47 @@ def _format_metric(value: Any, *, digits: int = 2) -> str:
     if abs(number) >= 1000:
         return f"{number:,.0f}"
     return f"{number:.{digits}f}"
+
+
+def _format_interval(row: dict[str, Any], metric: str, *, digits: int = 2) -> str:
+    value = _number(row.get(metric))
+    if value is None:
+        return "not measured"
+    low = _number(row.get(f"{metric}_ci95_low"))
+    high = _number(row.get(f"{metric}_ci95_high"))
+    if low is None or high is None:
+        return _format_metric(value, digits=digits)
+    return (
+        f"{_format_metric(value, digits=digits)} "
+        f"[{_format_metric(low, digits=digits)}, {_format_metric(high, digits=digits)}]"
+    )
+
+
+def _figure_caption(name: str) -> str:
+    if name.startswith("latency-"):
+        return "Matched low-load requests; whiskers are request-level 95% intervals."
+    if name.startswith("aimd-"):
+        return (
+            "AIMD reports tested healthy and unhealthy bounds. A missing bound is labelled "
+            "rather than drawn as zero."
+        )
+    if name.startswith("load-response-"):
+        return (
+            "Unconnected points preserve the AIMD experiment structure. Whiskers use whole "
+            "load blocks as the uncertainty unit."
+        )
+    if name.startswith("soak-"):
+        return "Two-minute endpoint-isolated soak; whiskers are block-level 95% intervals."
+    if name.startswith("time-"):
+        return (
+            "Matched sequential panels show intra-session variation only; they are not evidence "
+            "of a full-day or diurnal pattern."
+        )
+    if name.startswith("context-"):
+        return "Acceptance counts only when the deterministic retrieval check also succeeds."
+    if name.startswith("capability-"):
+        return "Capability states come from functional task scorers, not model-card claims."
+    return "Measured evidence states; unavailable values remain blank rather than becoming zero."
 
 
 def _build_pdf(
@@ -660,6 +968,10 @@ def _build_pdf(
     )
     endpoints = [route for campaign in matrix.campaigns for route in campaign.config.routes]
     coverage = tables.get("coverage-ledger.csv", [])
+    matched = tables.get("matched-cell-summary.csv", [])
+    controllers = tables.get("controller-summary.csv", [])
+    load = tables.get("load-block-summary.csv", [])
+    time_rows = tables.get("time-variation-summary.csv", [])
     coverage_counts = Counter(str(row.get("state")) for row in coverage)
     story: list[Any] = [
         Spacer(1, 18 * mm),
@@ -838,6 +1150,107 @@ def _build_pdf(
             styles["AtlasBody"],
         ),
     ]
+    story.extend(
+        [
+            PageBreak(),
+            Paragraph("Engineering decision map", styles["AtlasH1"]),
+            Paragraph(
+                "This is a route inventory, not a global ranking. Compare rows only for the "
+                "workload you will actually run; the endpoint pages later in the atlas retain "
+                "all four workload shapes and their uncertainty intervals.",
+                styles["AtlasBody"],
+            ),
+        ]
+    )
+    for campaign in matrix.campaigns:
+        provider_rows: list[list[Any]] = [
+            [
+                "Exact route",
+                "Short TTFT p50",
+                "Longest retrieval anchor",
+                "Capability checks passed",
+                "Soak workloads measured",
+            ]
+        ]
+        for route in campaign.config.routes:
+            route_id = route.id
+            short_latency = next(
+                (
+                    row
+                    for row in matched
+                    if row.get("route_id") == route_id
+                    and row.get("suite") == "latency"
+                    and _shape_from_cell(str(row.get("cell_id"))) == "short_short"
+                ),
+                {},
+            )
+            context_rows = [
+                row
+                for row in matched
+                if row.get("route_id") == route_id
+                and row.get("suite") == "context"
+                and (_number(row.get("quality_mean")) or 0) >= 0.999
+                and _context_percentage(str(row.get("cell_id"))) is not None
+            ]
+            highest_context = max(
+                (_context_percentage(str(row.get("cell_id"))) or 0 for row in context_rows),
+                default=None,
+            )
+            capability_rows = [
+                row
+                for row in matched
+                if row.get("route_id") == route_id and row.get("suite") == "capability"
+            ]
+            capability_passed = sum(
+                (
+                    _number(row.get("quality_mean"))
+                    if _number(row.get("quality_mean")) is not None
+                    else _number(row.get("success_rate")) or 0
+                )
+                >= 0.999
+                for row in capability_rows
+            )
+            soak_rows = [
+                row
+                for row in load
+                if row.get("route_id") == route_id
+                and row.get("phase") == "soak_block"
+                and _number(row.get("successful_rpm")) is not None
+            ]
+            provider_rows.append(
+                [
+                    route_id,
+                    f"{_format_metric(short_latency.get('ttft_p50'))} s",
+                    "not established"
+                    if highest_context is None
+                    else f"{highest_context:g}% of advertised",
+                    f"{capability_passed}/{len(capability_rows)}",
+                    f"{len({str(row.get('shape')) for row in soak_rows})}/4",
+                ]
+            )
+        story.extend(
+            [
+                Paragraph(campaign.provider.replace("_", " ").title(), styles["AtlasH2"]),
+                Table(
+                    provider_rows,
+                    colWidths=[47 * mm, 27 * mm, 37 * mm, 31 * mm, 30 * mm],
+                    repeatRows=1,
+                    style=TableStyle(
+                        [
+                            ("BACKGROUND", (0, 0), (-1, 0), navy),
+                            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, pale]),
+                            ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#CBD5E1")),
+                            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                            ("FONTSIZE", (0, 0), (-1, -1), 7.2),
+                            ("PADDING", (0, 0), (-1, -1), 4),
+                        ]
+                    ),
+                ),
+                Spacer(1, 3 * mm),
+            ]
+        )
     for figure in figures:
         from PIL import Image as PILImage
 
@@ -846,21 +1259,16 @@ def _build_pdf(
         max_width = 174 * mm
         max_height = 238 * mm
         scale = min(max_width / width, max_height / height)
+        chart = Image(str(figure), width=width * scale, height=height * scale)
+        chart.hAlign = "CENTER"
         story.extend(
             [
                 PageBreak(),
-                Paragraph(figure.stem.replace("-", " ").title(), styles["AtlasH1"]),
-                Image(str(figure), width=width * scale, height=height * scale),
-                Paragraph(
-                    "Points are measured estimates. Missing values remain blank rather than being "
-                    "drawn as zero.",
-                    styles["AtlasSmall"],
-                ),
+                chart,
+                Spacer(1, 2 * mm),
+                Paragraph(_figure_caption(figure.stem), styles["AtlasSmall"]),
             ]
         )
-    matched = tables.get("matched-cell-summary.csv", [])
-    controllers = tables.get("controller-summary.csv", [])
-    load = tables.get("load-block-summary.csv", [])
     for route in endpoints:
         route_id = route.id
         latency = next(
@@ -897,6 +1305,14 @@ def _build_pdf(
             >= 0.999
             for row in endpoint_capabilities
         )
+        endpoint_time = [
+            row
+            for row in time_rows
+            if row.get("route_id") == route_id and row.get("shape") == "short_short"
+        ]
+        time_ttft = [
+            value for row in endpoint_time if (value := _number(row.get("ttft_p50"))) is not None
+        ]
         rows_data = [
             ["Route", route_id],
             ["Provider / region", f"{route.provider} / {route.region}"],
@@ -926,6 +1342,14 @@ def _build_pdf(
                 "Functional capability probes",
                 f"{functional}/{len(endpoint_capabilities)} measured cells",
             ],
+            [
+                "Matched time panels / TTFT range",
+                (
+                    "not measured"
+                    if not time_ttft
+                    else f"{len(time_ttft)} panels / {min(time_ttft):.2f}–{max(time_ttft):.2f} s"
+                ),
+            ],
         ]
         story.extend(
             [
@@ -950,7 +1374,12 @@ def _build_pdf(
             ]
         )
         capacity_rows = [
-            ["Workload", "AIMD healthy lower bound", "Confirmation state", "Soak successful RPM"]
+            [
+                "Workload",
+                "AIMD healthy lower bound",
+                "Confirmation state",
+                "Soak successful RPM [95% CI]",
+            ]
         ]
         for shape in ("short_short", "long_short", "short_long", "mixed"):
             controller = next(
@@ -964,13 +1393,13 @@ def _build_pdf(
                     str(controller.get("controller_completion_state") or "not measured").replace(
                         "_", " "
                     ),
-                    _format_metric(soak.get("successful_rpm")),
+                    _format_interval(soak, "successful_rpm"),
                 ]
             )
         story.append(
             Table(
                 capacity_rows,
-                colWidths=[38 * mm, 42 * mm, 58 * mm, 34 * mm],
+                colWidths=[36 * mm, 40 * mm, 51 * mm, 45 * mm],
                 repeatRows=1,
                 style=TableStyle(
                     [
@@ -1027,6 +1456,7 @@ def generate_atlas(
         _plot_load_response(tables.get("load-block-summary.csv", []), route_provider, figures_dir)
     )
     figures.extend(_plot_soak(tables.get("load-block-summary.csv", []), figures_dir))
+    figures.extend(_plot_time_variation(tables.get("time-variation-summary.csv", []), figures_dir))
     context = _plot_context(tables.get("matched-cell-summary.csv", []), figures_dir)
     capabilities = _plot_capabilities(tables.get("matched-cell-summary.csv", []), figures_dir)
     figures.extend(item for item in (context, capabilities) if item is not None)

@@ -1,6 +1,13 @@
 from pathlib import Path
 
-from inference_bench.atlas import _build_pdf, _plot_coverage, _plot_load_response
+from inference_bench.atlas import (
+    _build_pdf,
+    _latest_run_groups,
+    _plot_coverage,
+    _plot_latency,
+    _plot_load_response,
+    _plot_time_variation,
+)
 from inference_bench.matrix import CampaignMatrix, MatrixCampaign
 
 
@@ -76,5 +83,59 @@ def test_load_response_uses_unconnected_matched_endpoint_panels(tmp_path, campai
             }
         )
     created = _plot_load_response(rows, {route_id: campaign.routes[0].provider}, figures)
+    assert len(created) == 1
+    assert created[0].read_bytes().startswith(b"\x89PNG")
+
+
+def test_corrected_run_supersedes_whole_capacity_family() -> None:
+    rows = [
+        {"route_id": "r", "shape": "mixed", "phase": "aimd", "run_index": 0, "rate": 1},
+        {"route_id": "r", "shape": "mixed", "phase": "aimd", "run_index": 0, "rate": 2},
+        {"route_id": "r", "shape": "mixed", "phase": "aimd", "run_index": 1, "rate": 3},
+    ]
+    selected = _latest_run_groups(rows, lambda row: (row["route_id"], row["shape"], row["phase"]))
+    assert [row["rate"] for row in selected] == [3]
+
+
+def test_mixed_latency_is_split_into_task_specific_figures(tmp_path) -> None:
+    figures = tmp_path / "figures"
+    figures.mkdir()
+    rows = []
+    for task in ("short_short", "long_short", "short_long", "structured"):
+        rows.append(
+            {
+                "provider": "vertex",
+                "route_id": "route-a",
+                "suite": "latency",
+                "cell_id": f"mixed:{task}:in256:out128",
+                "ttft_p50": 0.4,
+                "latency_p50": 1.0,
+            }
+        )
+    created = _plot_latency(rows, figures)
+    assert len(created) == 4
+    assert {path.name for path in created} == {
+        "latency-mixed-short-short.png",
+        "latency-mixed-long-short.png",
+        "latency-mixed-short-long.png",
+        "latency-mixed-structured.png",
+    }
+
+
+def test_time_variation_uses_endpoint_small_multiples(tmp_path) -> None:
+    figures = tmp_path / "figures"
+    figures.mkdir()
+    rows = [
+        {
+            "provider": "azure",
+            "route_id": "route-a",
+            "shape": "short_short",
+            "panel_index": panel,
+            "ttft_p50": 0.4 + panel * 0.1,
+            "latency_p50": 1.0 + panel * 0.2,
+        }
+        for panel in range(4)
+    ]
+    created = _plot_time_variation(rows, figures)
     assert len(created) == 1
     assert created[0].read_bytes().startswith(b"\x89PNG")
