@@ -1670,6 +1670,116 @@ def _slug(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")[:100]
 
 
+_TIME_PANEL_RE = re.compile(r":panel=(\d{3,})$")
+
+
+def summarize_time_variation(summary: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Project matched-cell estimates onto an explicit route × shape × time panel table."""
+
+    result: list[dict[str, Any]] = []
+    for row in summary:
+        if row.get("suite") != "time_variation":
+            continue
+        cell = str(row.get("cell_id") or "")
+        match = _TIME_PANEL_RE.search(cell)
+        if match is None:
+            raise ValueError(f"time-variation cell lacks a panel identity: {cell}")
+        shape = cell.split(":", 1)[0]
+        projected = dict(row)
+        projected["shape"] = shape
+        projected["panel_index"] = int(match.group(1))
+        result.append(projected)
+    return sorted(result, key=lambda row: (row["route_id"], row["shape"], row["panel_index"]))
+
+
+def _plot_time_variation(summary: list[dict[str, Any]], output: Path) -> list[str]:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    projected = summarize_time_variation(summary)
+    by_route: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in projected:
+        by_route[str(row["route_id"])].append(row)
+    created: list[str] = []
+    metrics = (
+        ("latency_p50", "End-to-end latency p50", "seconds"),
+        ("ttft_p50", "Time to first token p50", "seconds"),
+        ("success_rate", "Request success rate", "proportion"),
+    )
+    for route_id, route_rows in sorted(by_route.items()):
+        shapes = sorted({str(row["shape"]) for row in route_rows})
+        if not shapes:
+            continue
+        fig, axes = plt.subplots(
+            len(shapes),
+            len(metrics),
+            figsize=(4.4 * len(metrics), 3.2 * len(shapes)),
+            squeeze=False,
+        )
+        for shape_index, shape in enumerate(shapes):
+            rows = sorted(
+                (row for row in route_rows if row["shape"] == shape),
+                key=lambda row: int(row["panel_index"]),
+            )
+            for metric_index, (metric, title, unit) in enumerate(metrics):
+                axis = axes[shape_index][metric_index]
+                eligible = [row for row in rows if row.get(metric) is not None]
+                x = [int(row["panel_index"]) for row in eligible]
+                y = [float(row[metric]) for row in eligible]
+                lower = [
+                    float(row.get(f"{metric}_ci95_low") or row[metric]) for row in eligible
+                ]
+                upper = [
+                    float(row.get(f"{metric}_ci95_high") or row[metric]) for row in eligible
+                ]
+                if eligible:
+                    yerr = [
+                        [value - low for value, low in zip(y, lower, strict=True)],
+                        [high - value for value, high in zip(y, upper, strict=True)],
+                    ]
+                    axis.errorbar(
+                        x,
+                        y,
+                        yerr=yerr,
+                        fmt="o-",
+                        linewidth=1.4,
+                        markersize=4,
+                        capsize=2.5,
+                        color="#176B87",
+                    )
+                axis.set_title(title)
+                axis.set_xlabel("Fixed time panel (equal spacing)")
+                axis.set_ylabel(unit)
+                axis.grid(axis="y", alpha=0.2)
+                if metric == "success_rate":
+                    axis.set_ylim(-0.03, 1.03)
+                if metric_index == 0:
+                    axis.text(
+                        -0.23,
+                        0.5,
+                        shape.replace("_", " / "),
+                        transform=axis.transAxes,
+                        rotation=90,
+                        ha="center",
+                        va="center",
+                        fontsize=10,
+                        fontweight="bold",
+                    )
+        fig.suptitle(
+            f"{route_id}: matched low-load measurements across time\n"
+            "Same tasks and offered load in every panel; whiskers are request-level 95% intervals"
+        )
+        fig.tight_layout()
+        suffix = hashlib.sha256(route_id.encode()).hexdigest()[:10]
+        filename = f"time-variation-{_slug(route_id)}-{suffix}.png"
+        fig.savefig(output / filename, dpi=200, bbox_inches="tight", facecolor="white")
+        plt.close(fig)
+        created.append(filename)
+    return created
+
+
 def _plot_matched_cells(summary: list[dict[str, Any]], output: Path) -> list[str]:
     import matplotlib
 
@@ -1897,6 +2007,7 @@ def _generate_report_locked(run_dir: Path, ledger: Ledger, source_snapshot: dict
     coverage_rows = ledger.coverage_rows()
     _assert_terminal_snapshot(ledger, events)
     summary = summarize_rows(rows)
+    time_variation_summary = summarize_time_variation(summary)
     load_summary = summarize_load_events(events, rows=rows)
     config_value = strict_json_loads(ledger.meta("config_json") or "null")
     if not isinstance(config_value, dict):
@@ -1915,6 +2026,7 @@ def _generate_report_locked(run_dir: Path, ledger: Ledger, source_snapshot: dict
     figures = report_dir / "figures"
     figures.mkdir(parents=True, exist_ok=True)
     write_csv(report_dir / "matched-cell-summary.csv", summary)
+    write_csv(report_dir / "time-variation-summary.csv", time_variation_summary)
     write_csv(report_dir / "load-block-summary.csv", load_summary)
     write_csv(report_dir / "controller-summary.csv", controller_summary)
     (report_dir / "controller-summary.json").write_text(
@@ -2043,8 +2155,10 @@ def _generate_report_locked(run_dir: Path, ledger: Ledger, source_snapshot: dict
     (report_dir / "metric-contract.json").write_text(
         canonical_json(metric_contract) + "\n", encoding="utf-8"
     )
-    plot_names = _plot_matched_cells(summary, figures) + _plot_load_small_multiples(
-        events, figures, rows=rows
+    plot_names = (
+        _plot_matched_cells(summary, figures)
+        + _plot_load_small_multiples(events, figures, rows=rows)
+        + _plot_time_variation(summary, figures)
     )
     exposure = ledger.exposure()
     unknown = sum(row["state"] == "unknown" for row in rows)
@@ -2100,6 +2214,8 @@ def _generate_report_locked(run_dir: Path, ledger: Ledger, source_snapshot: dict
         "",
         "- `matched-cell-summary.csv`: estimates, units, n, CI bounds, and methods.",
         "- `load-block-summary.csv`: epoch/block RPM and effective TPM with 95% intervals.",
+        "- `time-variation-summary.csv`: matched low-load panels across the day with 95% "
+        "request-level intervals.",
         "- `controller-summary.csv` / `.json`: AIMD bound/censor semantics, confirmations, "
         "recovery, and soak completion state for every configured endpoint × shape controller.",
         "- `coverage-ledger.csv`: every registered completed, untested, conditional, or "

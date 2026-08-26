@@ -5,7 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from inference_bench.adapters.base import AdapterUnavailable, FailClosedAdapter, adapter_for
+from inference_bench.adapters.base import FailClosedAdapter, adapter_for
+from inference_bench.adapters.providers import VertexOpenAIAdapter
 from inference_bench.config import NATIVE_PLACEHOLDER_ADAPTERS, CampaignConfig, load_config
 from inference_bench.load import scheduled_offsets, soak_rate_rps
 from inference_bench.models import AuthConfig, RouteConfig
@@ -40,18 +41,21 @@ def test_native_stub_is_honestly_labelled(route) -> None:
     assert isinstance(adapter_for("bedrock_native"), FailClosedAdapter)
 
 
-def test_vertex_openai_fails_preflight_until_refreshable_oauth_is_implemented(route) -> None:
+def test_vertex_openai_uses_refreshable_oauth_adapter(route) -> None:
     vertex = replace(
         route,
         provider="google-vertex-ai",
         adapter="vertex_openai",
-        auth=AuthConfig(env="VERTEX_ACCESS_TOKEN"),
+        base_url=(
+            "https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/"
+            "us-central1/endpoints/openapi/chat/completions"
+        ),
+        auth=AuthConfig(env="GOOGLE_APPLICATION_CREDENTIALS"),
     )
     adapter = adapter_for("vertex_openai")
-    assert isinstance(adapter, FailClosedAdapter)
-    assert "vertex_openai" in NATIVE_PLACEHOLDER_ADAPTERS
-    with pytest.raises(AdapterUnavailable, match="honest placeholder"):
-        adapter.preflight(vertex)
+    assert isinstance(adapter, VertexOpenAIAdapter)
+    assert "vertex_openai" not in NATIVE_PLACEHOLDER_ADAPTERS
+    assert vertex.adapter == "vertex_openai"
 
 
 def test_shipped_digitalocean_template_has_fail_closed_pricing() -> None:

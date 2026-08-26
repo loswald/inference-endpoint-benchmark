@@ -139,7 +139,17 @@ PUBLIC_USAGE_PARSE_ERRORS = frozenset(
     }
 )
 HTTP_ADAPTER_NAMES = frozenset(
-    {"openai_compatible", "digitalocean", "azure_openai", "vertex_openai"}
+    {
+        "openai_compatible",
+        "digitalocean",
+        "bedrock_mantle",
+        "bedrock_mantle_responses",
+        "azure_openai",
+        "azure_model_inference",
+        "azure_responses",
+        "vertex_openai",
+        "openrouter",
+    }
 )
 HTTP_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 ROUTE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -407,10 +417,24 @@ class RouteConfig:
                 raise ValueError(
                     "base_url must be an absolute HTTPS URL without credentials or a fragment"
                 )
-            if self.api_family != "chat_completions":
-                raise ValueError(
-                    f"adapter {self.adapter} currently supports only api_family=chat_completions"
+            expected_api_family = (
+                "responses"
+                if self.adapter in {"bedrock_mantle_responses", "azure_responses"}
+                else "chat_completions"
+            )
+            if self.api_family != expected_api_family:
+                message = (
+                    f"adapter {self.adapter} currently supports only "
+                    "api_family=chat_completions"
+                    if expected_api_family == "chat_completions"
+                    else f"adapter {self.adapter} requires api_family=responses"
                 )
+                raise ValueError(message)
+            if (
+                expected_api_family == "responses"
+                and self.output_limit_field != "max_output_tokens"
+            ):
+                raise ValueError("Responses adapters require output_limit_field=max_output_tokens")
         if self.adapter == "openrouter" and not self.upstream_provider:
             raise ValueError("OpenRouter routes must pin upstream_provider")
         if self.upstream_provider is not None and not isinstance(self.upstream_provider, str):

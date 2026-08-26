@@ -10,6 +10,7 @@ from .models import RequestSpec, RouteConfig, canonical_json
 from .workloads import materialize_messages
 
 PAYLOAD_GENERATOR_VERSION = "openai-compatible-synthetic/v3"
+RESPONSES_PAYLOAD_GENERATOR_VERSION = "openai-responses-synthetic/v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +95,111 @@ def materialize_openai_compatible(route: RouteConfig, request: RequestSpec) -> M
         wire_body_sha256=wire_hash,
         bound_payload_sha256=bound_hash,
         input_token_upper_bound=upper,
+    )
+
+
+def _responses_tools(tools: tuple[dict[str, Any], ...]) -> list[dict[str, Any]]:
+    converted: list[dict[str, Any]] = []
+    for tool in tools:
+        if tool.get("type") != "function" or not isinstance(tool.get("function"), dict):
+            converted.append(dict(tool))
+            continue
+        function = tool["function"]
+        converted.append(
+            {
+                "type": "function",
+                **{
+                    key: function[key]
+                    for key in ("name", "description", "parameters", "strict")
+                    if key in function
+                },
+            }
+        )
+    return converted
+
+
+def _responses_input(request: RequestSpec) -> tuple[str | None, list[dict[str, Any]]]:
+    instructions: list[str] = []
+    messages: list[dict[str, Any]] = []
+    for message in materialize_messages(request):
+        role = str(message.get("role") or "user")
+        content = message.get("content")
+        if role == "system" and isinstance(content, str):
+            instructions.append(content)
+            continue
+        if isinstance(content, list):
+            converted: list[dict[str, Any]] = []
+            for part in content:
+                if not isinstance(part, dict):
+                    raise ValueError("Responses message content parts must be objects")
+                if part.get("type") == "text" and isinstance(part.get("text"), str):
+                    converted.append({"type": "input_text", "text": part["text"]})
+                elif part.get("type") == "image_url" and isinstance(
+                    part.get("image_url"), dict
+                ):
+                    url = part["image_url"].get("url")
+                    if not isinstance(url, str) or not url:
+                        raise ValueError("Responses image_url content requires a URL")
+                    converted.append({"type": "input_image", "image_url": url})
+                else:
+                    converted.append(dict(part))
+            content = converted
+        messages.append({"role": role, "content": content})
+    return "\n\n".join(instructions) or None, messages
+
+
+def build_responses_payload(route: RouteConfig, request: RequestSpec) -> dict[str, Any]:
+    instructions, input_messages = _responses_input(request)
+    payload: dict[str, Any] = {
+        "model": route.model,
+        "input": input_messages,
+        "stream": request.stream,
+        "max_output_tokens": request.max_output_tokens,
+    }
+    if instructions:
+        payload["instructions"] = instructions
+    for key, value in (
+        ("temperature", request.temperature),
+        ("top_p", request.top_p),
+        ("seed", request.seed),
+        ("logprobs", request.logprobs),
+    ):
+        if value is not None:
+            payload[key] = value
+    if request.stop:
+        payload["stop"] = list(request.stop)
+    if request.tools:
+        payload["tools"] = _responses_tools(request.tools)
+    if request.tool_choice is not None:
+        choice = request.tool_choice
+        if isinstance(choice, dict) and isinstance(choice.get("function"), dict):
+            choice = {"type": "function", "name": choice["function"].get("name")}
+        payload["tool_choice"] = choice
+    if request.response_format is not None:
+        payload["text"] = {"format": request.response_format}
+    return payload
+
+
+def materialize_responses(route: RouteConfig, request: RequestSpec) -> MaterializedPayload:
+    value = build_responses_payload(route, request)
+    body = canonical_json(value).encode("utf-8")
+    wire_hash = hashlib.sha256(body).hexdigest()
+    bound_hash = hashlib.sha256(
+        b"materialized-payload/v2\0"
+        + RESPONSES_PAYLOAD_GENERATOR_VERSION.encode("utf-8")
+        + b"\0"
+        + body
+    ).hexdigest()
+    upper = len(body) + route.input_token_reservation_overhead
+    if json.loads(body) != value:
+        raise ValueError("materialized Responses payload failed canonical JSON round trip")
+    return MaterializedPayload(
+        value=value,
+        body=body,
+        wire_body_sha256=wire_hash,
+        bound_payload_sha256=bound_hash,
+        input_token_upper_bound=upper,
+        generator_version=RESPONSES_PAYLOAD_GENERATOR_VERSION,
     )
 
 

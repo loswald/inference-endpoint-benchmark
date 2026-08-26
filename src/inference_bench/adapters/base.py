@@ -44,19 +44,40 @@ def adapter_for(
     transport_max_connections: int = 256,
 ) -> Adapter:
     from .openai_compatible import OpenAICompatibleAdapter
+    from .providers import (
+        AzureModelInferenceAdapter,
+        AzureResponsesAdapter,
+        BedrockMantleAdapter,
+        BedrockMantleResponsesAdapter,
+        OpenRouterAdapter,
+        VertexOpenAIAdapter,
+    )
 
-    if name in {"openai_compatible", "digitalocean", "azure_openai"}:
+    if name in {"openai_compatible", "digitalocean"}:
         return OpenAICompatibleAdapter(
+            http2=http2,
+            connection_reuse=connection_reuse,
+            transport_max_connections=transport_max_connections,
+        )
+    provider_adapters = {
+        "bedrock_mantle": BedrockMantleAdapter,
+        "bedrock_mantle_responses": BedrockMantleResponsesAdapter,
+        "azure_openai": AzureModelInferenceAdapter,
+        "azure_model_inference": AzureModelInferenceAdapter,
+        "azure_responses": AzureResponsesAdapter,
+        "openrouter": OpenRouterAdapter,
+        "vertex_openai": VertexOpenAIAdapter,
+    }
+    if name in provider_adapters:
+        return provider_adapters[name](
             http2=http2,
             connection_reuse=connection_reuse,
             transport_max_connections=transport_max_connections,
         )
     if name in {
         "bedrock_native",
-        "vertex_openai",
         "vertex_native",
         "azure_model_inference_native",
-        "openrouter",
     }:
         return FailClosedAdapter(name)
     raise AdapterUnavailable(f"unknown adapter: {name}")

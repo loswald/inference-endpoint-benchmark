@@ -776,6 +776,49 @@ def plan_cache(route: RouteConfig, config: dict[str, Any], *, seed: int) -> list
     return result
 
 
+def plan_time_variation(
+    route: RouteConfig, config: dict[str, Any], *, seed: int
+) -> list[RequestSpec]:
+    """Matched low-load sentinels sampled at fixed offsets across the day.
+
+    This is intentionally a dedicated campaign, not traffic overlapped with capacity tests. Each
+    panel repeats the same route-neutral workloads, allowing within-route time-of-day comparisons
+    without changing task content or offered load.
+    """
+
+    panels = int(config.get("panels", 12))
+    interval_seconds = float(config.get("interval_minutes", 120)) * 60
+    repeats = int(config.get("samples_per_route_shape", 3))
+    shapes = config.get("shapes", ["short_short", "long_short"])
+    result: list[RequestSpec] = []
+    for panel in range(panels):
+        for shape in shapes:
+            for repeat in range(repeats):
+                logical = f"time-variation:{route.id}:panel-{panel:03d}:{shape}:{repeat:03d}"
+                spec = shape_spec(
+                    route,
+                    shape,
+                    logical,
+                    suite="time_variation",
+                    seed=seed,
+                    workload_key=f"time-variation:{{route}}:{shape}:repeat-{repeat:03d}",
+                    matched_cell_suffix=f":panel={panel:03d}",
+                    shape_config=config,
+                )
+                result.append(
+                    replace(
+                        spec,
+                        metadata={
+                            **spec.metadata,
+                            "time_variation_panel": panel,
+                            "time_variation_offset_seconds": panel * interval_seconds,
+                            "time_variation_repeat": repeat,
+                        },
+                    )
+                )
+    return result
+
+
 PLANNERS = {
     "warmup": plan_warmup,
     "latency": plan_latency,
@@ -785,6 +828,7 @@ PLANNERS = {
     "quality": plan_quality,
     "cache": plan_cache,
     "interactions": plan_interactions,
+    "time_variation": plan_time_variation,
 }
 
 

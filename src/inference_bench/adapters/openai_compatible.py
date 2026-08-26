@@ -33,7 +33,12 @@ def _utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-def _headers(route: RouteConfig) -> dict[str, str]:
+def static_api_key_headers(route: RouteConfig) -> dict[str, str]:
+    """Build deterministic headers for routes authenticated by a static API key.
+
+    OAuth-backed adapters override :meth:`OpenAICompatibleAdapter.headers`. Keeping this helper
+    public avoids duplicating the control-character and HTTP-header validation contract.
+    """
     token = os.environ.get(route.auth.env)
     if not token:
         raise RuntimeError(f"required credential environment variable is unset: {route.auth.env}")
@@ -132,6 +137,24 @@ class OpenAICompatibleAdapter:
         if self.client is not None and not self._provided_client:
             await self.client.aclose()
 
+    def headers(self, route: RouteConfig) -> dict[str, str]:
+        """Return the exact headers for the next request.
+
+        Subclasses may refresh short-lived credentials here. ``prepare`` is called before the
+        durable spend claim, so an authentication refresh failure cannot create an ambiguous
+        inference outcome.
+        """
+
+        return static_api_key_headers(route)
+
+    def observe_provider_metadata(self, route: RouteConfig, data: dict[str, Any]) -> bool:
+        """Validate provider-routing metadata when a specialized adapter supplies it."""
+
+        return False
+
+    def requires_provider_metadata(self, route: RouteConfig) -> bool:
+        return False
+
     def preflight(self, route: RouteConfig) -> None:
         if TRANSPORT_HEADER_PROFILE != "openai-json-accept-encoding-identity/v1":
             raise RuntimeError("unknown transport header profile")
@@ -143,12 +166,12 @@ class OpenAICompatibleAdapter:
             route.transport_max_connections != self.transport_max_connections
         ):
             raise RuntimeError("adapter connection pool does not match route identity")
-        _headers(route)
+        self.headers(route)
 
     def prepare(self, route: RouteConfig, request: RequestSpec) -> PreparedTransport:
         self.preflight(route)
         return PreparedTransport(
-            payload=materialize_openai_compatible(route, request), headers=_headers(route)
+            payload=materialize_openai_compatible(route, request), headers=self.headers(route)
         )
 
     @asynccontextmanager
@@ -263,6 +286,32 @@ class OpenAICompatibleAdapter:
                     headers_at,
                     ended,
                     "nonfinite_or_noncanonical_json_success_body",
+                )
+            try:
+                provider_metadata_seen = self.observe_provider_metadata(route, data)
+            except ValueError:
+                return self._protocol_error(
+                    route,
+                    request,
+                    response,
+                    raw,
+                    started_utc,
+                    started,
+                    headers_at,
+                    ended,
+                    "provider_attestation_failed",
+                )
+            if self.requires_provider_metadata(route) and not provider_metadata_seen:
+                return self._protocol_error(
+                    route,
+                    request,
+                    response,
+                    raw,
+                    started_utc,
+                    started,
+                    headers_at,
+                    ended,
+                    "provider_attestation_missing",
                 )
             choices = data.get("choices")
             if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
@@ -407,7 +456,11 @@ class OpenAICompatibleAdapter:
                 finish_reason=normalize_finish_reason(finish_reason),
                 output_text=content if content is not None else refusal or "",
                 tool_calls=tuple(tool_calls),
-                provider_request_id=retained.get("x-request-id") or retained.get("request-id"),
+                provider_request_id=(
+                    data.get("id")
+                    if isinstance(data.get("id"), str) and data.get("id")
+                    else retained.get("x-request-id") or retained.get("request-id")
+                ),
                 retained_headers=retained,
             )
 
@@ -433,6 +486,8 @@ class OpenAICompatibleAdapter:
         terminal_choice_count = 0
         terminal_finish_reason_raw: str | None = None
         done_seen = False
+        provider_metadata_seen = False
+        provider_response_id: str | None = None
         wire_digest = hashlib.sha256()
         async with client.stream(
             "POST",
@@ -476,6 +531,19 @@ class OpenAICompatibleAdapter:
                     canonical_json(event)
                 except (TypeError, ValueError):
                     malformed_reasons.append("nonfinite_or_noncanonical_json_event")
+                    continue
+                response_id = event.get("id")
+                if isinstance(response_id, str) and response_id:
+                    if provider_response_id is not None and provider_response_id != response_id:
+                        malformed_reasons.append("conflicting_provider_response_id")
+                        continue
+                    provider_response_id = response_id
+                try:
+                    provider_metadata_seen = (
+                        self.observe_provider_metadata(route, event) or provider_metadata_seen
+                    )
+                except ValueError:
+                    malformed_reasons.append("provider_attestation_failed")
                     continue
                 valid_event_count += 1
                 if "usage" in event:
@@ -578,6 +646,8 @@ class OpenAICompatibleAdapter:
         ttft = None if first_visible_at is None else first_visible_at - started
         decode_proxy = None if ttft is None else max(0.0, (ended - started) - ttft)
         usage = _parse_stream_usage(usage_values)
+        if self.requires_provider_metadata(route) and not provider_metadata_seen:
+            malformed_reasons.append("provider_attestation_missing")
         if route.stream_usage_mode == "required" and not (
             usage.input_tokens is not None and usage.output_tokens is not None
         ):
@@ -676,7 +746,11 @@ class OpenAICompatibleAdapter:
             finish_reason=finish_reason,
             output_text=output_text,
             tool_calls=reconstructed_tools,
-            provider_request_id=retained.get("x-request-id") or retained.get("request-id"),
+            provider_request_id=(
+                provider_response_id
+                or retained.get("x-request-id")
+                or retained.get("request-id")
+            ),
             retained_headers=retained,
         )
 

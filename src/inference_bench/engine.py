@@ -41,8 +41,13 @@ def _materialized_input_is_nonempty(value: dict[str, Any]) -> bool:
     """
 
     messages = value.get("messages")
+    responses_input = value.get("input")
     tools = value.get("tools")
-    return bool(isinstance(messages, list) and messages) or bool(isinstance(tools, list) and tools)
+    return (
+        bool(isinstance(messages, list) and messages)
+        or bool(isinstance(responses_input, list) and responses_input)
+        or bool(isinstance(tools, list) and tools)
+    )
 
 
 def deterministic_request_id(

@@ -63,6 +63,18 @@ _PUBLIC_SUITE_KEYS = {
     "output": {"enabled", "fallback_max_output_tokens"},
     "quality": {"enabled", "repeats"},
     "cache": {"enabled", "repeats", "prefix_tokens"},
+    "time_variation": {
+        "enabled",
+        "panels",
+        "interval_minutes",
+        "samples_per_route_shape",
+        "shapes",
+        "offered_rps",
+        "long_input_tokens",
+        "long_input_overflow",
+        "long_output_tokens",
+        "long_output_overflow",
+    },
     "aimd": {
         "enabled",
         "shapes",
@@ -152,10 +164,8 @@ _SHAPES = {"short_short", "long_short", "short_long", "mixed"}
 NATIVE_PLACEHOLDER_ADAPTERS = frozenset(
     {
         "bedrock_native",
-        "vertex_openai",
         "vertex_native",
         "azure_model_inference_native",
-        "openrouter",
     }
 )
 
@@ -678,6 +688,18 @@ def _validate_suites(
         raise ValueError(f"unknown suite(s): {', '.join(unknown_suites)}")
     if not suites or not any(values.get("enabled", True) for values in suites.values()):
         raise ValueError("at least one benchmark suite must be enabled")
+    time_variation = suites.get("time_variation")
+    if time_variation and time_variation.get("enabled", True):
+        other_enabled = [
+            name
+            for name, values in suites.items()
+            if name != "time_variation" and values.get("enabled", True)
+        ]
+        if other_enabled:
+            raise ValueError(
+                "time_variation must run as a dedicated low-load campaign; overlapping it with "
+                "capacity or capability suites would confound either measurement"
+            )
     for name, values in suites.items():
         _reject_unknown(f"suites.{name}", values, _PUBLIC_SUITE_KEYS[name])
         if "enabled" in values:
@@ -698,7 +720,7 @@ def _validate_suites(
             invalid = sorted(set(shapes) - _SHAPES)
             if invalid:
                 raise ValueError(f"suites.{name}.shapes has unknown shapes: {invalid}")
-        if name in {"warmup", "latency", "aimd", "soak"}:
+        if name in {"warmup", "latency", "aimd", "soak", "time_variation"}:
             for axis in ("input", "output"):
                 target_key = f"long_{axis}_tokens"
                 overflow_key = f"long_{axis}_overflow"
@@ -711,6 +733,19 @@ def _validate_suites(
                         raise ValueError(f"suites.{name}.{overflow_key} must be fail or clip")
         if name == "static":
             _positive_number(values.get("offered_rps", 1.0), "suites.static.offered_rps")
+        if name == "time_variation":
+            _positive_integer(values.get("panels", 12), "suites.time_variation.panels")
+            _positive_number(
+                values.get("interval_minutes", 120),
+                "suites.time_variation.interval_minutes",
+            )
+            _positive_integer(
+                values.get("samples_per_route_shape", 3),
+                "suites.time_variation.samples_per_route_shape",
+            )
+            _positive_number(
+                values.get("offered_rps", 0.2), "suites.time_variation.offered_rps"
+            )
         if name == "context":
             percentages = values.get("percentages", [1, 10, 25, 50, 75, 90, 95, 99])
             if not isinstance(percentages, list) or not percentages:

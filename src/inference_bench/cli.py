@@ -18,6 +18,7 @@ from .engine import BenchmarkEngine, PaymentRequiredLatched, ReservationOverrunL
 from .environment import locked_distribution_versions, validate_run_directory_separation
 from .ledger import BudgetExceeded, Ledger, TimeLimitReached
 from .load import run_aimd, run_soak
+from .matrix import load_matrix, matrix_plan, run_matrix
 from .models import TRANSPORT_HEADER_PROFILE, RequestSpec, RouteConfig, canonical_json
 from .plan import build_plan
 from .report import generate_report
@@ -216,6 +217,55 @@ async def _run_static(
     return None
 
 
+async def _run_time_variation(
+    engine: BenchmarkEngine, specs: list[RequestSpec], config: CampaignConfig
+) -> str | None:
+    """Execute fixed-offset, low-load panels without overlapping other benchmark traffic."""
+
+    suite = config.suites["time_variation"]
+    offered_rps = float(suite.get("offered_rps", 0.2))
+    by_panel: dict[int, list[RequestSpec]] = {}
+    for spec in specs:
+        panel = int(spec.metadata["time_variation_panel"])
+        by_panel.setdefault(panel, []).append(spec)
+    loop = asyncio.get_running_loop()
+    campaign_anchor = loop.time()
+    for panel in sorted(by_panel):
+        panel_specs = by_panel[panel]
+        offset = float(panel_specs[0].metadata["time_variation_offset_seconds"])
+        await asyncio.sleep(max(0.0, campaign_anchor + offset - loop.time()))
+        random.Random(f"time-variation-panel/v1:{config.seed}:{panel}").shuffle(panel_specs)
+        engine.ledger.record_event_once(
+            f"time_variation_panel_started:{panel}",
+            "time_variation_panel_started",
+            {"panel": panel, "planned_offset_seconds": offset, "requests": len(panel_specs)},
+        )
+        pending = _pending_static_specs(engine, panel_specs)
+        for spec in pending:
+            scheduled_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+            try:
+                result = await engine.execute(
+                    spec, scheduled_at_utc=scheduled_at, queue_delay_seconds=0.0
+                )
+            except BudgetExceeded:
+                return "cost_guard"
+            except TimeLimitReached:
+                return "time_guard"
+            except PaymentRequiredLatched:
+                return "http_402_latch"
+            except ReservationOverrunLatched:
+                return "reservation_overrun_latch"
+            if result is not None and result.http_status == 402:
+                return "http_402_latch"
+            await asyncio.sleep(1.0 / offered_rps)
+        engine.ledger.record_event_once(
+            f"time_variation_panel_completed:{panel}",
+            "time_variation_panel_completed",
+            {"panel": panel, "planned_offset_seconds": offset},
+        )
+    return None
+
+
 async def run_campaign(
     config: CampaignConfig, output: Path, *, invocation: tuple[str, ...] = ()
 ) -> None:
@@ -302,6 +352,8 @@ async def run_campaign(
             )
             raise
         static_specs = plan_static_suites(config.routes, config.suites, seed=config.seed)
+        time_variation_specs = [spec for spec in static_specs if spec.suite == "time_variation"]
+        static_specs = [spec for spec in static_specs if spec.suite != "time_variation"]
         static_blocks = _static_execution_blocks(config, static_specs)
         _record_static_execution_order(ledger, static_blocks)
         for _, block in static_blocks:
@@ -316,6 +368,18 @@ async def run_campaign(
                         {"reason": static_reason},
                     )
                     return
+        if time_variation_specs:
+            time_variation_reason = await _run_time_variation(
+                engine, time_variation_specs, config
+            )
+            if time_variation_reason:
+                ledger.finalize_plan(time_variation_reason)
+                ledger.record_event_once(
+                    "campaign_terminal",
+                    "campaign_terminal",
+                    {"reason": time_variation_reason},
+                )
+                return
         aimd = config.suites.get("aimd")
         if aimd and aimd.get("enabled", True):
             aimd_order = _capacity_execution_order(config, "aimd")
@@ -638,10 +702,20 @@ def _parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     plan = sub.add_parser("plan", help="credential-free plan and conservative cost calculation")
     plan.add_argument("config", type=Path)
+    plan_matrix = sub.add_parser(
+        "plan-matrix", help="credential-free plan for parallel provider campaigns"
+    )
+    plan_matrix.add_argument("matrix", type=Path)
     run = sub.add_parser("run", help="execute a live campaign")
     run.add_argument("config", type=Path)
     run.add_argument("--output", type=Path, required=True)
     run.add_argument("--confirm-live", action="store_true")
+    run_matrix_parser = sub.add_parser(
+        "run-matrix", help="run providers in parallel; isolate endpoint capacity within provider"
+    )
+    run_matrix_parser.add_argument("matrix", type=Path)
+    run_matrix_parser.add_argument("--output-root", type=Path, required=True)
+    run_matrix_parser.add_argument("--confirm-live", action="store_true")
     report = sub.add_parser("report", help="build matched-cell tables, audit, plots, and Markdown")
     report.add_argument("run_dir", type=Path)
     return parser
@@ -653,6 +727,9 @@ def main(argv: list[str] | None = None) -> int:
         config = load_config(args.config)
         print(json.dumps(build_plan(config).to_dict(), indent=2, sort_keys=True))
         return 0
+    if args.command == "plan-matrix":
+        print(json.dumps(matrix_plan(load_matrix(args.matrix)), indent=2, sort_keys=True))
+        return 0
     if args.command == "run":
         if not args.confirm_live:
             print("refusing live traffic without --confirm-live", file=sys.stderr)
@@ -660,6 +737,26 @@ def main(argv: list[str] | None = None) -> int:
         config = load_config(args.config)
         raw_argv = tuple(sys.argv if argv is None else ("inference-bench", *argv))
         asyncio.run(run_campaign(config, args.output, invocation=raw_argv))
+        return 0
+    if args.command == "run-matrix":
+        if not args.confirm_live:
+            print("refusing live traffic without --confirm-live", file=sys.stderr)
+            return 2
+        raw_argv = tuple(sys.argv if argv is None else ("inference-bench", *argv))
+
+        async def matrix_runner(
+            config: CampaignConfig, output: Path, invocation: tuple[str, ...]
+        ) -> None:
+            await run_campaign(config, output, invocation=invocation)
+
+        asyncio.run(
+            run_matrix(
+                load_matrix(args.matrix),
+                args.output_root,
+                matrix_runner,
+                invocation=raw_argv,
+            )
+        )
         return 0
     if args.command == "report":
         print(generate_report(args.run_dir))
