@@ -181,10 +181,22 @@ scientific design is driven by workload coverage, replications, and load behavio
 inference-bench plan-matrix .private/providers.yaml
 inference-bench run-matrix .private/providers.yaml \
   --output-root runs/multi-provider-001 --confirm-live
+
+# Combine a main AIMD run, a follow-up soak run, and optional time panels:
+inference-bench report-matrix .private/providers.yaml \
+  --run-root runs/multi-provider-001 \
+  --run-root runs/multi-provider-soak-001 \
+  --output published/atlas
 ```
 
 Every provider gets its own configuration, wall-clock cap, output directory, and durable ledger.
 One provider failing does not merge or relabel another provider's evidence.
+
+`report-matrix` regenerates each terminal provider report, combines only matched tables, and builds
+`inference-endpoint-evidence-atlas.pdf`. The atlas starts with method and coverage pages, then shows
+separate figures for low-load latency, AIMD bounds, sustained RPM/TPM, context retrieval, and
+functional capabilities. It ends with a one-page operating-evidence sheet for every exact route.
+Missing measurements stay blank and labelled; they never become zeroes.
 
 ## Output that engineers can use
 
@@ -202,6 +214,8 @@ Every report contains:
 - `outlier-audit.jsonl` — the exact reason every suspicious observation was kept, excluded from a
   particular metric, or censored;
 - route-specific figures with units, sample counts, and uncertainty.
+- `inference-endpoint-evidence-atlas.pdf` — combined multi-provider guide with one endpoint page per
+  route and no heterogeneous global score.
 
 Figures use small multiples and matched cells. Capacity points are not connected into looping
 spaghetti. Different workloads are not averaged together. Log scales are used only when a panel

@@ -13,6 +13,7 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .atlas import generate_atlas
 from .config import CampaignConfig, load_config
 from .engine import BenchmarkEngine, PaymentRequiredLatched, ReservationOverrunLatched
 from .environment import locked_distribution_versions, validate_run_directory_separation
@@ -708,6 +709,12 @@ def _parser() -> argparse.ArgumentParser:
     run_matrix_parser.add_argument("--confirm-live", action="store_true")
     report = sub.add_parser("report", help="build matched-cell tables, audit, plots, and Markdown")
     report.add_argument("run_dir", type=Path)
+    report_matrix = sub.add_parser(
+        "report-matrix", help="combine terminal provider runs into a readable PDF evidence atlas"
+    )
+    report_matrix.add_argument("matrix", type=Path)
+    report_matrix.add_argument("--run-root", action="append", type=Path, required=True)
+    report_matrix.add_argument("--output", type=Path, required=True)
     return parser
 
 
@@ -750,6 +757,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "report":
         print(generate_report(args.run_dir))
+        return 0
+    if args.command == "report-matrix":
+        print(generate_atlas(load_matrix(args.matrix), args.run_root, args.output))
         return 0
     raise AssertionError("unreachable")
 
