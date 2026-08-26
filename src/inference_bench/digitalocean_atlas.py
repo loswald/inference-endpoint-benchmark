@@ -110,47 +110,50 @@ def _plot_capacity(rows: list[dict[str, str]], source_id: str, destination: Path
         if positive and max(positive) / min(positive) >= 20:
             axis.set_xscale("log")
         axis.set_xlabel("Offered requests/second")
-        axis.set_title(
-            f"DigitalOcean AIMD capacity - {SHAPE_LABELS[shape]}",
-            loc="left",
+        legend_handles = [
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                linestyle="none",
+                markerfacecolor="#0F766E",
+                markeredgecolor="#0F766E",
+                label="confirmed healthy lower bound",
+            ),
+            Line2D(
+                [0],
+                [0],
+                marker="s",
+                linestyle="none",
+                markerfacecolor="white",
+                markeredgecolor="#0F766E",
+                label="exploratory healthy observation",
+            ),
+            Line2D(
+                [0],
+                [0],
+                marker="|",
+                linestyle="none",
+                color="#D97706",
+                label="unhealthy upper bound",
+            ),
+        ]
+        figure.suptitle(
+            f"DigitalOcean AIMD capacity — {SHAPE_LABELS[shape]}",
+            x=0.08,
+            y=0.99,
+            ha="left",
             fontweight="bold",
         )
-        axis.legend(
-            handles=[
-                Line2D(
-                    [0],
-                    [0],
-                    marker="o",
-                    linestyle="none",
-                    markerfacecolor="#0F766E",
-                    markeredgecolor="#0F766E",
-                    label="confirmed healthy lower bound",
-                ),
-                Line2D(
-                    [0],
-                    [0],
-                    marker="s",
-                    linestyle="none",
-                    markerfacecolor="white",
-                    markeredgecolor="#0F766E",
-                    label="exploratory healthy observation",
-                ),
-                Line2D(
-                    [0],
-                    [0],
-                    marker="|",
-                    linestyle="none",
-                    color="#D97706",
-                    label="unhealthy upper bound",
-                ),
-            ],
+        figure.legend(
+            handles=legend_handles,
             frameon=False,
             ncol=3,
-            loc="lower left",
-            bbox_to_anchor=(0, 1.01),
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.955),
         )
         _style_axis(axis)
-        figure.tight_layout()
+        figure.tight_layout(rect=(0, 0, 1, 0.89))
         path = destination / f"digitalocean-capacity-{shape}.png"
         figure.savefig(path, dpi=210, bbox_inches="tight", facecolor="white")
         plt.close(figure)
@@ -571,11 +574,13 @@ def _build_pdf(
             ["Model / API", f"{endpoint_id} / {endpoint.get('api_surface') or '-'}"],
             [
                 "Region / API version",
-                f"{endpoint.get('server_region')} / {endpoint.get('api_version')}",
+                f"{endpoint.get('server_region') or 'not reported'} / "
+                f"{endpoint.get('api_version') or 'not reported'}",
             ],
             [
                 "Context / max output",
-                f"{endpoint.get('context_window')} / {endpoint.get('max_output_tokens')} tokens",
+                f"{endpoint.get('context_window') or 'not documented'} / "
+                f"{endpoint.get('max_output_tokens') or 'not documented'} tokens",
             ],
             [
                 "Input / output price",
@@ -602,13 +607,17 @@ def _build_pdf(
         for shape in SHAPES:
             aimd = capacity_index.get((endpoint_id, shape), {})
             sustained = soak_index.get((endpoint_id, shape), {})
+            bound = _number(aimd.get("capacity_lower_bound_rps"))
+            soak_rate = _number(sustained.get("two_minute_soak_observed_rps"))
+            soak_state = str(sustained.get("status") or "not measured").replace("_", " ")
             capacity_rows.append(
                 [
                     SHAPE_LABELS[shape],
                     str(aimd.get("capacity_claim") or "not measured").replace("_", " "),
-                    f"{_format(aimd.get('capacity_lower_bound_rps'))} RPS",
-                    f"{_format(sustained.get('two_minute_soak_observed_rps'))} RPS / "
-                    f"{str(sustained.get('status') or 'not measured').replace('_', ' ')}",
+                    "not established" if bound is None else f"{_format(bound)} RPS",
+                    f"not measured / {soak_state}"
+                    if soak_rate is None
+                    else f"{_format(soak_rate)} RPS / {soak_state}",
                 ]
             )
         story.extend(
@@ -670,7 +679,9 @@ def _build_pdf(
                     Paragraph(
                         "Observed boundaries: "
                         + "; ".join(
-                            f"{row.get('dimension')}: {row.get('finding')}" for row in findings
+                            f"{str(row.get('dimension') or '').replace('_', ' ')}: "
+                            f"{str(row.get('finding') or '').replace('_', ' ')}"
+                            for row in findings
                         ),
                         styles["DoSmall"],
                     ),
