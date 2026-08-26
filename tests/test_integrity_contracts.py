@@ -1888,6 +1888,19 @@ def test_terminal_run_directory_refuses_live_reuse(tmp_path, campaign) -> None:
     assert snapshot() == before
 
 
+def test_runtime_identity_failure_creates_no_run_state(tmp_path, campaign, monkeypatch) -> None:
+    output = tmp_path / "new-run"
+
+    def fail_manifest(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("live runs require clean committed source")
+
+    monkeypatch.setattr("inference_bench.cli._runtime_manifest", fail_manifest)
+    with pytest.raises(RuntimeError, match="clean committed source"):
+        asyncio.run(run_campaign(campaign, output, invocation=("inference-bench", "run")))
+
+    assert not output.exists()
+
+
 def test_sealed_terminal_run_does_not_repair_missing_projection(tmp_path, campaign) -> None:
     ledger = Ledger(tmp_path)
     ledger.initialize(

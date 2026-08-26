@@ -280,12 +280,17 @@ async def run_campaign(
         raise ValueError(
             "live run contains fail-closed native adapter placeholders: " + ", ".join(placeholders)
         )
+    # Validate the source/runtime identity before creating any run state. A dirty checkout,
+    # missing dependency, or other local provenance failure must leave the requested output path
+    # untouched so the operator can fix the checkout and retry normally.
+    run_manifest = _runtime_manifest(config, invocation, output_dir=output)
     output.mkdir(parents=True, exist_ok=True)
     ledger = Ledger(output, exclusive_owner=True)
     try:
         ledger.initialize(
             campaign_hash=config.identity_hash, config_json=canonical_json(config.public_dict())
         )
+        ledger.set_meta_once("run_manifest_json", canonical_json(run_manifest))
         if ledger.event_by_key("campaign_terminal") is not None:
             # A crash may commit the canonical terminal event just before its prompt-free JSONL
             # projection or terminal source digest is fsynced. Repairing either derived artifact
@@ -310,19 +315,6 @@ async def run_campaign(
         ledger.close()
         raise
     try:
-        run_manifest = _runtime_manifest(config, invocation, output_dir=output)
-    except Exception:
-        ledger.finalize_plan("preflight_failed")
-        ledger.record_event_once(
-            "campaign_terminal",
-            "campaign_terminal",
-            {"reason": "preflight_failed", "error_kind": "runtime_manifest_preflight_error"},
-        )
-        ledger.rebuild_events_jsonl()
-        ledger.close()
-        raise
-    try:
-        ledger.set_meta_once("run_manifest_json", canonical_json(run_manifest))
         recovered = ledger.recover_in_flight()
         if recovered:
             ledger.record_event("resume_notice", {"unknown_in_flight_count": recovered})
