@@ -441,12 +441,12 @@ def summarize_rows(rows: list[dict[str, Any]], *, seed: int = 1) -> list[dict[st
     return output
 
 
-def _load_epoch_usage(
+def _load_epoch_final_rows(
     epoch: dict[str, Any], rows: list[dict[str, Any]] | None
-) -> tuple[bool, int | None, int | None, str]:
-    """Join an epoch to final per-logical-request rows to verify successful usage totals."""
+) -> tuple[list[dict[str, Any]] | None, str]:
+    """Join an epoch to its final logical-request rows once, without trusting event totals."""
     if rows is None:
-        return False, None, None, "request_ledger_not_supplied"
+        return None, "request_ledger_not_supplied"
     prefix = f"load:{epoch['route_id']}:{epoch['shape']}:{epoch['epoch_id']}:"
     attempts: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -459,10 +459,21 @@ def _load_epoch_usage(
         if terminal:
             final_rows.append(max(terminal, key=lambda row: int(row.get("attempt_index") or 0)))
     if len(final_rows) != int(epoch["completed"]):
-        return False, None, None, "ledger_join_completed_count_mismatch"
+        return None, "ledger_join_completed_count_mismatch"
     successes = [row for row in final_rows if row.get("status") == "success"]
     if len(successes) != int(epoch["successful"]):
-        return False, None, None, "ledger_join_success_count_mismatch"
+        return None, "ledger_join_success_count_mismatch"
+    return final_rows, "request_ledger_join"
+
+
+def _load_epoch_usage(
+    epoch: dict[str, Any], rows: list[dict[str, Any]] | None
+) -> tuple[bool, int | None, int | None, str]:
+    """Join an epoch to final per-logical-request rows to verify successful usage totals."""
+    final_rows, source = _load_epoch_final_rows(epoch, rows)
+    if final_rows is None:
+        return False, None, None, source
+    successes = [row for row in final_rows if row.get("status") == "success"]
     if any(
         not row.get("usage_eligible")
         or row.get("input_tokens") is None
@@ -474,6 +485,28 @@ def _load_epoch_usage(
         True,
         sum(int(row["input_tokens"]) for row in successes),
         sum(int(row["output_tokens"]) for row in successes),
+        "request_ledger_join",
+    )
+
+
+def _load_epoch_quality(
+    epoch: dict[str, Any], rows: list[dict[str, Any]] | None
+) -> tuple[bool, float | None, int | None, str]:
+    """Return scored-task successes and trials for one inferential load block."""
+    final_rows, source = _load_epoch_final_rows(epoch, rows)
+    if final_rows is None:
+        return False, None, None, source
+    if any(
+        row.get("quality_eligible") != 1
+        or isinstance(row.get("quality_score"), bool)
+        or not isinstance(row.get("quality_score"), (int, float))
+        for row in final_rows
+    ):
+        return False, None, None, "predeclared_quality_score_incomplete"
+    return (
+        True,
+        sum(float(row["quality_score"]) for row in final_rows),
+        len(final_rows),
         "request_ledger_join",
     )
 
@@ -591,6 +624,12 @@ def summarize_load_events(
         output_tokens = [float(usage[index][2] or 0) for index in usage_complete_indexes]
         usage_elapsed = [elapsed_wall[index] for index in usage_complete_indexes]
         usage_sources = Counter(item[3] for item in usage)
+        quality = [_load_epoch_quality(block, rows) for block in blocks]
+        quality_complete_indexes = [index for index, item in enumerate(quality) if item[0]]
+        quality_successes = [float(quality[index][1] or 0) for index in quality_complete_indexes]
+        quality_trials = [float(quality[index][2] or 0) for index in quality_complete_indexes]
+        quality_elapsed = [elapsed_wall[index] for index in quality_complete_indexes]
+        quality_sources = Counter(item[3] for item in quality)
         if not blocks:
             tpm_state = "censored_no_capacity_eligible_block"
         elif len(usage_complete_indexes) == len(blocks):
@@ -659,6 +698,16 @@ def summarize_load_events(
             "tpm_censored_blocks_n": len(blocks) - len(usage_complete_indexes),
             "tpm_reporting_state": tpm_state,
             "usage_verification_counts_json": canonical_json(dict(usage_sources)),
+            "quality_complete_blocks_n": len(quality_complete_indexes),
+            "quality_censored_blocks_n": len(blocks) - len(quality_complete_indexes),
+            "quality_reporting_state": (
+                "complete"
+                if blocks and len(quality_complete_indexes) == len(blocks)
+                else "partial_complete_blocks_only"
+                if quality_complete_indexes
+                else "censored_no_complete_quality_block"
+            ),
+            "quality_verification_counts_json": canonical_json(dict(quality_sources)),
             "offered_rate_denominator": "scheduled-arrival window",
             "achieved_rate_denominator": (
                 "at least the full registered arrival window, extended through response drain"
@@ -741,6 +790,23 @@ def summarize_load_events(
             _estimate_columns(
                 "physical_attempt_success_rate",
                 block_proportion_interval(physical_successes, physical_attempts, seed=seed),
+            )
+        )
+        record.update(
+            _estimate_columns(
+                "quality_mean",
+                block_proportion_interval(quality_successes, quality_trials, seed=seed),
+            )
+        )
+        record.update(
+            _estimate_columns(
+                "quality_adjusted_rpm",
+                block_rate_interval(
+                    quality_successes,
+                    quality_elapsed,
+                    unit_name="quality-weighted successful tasks",
+                    seed=seed,
+                ),
             )
         )
         record.update(
