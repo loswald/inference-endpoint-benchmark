@@ -111,6 +111,13 @@ def test_context_plan_is_lazy_and_retrieval_aware(route) -> None:
     assert "BEGIN_MARKER" in message and "MIDDLE_MARKER" in message and "END_MARKER" in message
 
 
+def test_common_shape_omits_optional_sampling_controls(route) -> None:
+    spec = shape_spec(route, "short_short", "baseline", suite="latency", seed=1)
+    assert spec.temperature is None
+    assert spec.top_p is None
+    assert spec.seed is None
+
+
 def test_unverified_capability_parameters_are_acceptance_only(route) -> None:
     specs = plan_capability(route, {}, seed=1)
     acceptance = [spec for spec in specs if spec.cell_id.startswith("parameter_acceptance_only_")]

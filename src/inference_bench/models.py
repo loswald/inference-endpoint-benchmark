@@ -684,7 +684,10 @@ class RequestSpec:
     max_output_tokens: int
     stream: bool = True
     timeout_seconds: float = 180.0
-    temperature: float | None = 0.0
+    # Optional sampling controls are omitted from common baselines. Capability
+    # and interaction suites add them explicitly, so a model that does not
+    # implement temperature is not excluded from otherwise comparable tests.
+    temperature: float | None = None
     top_p: float | None = None
     seed: int | None = None
     stop: tuple[str, ...] = ()
