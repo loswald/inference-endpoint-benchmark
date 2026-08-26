@@ -741,9 +741,7 @@ def test_malformed_nonstream_tool_calls_and_nonfinite_json_are_protocol_errors(
     assert nonfinite.error_kind == "invalid_json_success_body"
 
 
-def test_null_tool_calls_are_absent_but_other_falsy_shapes_are_rejected(
-    monkeypatch, route
-) -> None:
+def test_null_tool_calls_are_absent_but_other_falsy_shapes_are_rejected(monkeypatch, route) -> None:
     monkeypatch.setenv("TEST_API_KEY", "not-written")
 
     async def run(value):
@@ -779,7 +777,7 @@ def test_stream_allows_explicit_null_tool_calls(monkeypatch, route) -> None:
         'data: {"choices":[{"index":0,"delta":{"tool_calls":null},'
         '"finish_reason":"stop"}],"usage":{"prompt_tokens":2,'
         '"completion_tokens":1}}\n\n'
-        'data: [DONE]\n\n'
+        "data: [DONE]\n\n"
     )
 
     async def run():

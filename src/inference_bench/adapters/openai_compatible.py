@@ -442,6 +442,18 @@ class OpenAICompatibleAdapter:
                     ended,
                     "empty_choice_without_terminal_finish",
                 )
+            if request.logprobs is True and choice.get("logprobs") is None:
+                return self._protocol_error(
+                    route,
+                    request,
+                    response,
+                    raw,
+                    started_utc,
+                    started,
+                    headers_at,
+                    ended,
+                    "requested_logprobs_missing",
+                )
             return InferenceResult(
                 logical_id=request.logical_id,
                 status="success",
@@ -492,6 +504,7 @@ class OpenAICompatibleAdapter:
         terminal_finish_reason_raw: str | None = None
         done_seen = False
         provider_metadata_seen = False
+        requested_logprobs_seen = False
         provider_response_id: str | None = None
         wire_digest = hashlib.sha256()
         async with client.stream(
@@ -573,6 +586,8 @@ class OpenAICompatibleAdapter:
                         malformed_reasons.append("unexpected_choice_index")
                         continue
                     choice_index = 0
+                    if choice.get("logprobs") is not None:
+                        requested_logprobs_seen = True
                     choice_finish_reason = choice.get("finish_reason")
                     if choice_finish_reason is not None and not isinstance(
                         choice_finish_reason, str
@@ -664,6 +679,8 @@ class OpenAICompatibleAdapter:
         usage = _parse_stream_usage(usage_values)
         if self.requires_provider_metadata(route) and not provider_metadata_seen:
             malformed_reasons.append("provider_attestation_missing")
+        if request.logprobs is True and not requested_logprobs_seen:
+            malformed_reasons.append("requested_logprobs_missing")
         if route.stream_usage_mode == "required" and not (
             usage.input_tokens is not None and usage.output_tokens is not None
         ):
@@ -763,9 +780,7 @@ class OpenAICompatibleAdapter:
             output_text=output_text,
             tool_calls=reconstructed_tools,
             provider_request_id=(
-                provider_response_id
-                or retained.get("x-request-id")
-                or retained.get("request-id")
+                provider_response_id or retained.get("x-request-id") or retained.get("request-id")
             ),
             retained_headers=retained,
         )

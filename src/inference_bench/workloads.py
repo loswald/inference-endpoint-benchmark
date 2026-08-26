@@ -37,6 +37,7 @@ def solid_rgb_png_data_uri(
 
 
 VISION_BLUE_PNG_DATA_URI = solid_rgb_png_data_uri()
+VISION_RED_PNG_DATA_URI = solid_rgb_png_data_uri(rgb=(255, 0, 0))
 
 
 def _matched_cell(label: str, input_tokens: int, output_tokens: int) -> str:
@@ -101,7 +102,7 @@ def shape_spec(
                 "and any positive output"
             )
         output_tokens = min(128, output_max, context - input_tokens)
-        prompt = _words(input_tokens, comparison_id) + "\nReply with a concise checksum."
+        prompt = _words(input_tokens, comparison_id) + "\nReply exactly SQWISH_OK."
     elif shape == "long_short":
         output_tokens = min(128, output_max, max(1, context - 1))
         available_input_tokens = context - output_tokens
@@ -183,7 +184,7 @@ def shape_spec(
         prompt = (
             _words(input_tokens, comparison_id)
             + "\nWrite a coherent numbered technical explanation of approximately "
-            + f"{output_tokens} tokens."
+            + f"{output_tokens} tokens. Continue until the requested length."
         )
     elif shape == "mixed":
         choice = int(hashlib.sha256(comparison_id.encode()).hexdigest(), 16) % 4
@@ -260,11 +261,29 @@ def shape_spec(
                 else {}
             ),
             **({"mixed_subtype": "structured"} if shape == "mixed" else {}),
+            **({"quality": "exact", "expected": "SQWISH_OK"} if shape == "short_short" else {}),
+            **(
+                {
+                    "quality": "longform_completion",
+                    "minimum_output_tokens": max(1, round(output_tokens * 0.75)),
+                }
+                if shape == "short_long"
+                else {}
+            ),
+            **(
+                {
+                    "quality": "json_keys",
+                    "expected_keys": ["summary", "risks"],
+                }
+                if shape == "mixed"
+                else {}
+            ),
             **(
                 {
                     "prompt_kind": "long_context",
                     "target_tokens": input_tokens,
                     "context_markers": list(markers),
+                    "quality": "context_markers",
                 }
                 if shape == "long_short"
                 else {}
@@ -358,6 +377,38 @@ def plan_capability(route: RouteConfig, config: dict[str, Any], *, seed: int) ->
             metadata={"quality": "json_answer_7"},
         )
     )
+    probes.append(
+        replace(
+            base,
+            logical_id=f"capability:{route.id}:json-schema",
+            cell_id=_matched_cell(
+                "structured_json_schema", base.planned_input_tokens, base.max_output_tokens
+            ),
+            messages=(
+                {
+                    "role": "user",
+                    "content": (
+                        "Return exactly one JSON object containing only the integer field "
+                        "answer equal to 7."
+                    ),
+                },
+            ),
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "answer_object",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {"answer": {"type": "integer", "const": 7}},
+                        "required": ["answer"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            metadata={"quality": "json_answer_7"},
+        )
+    )
     tool = {
         "type": "function",
         "function": {
@@ -382,6 +433,115 @@ def plan_capability(route: RouteConfig, config: dict[str, Any], *, seed: int) ->
             metadata={"quality": "tool_city_reykjavik"},
         )
     )
+    probes.append(
+        replace(
+            base,
+            logical_id=f"capability:{route.id}:parallel-tools",
+            cell_id=_matched_cell(
+                "parallel_tool_calls", base.planned_input_tokens, base.max_output_tokens
+            ),
+            messages=(
+                {
+                    "role": "user",
+                    "content": (
+                        "Use lookup_weather once for Reykjavík and once for Tokyo. "
+                        "Return exactly two tool calls and no prose."
+                    ),
+                },
+            ),
+            tools=(tool,),
+            tool_choice="required",
+            parallel_tool_calls=True,
+            metadata={"quality": "tool_cities_reykjavik_tokyo"},
+        )
+    )
+    nested_tool = {
+        "type": "function",
+        "function": {
+            "name": "book_trip",
+            "description": "Book a trip for one passenger",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "destination": {"type": "string"},
+                    "passenger": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "contact": {
+                                "type": "object",
+                                "properties": {"email": {"type": "string"}},
+                                "required": ["email"],
+                                "additionalProperties": False,
+                            },
+                        },
+                        "required": ["name", "contact"],
+                        "additionalProperties": False,
+                    },
+                },
+                "required": ["destination", "passenger"],
+                "additionalProperties": False,
+            },
+        },
+    }
+    probes.append(
+        replace(
+            base,
+            logical_id=f"capability:{route.id}:nested-tool-schema",
+            cell_id=_matched_cell(
+                "nested_tool_schema", base.planned_input_tokens, base.max_output_tokens
+            ),
+            messages=(
+                {
+                    "role": "user",
+                    "content": (
+                        "Use book_trip for destination Lisbon, passenger Ada, email "
+                        "ada@example.com. Return only the tool call."
+                    ),
+                },
+            ),
+            tools=(nested_tool,),
+            tool_choice="required",
+            metadata={"quality": "tool_nested_trip"},
+        )
+    )
+    for tool_count in config.get("tool_counts", [1, 8, 32, 64]):
+        count = int(tool_count)
+        tools = tuple(
+            {
+                "type": "function",
+                "function": {
+                    "name": f"select_target_{index}",
+                    "description": f"Select deterministic target {index}",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"value": {"type": "integer"}},
+                        "required": ["value"],
+                        "additionalProperties": False,
+                    },
+                },
+            }
+            for index in range(count)
+        )
+        target_name = f"select_target_{count - 1}"
+        probes.append(
+            replace(
+                base,
+                logical_id=f"capability:{route.id}:tool-count:{count}",
+                cell_id=_matched_cell(
+                    f"tool_count_{count}", base.planned_input_tokens, base.max_output_tokens
+                ),
+                messages=(
+                    {
+                        "role": "user",
+                        "content": f"Call {target_name} with integer value 7 and no prose.",
+                    },
+                ),
+                tools=tools,
+                tool_choice={"type": "function", "function": {"name": target_name}},
+                metadata={"quality": "tool_named_target", "expected": target_name},
+            )
+        )
     image_content = [
         {
             "type": "text",
@@ -400,55 +560,128 @@ def plan_capability(route: RouteConfig, config: dict[str, Any], *, seed: int) ->
             metadata={"quality": "exact_blue"},
         )
     )
+    for label, width, height in (
+        ("wide", 512, 64),
+        ("tall", 64, 512),
+        ("large", 1024, 1024),
+    ):
+        probes.append(
+            replace(
+                base,
+                logical_id=f"capability:{route.id}:vision-{label}",
+                cell_id=_matched_cell(
+                    f"vision_{label}_png_{width}x{height}",
+                    base.planned_input_tokens,
+                    base.max_output_tokens,
+                ),
+                messages=(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": (
+                                    "This image is one solid color. Reply with only its basic "
+                                    "color name."
+                                ),
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": solid_rgb_png_data_uri(width=width, height=height)
+                                },
+                            },
+                        ],
+                    },
+                ),
+                metadata={"quality": "exact_blue", "image_width": width, "image_height": height},
+            )
+        )
+    probes.append(
+        replace(
+            base,
+            logical_id=f"capability:{route.id}:vision-two-images",
+            cell_id=_matched_cell(
+                "vision_two_png_images", base.planned_input_tokens, base.max_output_tokens
+            ),
+            messages=(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "Reply with the basic color of the first image, then |, then the "
+                                "basic color of the second image, and nothing else."
+                            ),
+                        },
+                        {"type": "image_url", "image_url": {"url": VISION_RED_PNG_DATA_URI}},
+                        {"type": "image_url", "image_url": {"url": VISION_BLUE_PNG_DATA_URI}},
+                    ],
+                },
+            ),
+            metadata={"quality": "exact_red_blue"},
+        )
+    )
     probes.extend(
         [
             replace(
                 base,
-                logical_id=f"capability:{route.id}:seed",
-                cell_id=_matched_cell(
-                    "parameter_acceptance_only_seed",
-                    base.planned_input_tokens,
-                    base.max_output_tokens,
-                ),
-                seed=17,
-                metadata={
-                    **base.metadata,
-                    "capability_evidence_scope": "parameter_acceptance_only",
-                    "feature_behavior_unverified_reason": "paired_seed_replication_not_implemented",
-                },
-            ),
-            replace(
-                base,
                 logical_id=f"capability:{route.id}:stop",
                 cell_id=_matched_cell(
-                    "parameter_acceptance_only_stop_untriggered",
+                    "stop_sequence_triggered",
                     base.planned_input_tokens,
                     base.max_output_tokens,
                 ),
+                messages=(
+                    {
+                        "role": "user",
+                        "content": "Output exactly the text ALPHA STOP OMEGA and nothing else.",
+                    },
+                ),
                 stop=("STOP",),
-                metadata={
-                    **base.metadata,
-                    "capability_evidence_scope": "parameter_acceptance_only",
-                    "feature_behavior_unverified_reason": "stop_trigger_scorer_not_implemented",
-                },
+                metadata={"scorer": "exact", "expected": "ALPHA"},
             ),
             replace(
                 base,
                 logical_id=f"capability:{route.id}:logprobs",
                 cell_id=_matched_cell(
-                    "parameter_acceptance_only_logprobs_unparsed",
+                    "logprobs_presence",
                     base.planned_input_tokens,
                     base.max_output_tokens,
                 ),
                 logprobs=True,
                 metadata={
-                    **base.metadata,
-                    "capability_evidence_scope": "parameter_acceptance_only",
-                    "feature_behavior_unverified_reason": "logprob_payload_parsing_not_implemented",
+                    "capability_evidence_scope": "response_logprobs_presence_enforced_by_adapter",
                 },
             ),
         ]
     )
+    for label, configured_seed in (("same-a", 17), ("same-b", 17), ("different", 23)):
+        probes.append(
+            replace(
+                base,
+                logical_id=f"capability:{route.id}:seed:{label}",
+                cell_id=_matched_cell(
+                    f"seed_pair_{label}", base.planned_input_tokens, base.max_output_tokens
+                ),
+                messages=(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Choose one item from alpha, beta, gamma, delta and reply with only "
+                            "that item."
+                        ),
+                    },
+                ),
+                seed=configured_seed,
+                metadata={
+                    "capability_evidence_scope": "paired_seed_output_hash",
+                    "seed_pair_group": "seed-determinism-v1",
+                    "seed_pair_role": label,
+                },
+            )
+        )
     temperatures = config.get("temperatures", [-0.01, 0.0, 0.5, 1.0, 2.0, 2.01])
     top_ps = config.get("top_ps", [-0.01, 0.0, 0.25, 0.5, 0.75, 1.0, 1.01])
     for index, value in enumerate(temperatures):
@@ -643,8 +876,10 @@ def plan_context(route: RouteConfig, config: dict[str, Any], *, seed: int) -> li
 def plan_output(route: RouteConfig, config: dict[str, Any], *, seed: int) -> list[RequestSpec]:
     documented_maximum = route.max_output_tokens
     maximum = documented_maximum or int(config.get("fallback_max_output_tokens", 4_096))
+    realized_ceiling = min(int(config.get("realized_generation_ceiling", 16_384)), maximum)
     anchors = [
         *(value for value in (32, 256, 1_024, 4_096) if value <= maximum),
+        realized_ceiling,
         max(1, round(maximum * 0.9)),
         maximum,
     ]
@@ -655,6 +890,15 @@ def plan_output(route: RouteConfig, config: dict[str, Any], *, seed: int) -> lis
     for tokens in anchors:
         logical = f"output:{route.id}:{tokens}"
         expected_rejection = documented_maximum is not None and tokens > documented_maximum
+        realized_generation = tokens <= realized_ceiling and not expected_rejection
+        prompt = (
+            (
+                f"Generate {tokens} tokens of numbered synthetic prose. Continue until the "
+                "requested length unless the API limit stops you."
+            )
+            if realized_generation
+            else "Reply exactly SQWISH_OK."
+        )
         result.append(
             RequestSpec(
                 logical_id=logical,
@@ -664,11 +908,7 @@ def plan_output(route: RouteConfig, config: dict[str, Any], *, seed: int) -> lis
                 messages=(
                     {
                         "role": "user",
-                        "content": (
-                            f"Generate {tokens} tokens of numbered synthetic prose. "
-                            "Continue until the "
-                            "requested length unless the API limit stops you."
-                        ),
+                        "content": prompt,
                     },
                 ),
                 planned_input_tokens=64,
@@ -685,6 +925,19 @@ def plan_output(route: RouteConfig, config: dict[str, Any], *, seed: int) -> lis
                     "expected_rejection": expected_rejection,
                     "expected_rejection_kind": (
                         "requested_output_limit" if expected_rejection else None
+                    ),
+                    "output_evidence_scope": (
+                        "realized_generation"
+                        if realized_generation
+                        else "requested_limit_acceptance_only"
+                    ),
+                    **(
+                        {
+                            "quality": "longform_completion",
+                            "minimum_output_tokens": max(1, round(tokens * 0.75)),
+                        }
+                        if realized_generation
+                        else {"quality": "exact", "expected": "SQWISH_OK"}
                     ),
                 },
             )

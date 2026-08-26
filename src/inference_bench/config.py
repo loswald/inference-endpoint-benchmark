@@ -51,6 +51,7 @@ _PUBLIC_SUITE_KEYS = {
         "enabled",
         "temperatures",
         "top_ps",
+        "tool_counts",
     },
     "interactions": {
         "enabled",
@@ -60,7 +61,11 @@ _PUBLIC_SUITE_KEYS = {
         "output_tokens",
     },
     "context": {"enabled", "percentages"},
-    "output": {"enabled", "fallback_max_output_tokens"},
+    "output": {
+        "enabled",
+        "fallback_max_output_tokens",
+        "realized_generation_ceiling",
+    },
     "quality": {"enabled", "repeats"},
     "cache": {"enabled", "repeats", "prefix_tokens"},
     "time_variation": {
@@ -743,9 +748,7 @@ def _validate_suites(
                 values.get("samples_per_route_shape", 3),
                 "suites.time_variation.samples_per_route_shape",
             )
-            _positive_number(
-                values.get("offered_rps", 0.2), "suites.time_variation.offered_rps"
-            )
+            _positive_number(values.get("offered_rps", 0.2), "suites.time_variation.offered_rps")
         if name == "context":
             percentages = values.get("percentages", [1, 10, 25, 50, 75, 90, 95, 99])
             if not isinstance(percentages, list) or not percentages:
@@ -765,6 +768,13 @@ def _validate_suites(
                     _number(value, f"suites.{name}.{key}[{index}]")
                     if not math.isfinite(float(value)):
                         raise ValueError(f"suites.{name}.{key}[{index}] must be finite")
+        if name == "capability" and "tool_counts" in values:
+            tool_counts = values["tool_counts"]
+            if not isinstance(tool_counts, list) or not tool_counts:
+                raise ValueError("suites.capability.tool_counts must be a nonempty list")
+            _require_unique(tool_counts, "suites.capability.tool_counts")
+            for index, value in enumerate(tool_counts):
+                _positive_integer(value, f"suites.capability.tool_counts[{index}]")
         if name == "interactions" and "stream" in values:
             stream = values["stream"]
             if (
@@ -787,6 +797,10 @@ def _validate_suites(
             _positive_integer(
                 values.get("fallback_max_output_tokens", 4_096),
                 "suites.output.fallback_max_output_tokens",
+            )
+            _positive_integer(
+                values.get("realized_generation_ceiling", 16_384),
+                "suites.output.realized_generation_ceiling",
             )
         if name == "aimd":
             from .load import validate_aimd_config

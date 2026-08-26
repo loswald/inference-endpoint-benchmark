@@ -18,6 +18,7 @@ from inference_bench.workloads import (
     plan_context,
     plan_interactions,
     plan_latency,
+    plan_output,
     shape_spec,
 )
 
@@ -121,11 +122,47 @@ def test_common_shape_omits_optional_sampling_controls(route) -> None:
 def test_unverified_capability_parameters_are_acceptance_only(route) -> None:
     specs = plan_capability(route, {}, seed=1)
     acceptance = [spec for spec in specs if spec.cell_id.startswith("parameter_acceptance_only_")]
-    assert len(acceptance) == 16
+    assert len(acceptance) == 13
     assert {spec.metadata["capability_evidence_scope"] for spec in acceptance} == {
         "parameter_acceptance_only"
     }
     assert all("feature_behavior_unverified_reason" in spec.metadata for spec in acceptance)
+
+
+def test_every_capacity_shape_has_predeclared_quality(route) -> None:
+    specs = [
+        shape_spec(route, shape, f"quality-{shape}-{index}", suite="load", seed=1)
+        for index, shape in enumerate(("short_short", "long_short", "short_long"))
+    ]
+    assert [spec.metadata["quality"] for spec in specs] == [
+        "exact",
+        "context_markers",
+        "longform_completion",
+    ]
+    structured = next(
+        shape_spec(route, "mixed", f"quality-mixed-{index}", suite="load", seed=1)
+        for index in range(100)
+        if int(hashlib.sha256(f"quality-mixed-{index}".encode()).hexdigest(), 16) % 4 == 3
+    )
+    assert structured.metadata["quality"] == "json_keys"
+    assert structured.metadata["expected_keys"] == ["summary", "risks"]
+
+
+def test_output_plan_separates_realized_generation_from_limit_acceptance(route) -> None:
+    large = replace(route, max_output_tokens=100_000)
+    specs = plan_output(large, {"realized_generation_ceiling": 8_192}, seed=1)
+    realized = [
+        spec for spec in specs if spec.metadata["output_evidence_scope"] == "realized_generation"
+    ]
+    acceptance = [
+        spec
+        for spec in specs
+        if spec.metadata["output_evidence_scope"] == "requested_limit_acceptance_only"
+    ]
+    assert max(spec.max_output_tokens for spec in realized) == 8_192
+    assert {spec.max_output_tokens for spec in acceptance} == {90_000, 100_000, 100_001}
+    assert all(spec.metadata["quality"] == "longform_completion" for spec in realized)
+    assert all(spec.metadata["quality"] == "exact" for spec in acceptance)
 
 
 def test_nominal_above_context_target_never_claims_expected_rejection(route) -> None:

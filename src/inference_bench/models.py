@@ -30,6 +30,7 @@ PROTECTED_REQUEST_DEFAULT_KEYS = frozenset(
         "stop",
         "tools",
         "tool_choice",
+        "parallel_tool_calls",
         "response_format",
         "logprobs",
         "stream_options",
@@ -424,8 +425,7 @@ class RouteConfig:
             )
             if self.api_family != expected_api_family:
                 message = (
-                    f"adapter {self.adapter} currently supports only "
-                    "api_family=chat_completions"
+                    f"adapter {self.adapter} currently supports only api_family=chat_completions"
                     if expected_api_family == "chat_completions"
                     else f"adapter {self.adapter} requires api_family=responses"
                 )
@@ -693,6 +693,7 @@ class RequestSpec:
     stop: tuple[str, ...] = ()
     tools: tuple[dict[str, Any], ...] = ()
     tool_choice: str | dict[str, Any] | None = None
+    parallel_tool_calls: bool | None = None
     response_format: dict[str, Any] | None = None
     logprobs: bool | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -723,6 +724,7 @@ class RequestSpec:
             "stop": list(self.stop),
             "tools": list(self.tools),
             "tool_choice": self.tool_choice,
+            "parallel_tool_calls": self.parallel_tool_calls,
             "response_format": self.response_format,
             "logprobs": self.logprobs,
             "synthetic_payload_descriptor": {

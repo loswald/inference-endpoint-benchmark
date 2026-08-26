@@ -361,9 +361,7 @@ async def run_campaign(
                     )
                     return
         if time_variation_specs:
-            time_variation_reason = await _run_time_variation(
-                engine, time_variation_specs, config
-            )
+            time_variation_reason = await _run_time_variation(engine, time_variation_specs, config)
             if time_variation_reason:
                 ledger.finalize_plan(time_variation_reason)
                 ledger.record_event_once(

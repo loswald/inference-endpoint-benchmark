@@ -44,6 +44,7 @@ def build_openai_compatible_payload(route: RouteConfig, request: RequestSpec) ->
         ("top_p", request.top_p),
         ("seed", request.seed),
         ("tool_choice", request.tool_choice),
+        ("parallel_tool_calls", request.parallel_tool_calls),
         ("response_format", request.response_format),
         ("logprobs", request.logprobs),
     ):
@@ -134,9 +135,7 @@ def _responses_input(request: RequestSpec) -> tuple[str | None, list[dict[str, A
                     raise ValueError("Responses message content parts must be objects")
                 if part.get("type") == "text" and isinstance(part.get("text"), str):
                     converted.append({"type": "input_text", "text": part["text"]})
-                elif part.get("type") == "image_url" and isinstance(
-                    part.get("image_url"), dict
-                ):
+                elif part.get("type") == "image_url" and isinstance(part.get("image_url"), dict):
                     url = part["image_url"].get("url")
                     if not isinstance(url, str) or not url:
                         raise ValueError("Responses image_url content requires a URL")
@@ -175,8 +174,18 @@ def build_responses_payload(route: RouteConfig, request: RequestSpec) -> dict[st
         if isinstance(choice, dict) and isinstance(choice.get("function"), dict):
             choice = {"type": "function", "name": choice["function"].get("name")}
         payload["tool_choice"] = choice
+    if request.parallel_tool_calls is not None:
+        payload["parallel_tool_calls"] = request.parallel_tool_calls
     if request.response_format is not None:
-        payload["text"] = {"format": request.response_format}
+        response_format = request.response_format
+        if response_format.get("type") == "json_schema" and isinstance(
+            response_format.get("json_schema"), dict
+        ):
+            response_format = {
+                "type": "json_schema",
+                **response_format["json_schema"],
+            }
+        payload["text"] = {"format": response_format}
     return payload
 
 

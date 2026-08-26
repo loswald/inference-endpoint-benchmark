@@ -92,9 +92,7 @@ class OpenRouterAdapter(OpenAICompatibleAdapter):
             raise ValueError("OpenRouter metadata is not an object")
         endpoints = metadata.get("endpoints")
         available = endpoints.get("available") if isinstance(endpoints, dict) else None
-        selected = [
-            row for row in available or [] if isinstance(row, dict) and row.get("selected")
-        ]
+        selected = [row for row in available or [] if isinstance(row, dict) and row.get("selected")]
         if len(selected) != 1:
             raise ValueError("OpenRouter did not report exactly one selected endpoint")
         observed = [str(selected[0].get("provider") or "")]

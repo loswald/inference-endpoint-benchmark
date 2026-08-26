@@ -66,6 +66,27 @@ def test_responses_payload_flattens_chat_function_tools() -> None:
     assert payload["max_output_tokens"] == 16
 
 
+def test_responses_payload_flattens_json_schema_and_parallel_tool_control() -> None:
+    schema = {
+        "name": "answer",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {"answer": {"type": "integer"}},
+            "required": ["answer"],
+            "additionalProperties": False,
+        },
+    }
+    spec = replace(
+        _spec(False),
+        response_format={"type": "json_schema", "json_schema": schema},
+        parallel_tool_calls=True,
+    )
+    payload = build_responses_payload(_route(), spec)
+    assert payload["text"]["format"] == {"type": "json_schema", **schema}
+    assert payload["parallel_tool_calls"] is True
+
+
 def test_responses_nonstream_parses_text_tools_and_usage(monkeypatch) -> None:
     monkeypatch.setenv("TEST_RESPONSES_KEY", "not-retained")
     body = {
@@ -118,9 +139,7 @@ def test_responses_stream_requires_terminal_event_and_times_visible_deltas(monke
     final = {
         "id": "resp_2",
         "status": "completed",
-        "output": [
-            {"type": "message", "content": [{"type": "output_text", "text": "ok"}]}
-        ],
+        "output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]}],
         "usage": {"input_tokens": 4, "output_tokens": 1},
     }
     result = asyncio.run(
@@ -138,8 +157,6 @@ def test_responses_stream_requires_terminal_event_and_times_visible_deltas(monke
     assert result.status == "success"
     assert result.ttft_seconds is not None
     assert result.output_text == "ok"
-    missing = asyncio.run(
-        infer([{"type": "response.output_text.delta", "delta": "partial"}])
-    )
+    missing = asyncio.run(infer([{"type": "response.output_text.delta", "delta": "partial"}]))
     assert missing.status == "server_error"
     assert "missing_terminal_event" in str(missing.error_kind)

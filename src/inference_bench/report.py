@@ -1728,12 +1728,8 @@ def _plot_time_variation(summary: list[dict[str, Any]], output: Path) -> list[st
                 eligible = [row for row in rows if row.get(metric) is not None]
                 x = [int(row["panel_index"]) for row in eligible]
                 y = [float(row[metric]) for row in eligible]
-                lower = [
-                    float(row.get(f"{metric}_ci95_low") or row[metric]) for row in eligible
-                ]
-                upper = [
-                    float(row.get(f"{metric}_ci95_high") or row[metric]) for row in eligible
-                ]
+                lower = [float(row.get(f"{metric}_ci95_low") or row[metric]) for row in eligible]
+                upper = [float(row.get(f"{metric}_ci95_high") or row[metric]) for row in eligible]
                 if eligible:
                     yerr = [
                         [value - low for value, low in zip(y, lower, strict=True)],

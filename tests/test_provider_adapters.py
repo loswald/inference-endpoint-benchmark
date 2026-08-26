@@ -95,9 +95,7 @@ def test_openrouter_stream_requires_and_validates_selected_upstream(monkeypatch)
             if provider is None
             else {
                 "openrouter_metadata": {
-                    "endpoints": {
-                        "available": [{"provider": provider, "selected": True}]
-                    },
+                    "endpoints": {"available": [{"provider": provider, "selected": True}]},
                     "attempts": [{"provider": provider}],
                 }
             }

@@ -128,9 +128,7 @@ class ResponsesAdapter(OpenAICompatibleAdapter):
                 finish_reason=normalize_finish_reason(_finish(data)),
                 output_text=text,
                 tool_calls=tools,
-                provider_request_id=(
-                    data.get("id") if isinstance(data.get("id"), str) else None
-                ),
+                provider_request_id=(data.get("id") if isinstance(data.get("id"), str) else None),
                 retained_headers=retained,
             )
 

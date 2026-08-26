@@ -1186,6 +1186,29 @@ def test_tool_quality_requires_exact_parsed_function_and_city() -> None:
     assert score_result(context, context_result)[0] == 0
 
 
+def test_capacity_quality_scorers_cover_structure_and_realized_length() -> None:
+    structured = replace(
+        _spec("structured-load"),
+        metadata={"quality": "json_keys", "expected_keys": ["summary", "risks"]},
+    )
+    result = _success(structured.logical_id)
+    result.output_text = '{"summary":"ok","risks":[]}'
+    assert score_result(structured, result)[0] == 1
+    result.output_text = '{"summary":"ok","risks":[],"extra":true}'
+    assert score_result(structured, result)[0] == 0
+
+    longform = replace(
+        _spec("longform-load"),
+        metadata={"quality": "longform_completion", "minimum_output_tokens": 750},
+    )
+    result = _success(longform.logical_id)
+    result.output_text = "nonempty"
+    result.output_tokens = 749
+    assert score_result(longform, result)[0] == 0
+    result.output_tokens = 750
+    assert score_result(longform, result)[0] == 1
+
+
 def test_empty_sse_is_protocol_error(monkeypatch, route) -> None:
     monkeypatch.setenv("TEST_API_KEY", "fixture-only")
 
