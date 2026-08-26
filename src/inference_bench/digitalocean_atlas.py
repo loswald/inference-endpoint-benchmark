@@ -81,7 +81,15 @@ def _plot_capacity(rows: list[dict[str, str]], source_id: str, destination: Path
                 value = _number(row.get("highest_observed_healthy_rps"))
             upper = _number(row.get("capacity_upper_bound_rps"))
             if value is None:
-                axis.scatter(0, index, marker="x", color="#DC2626", s=38, zorder=3)
+                axis.text(
+                    0.01,
+                    index,
+                    "not established",
+                    transform=axis.get_yaxis_transform(),
+                    color="#B91C1C",
+                    fontsize=7.5,
+                    va="center",
+                )
                 continue
             positive.append(value)
             axis.scatter(
@@ -156,26 +164,30 @@ def _plot_soak(rows: list[dict[str, str]], source_id: str, destination: Path) ->
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    metrics = (
+    metric_groups = (
         (
-            "successful_rpm_block_mean",
-            "successful_rpm_block_mean_ci95_student_t",
-            "Successful RPM",
+            (
+                "successful_rpm_block_mean",
+                "successful_rpm_block_mean_ci95_student_t",
+                "Successful requests/minute",
+            ),
+            (
+                "paired_quality_delta_mean",
+                "paired_quality_delta_mean_ci95_student_t",
+                "Quality change vs low load",
+            ),
         ),
         (
-            "effective_input_tpm_block_mean",
-            "effective_input_tpm_block_mean_ci95_student_t",
-            "Effective input TPM",
-        ),
-        (
-            "effective_output_tpm_block_mean",
-            "effective_output_tpm_block_mean_ci95_student_t",
-            "Effective output TPM",
-        ),
-        (
-            "paired_quality_delta_mean",
-            "paired_quality_delta_mean_ci95_student_t",
-            "Quality change vs low load",
+            (
+                "effective_input_tpm_block_mean",
+                "effective_input_tpm_block_mean_ci95_student_t",
+                "Effective input tokens/minute",
+            ),
+            (
+                "effective_output_tpm_block_mean",
+                "effective_output_tpm_block_mean_ci95_student_t",
+                "Effective output tokens/minute",
+            ),
         ),
     )
     created: list[Path] = []
@@ -186,54 +198,65 @@ def _plot_soak(rows: list[dict[str, str]], source_id: str, destination: Path) ->
         selected.sort(key=lambda row: str(row.get("endpoint_id")))
         if not selected:
             continue
-        figure, axes = plt.subplots(
-            1, 4, figsize=(17, max(5.2, 0.4 * len(selected) + 1.8)), sharey=True
-        )
         labels = [str(row.get("endpoint_id")) for row in selected]
-        for axis, (metric, interval_field, label) in zip(axes, metrics, strict=True):
-            for index, row in enumerate(selected):
-                value = _number(row.get(metric))
-                if value is None:
-                    axis.scatter(0, index, marker="x", color="#DC2626", s=28)
-                    continue
-                interval = _json_interval(row.get(interval_field))
-                xerr = None
-                if interval is not None and interval[0] <= value <= interval[1]:
-                    xerr = [[value - interval[0]], [interval[1] - value]]
-                complete = row.get("status") == "complete"
-                axis.errorbar(
-                    value,
-                    index,
-                    xerr=xerr,
-                    fmt="o",
-                    markerfacecolor="#0F766E" if complete else "white",
-                    markeredgecolor="#0F766E",
-                    ecolor="#64748B",
-                    capsize=2.5,
-                )
-            axis.set_yticks(range(len(labels)), labels if axis is axes[0] else [""] * len(labels))
-            axis.invert_yaxis()
-            axis.set_xlabel(label)
-            _style_axis(axis)
-        figure.suptitle(
-            f"DigitalOcean two-minute soak - {SHAPE_LABELS[shape]}",
-            x=0.055,
-            ha="left",
-            fontweight="bold",
-        )
-        figure.text(
-            0.055,
-            0.005,
-            "Whiskers are 95% Student-t intervals across four 30-second blocks. Red x means the "
-            "registered low-load baseline gate failed, so no sustained-capacity estimate is shown.",
-            fontsize=7.5,
-            color="#475569",
-        )
-        figure.tight_layout(rect=(0, 0.025, 1, 0.97))
-        path = destination / f"digitalocean-soak-{shape}.png"
-        figure.savefig(path, dpi=210, bbox_inches="tight", facecolor="white")
-        plt.close(figure)
-        created.append(path)
+        for group_index, metrics in enumerate(metric_groups, start=1):
+            figure, axes = plt.subplots(1, 2, figsize=(13, max(5.2, 0.4 * len(selected) + 1.8)))
+            for axis, (metric, interval_field, label) in zip(axes, metrics, strict=True):
+                for index, row in enumerate(selected):
+                    value = _number(row.get(metric))
+                    if value is None:
+                        axis.text(
+                            0.01,
+                            index,
+                            "not established",
+                            transform=axis.get_yaxis_transform(),
+                            color="#B91C1C",
+                            fontsize=7.5,
+                            va="center",
+                        )
+                        continue
+                    interval = _json_interval(row.get(interval_field))
+                    xerr = None
+                    if interval is not None and interval[0] <= value <= interval[1]:
+                        xerr = [[value - interval[0]], [interval[1] - value]]
+                    complete = row.get("status") == "complete"
+                    axis.errorbar(
+                        value,
+                        index,
+                        xerr=xerr,
+                        fmt="o",
+                        markerfacecolor="#0F766E" if complete else "white",
+                        markeredgecolor="#0F766E",
+                        ecolor="#64748B",
+                        capsize=2.5,
+                    )
+                axis.set_yticks(range(len(labels)))
+                if axis is axes[0]:
+                    axis.set_yticklabels(labels, fontsize=8)
+                else:
+                    axis.set_yticklabels([])
+                axis.invert_yaxis()
+                axis.set_xlabel(label)
+                _style_axis(axis)
+            figure.suptitle(
+                f"DigitalOcean two-minute soak — {SHAPE_LABELS[shape]}",
+                x=0.055,
+                ha="left",
+                fontweight="bold",
+            )
+            figure.text(
+                0.055,
+                0.005,
+                "Whiskers are 95% Student-t intervals across four 30-second blocks. "
+                "Missing estimates are labelled, never plotted as zero.",
+                fontsize=7.5,
+                color="#475569",
+            )
+            figure.tight_layout(rect=(0, 0.025, 1, 0.97))
+            path = destination / f"digitalocean-soak-{shape}-part-{group_index}.png"
+            figure.savefig(path, dpi=210, bbox_inches="tight", facecolor="white")
+            plt.close(figure)
+            created.append(path)
     return created
 
 
@@ -328,14 +351,17 @@ def _build_pdf(
     soak_source: str,
 ) -> None:
     from reportlab.lib import colors
-    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.pagesizes import A4, landscape
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import mm
     from reportlab.platypus import (
+        BaseDocTemplate,
+        Frame,
         Image,
+        NextPageTemplate,
         PageBreak,
+        PageTemplate,
         Paragraph,
-        SimpleDocTemplate,
         Spacer,
         Table,
         TableStyle,
@@ -391,24 +417,65 @@ def _build_pdf(
 
     def footer(canvas: Any, document: Any) -> None:
         canvas.saveState()
+        page_width, _ = canvas._pagesize
         canvas.setStrokeColor(colors.HexColor("#CBD5E1"))
-        canvas.line(18 * mm, 12 * mm, A4[0] - 18 * mm, 12 * mm)
+        canvas.line(18 * mm, 12 * mm, page_width - 18 * mm, 12 * mm)
         canvas.setFont("Helvetica", 7.5)
         canvas.setFillColor(slate)
         canvas.drawString(18 * mm, 7.5 * mm, "DigitalOcean hosted inference evidence atlas")
-        canvas.drawRightString(A4[0] - 18 * mm, 7.5 * mm, f"Page {document.page}")
+        canvas.drawRightString(page_width - 18 * mm, 7.5 * mm, f"Page {document.page}")
         canvas.restoreState()
 
-    document = SimpleDocTemplate(
+    landscape_a4 = landscape(A4)
+    document = BaseDocTemplate(
         str(path),
         pagesize=A4,
-        leftMargin=18 * mm,
-        rightMargin=18 * mm,
-        topMargin=17 * mm,
-        bottomMargin=17 * mm,
+        pageTemplates=[
+            PageTemplate(
+                id="portrait",
+                pagesize=A4,
+                frames=[
+                    Frame(
+                        18 * mm,
+                        17 * mm,
+                        A4[0] - 36 * mm,
+                        A4[1] - 34 * mm,
+                        id="portrait-frame",
+                    )
+                ],
+                onPage=footer,
+            ),
+            PageTemplate(
+                id="landscape",
+                pagesize=landscape_a4,
+                frames=[
+                    Frame(
+                        18 * mm,
+                        17 * mm,
+                        landscape_a4[0] - 36 * mm,
+                        landscape_a4[1] - 34 * mm,
+                        id="landscape-frame",
+                    )
+                ],
+                onPage=footer,
+            ),
+        ],
         title="DigitalOcean Hosted Inference - Evidence Atlas",
         author="Sqwish Labs",
     )
+    capacity_index = {
+        (row.get("endpoint_id"), row.get("shape")): row
+        for row in capacity
+        if row.get("source_id") == capacity_source
+    }
+    soak_index = {
+        (row.get("endpoint_id"), row.get("shape")): row
+        for row in soak
+        if row.get("source_id") == soak_source
+    }
+    capability_index = {
+        (row.get("endpoint_id"), row.get("capability_dimension")): row for row in capabilities
+    }
     story: list[Any] = [
         Spacer(1, 19 * mm),
         Paragraph("DigitalOcean hosted inference", styles["DoTitle"]),
@@ -425,34 +492,75 @@ def _build_pdf(
             "confidence intervals.",
             styles["DoBody"],
         ),
+        PageBreak(),
+        Paragraph("Engineering decision map", styles["DoH1"]),
+        Paragraph(
+            "This inventory reports evidence states for each exact hosted endpoint. It is not a "
+            "single global ranking: capacity and capability must be read for the workload and "
+            "feature the application actually uses.",
+            styles["DoBody"],
+        ),
     ]
+    decision_rows = [
+        ["Exact endpoint", "Context", "Confirmed AIMD", "Complete soaks", "Capabilities passed"]
+    ]
+    for endpoint in sorted(inventory, key=lambda row: str(row.get("endpoint_id"))):
+        endpoint_id = str(endpoint.get("endpoint_id"))
+        confirmed = sum(
+            str(
+                capacity_index.get((endpoint_id, shape), {}).get("capacity_claim") or ""
+            ).startswith("confirmed_")
+            for shape in SHAPES
+        )
+        complete_soaks = sum(
+            soak_index.get((endpoint_id, shape), {}).get("status") == "complete" for shape in SHAPES
+        )
+        endpoint_capabilities = [
+            row for row in capabilities if row.get("endpoint_id") == endpoint_id
+        ]
+        passed = sum(row.get("functional_status") == "passed" for row in endpoint_capabilities)
+        decision_rows.append(
+            [
+                endpoint_id,
+                str(endpoint.get("context_window") or "not documented"),
+                f"{confirmed}/4",
+                f"{complete_soaks}/4",
+                f"{passed}/{len(endpoint_capabilities)}",
+            ]
+        )
+    story.append(
+        Table(
+            decision_rows,
+            colWidths=[58 * mm, 31 * mm, 28 * mm, 27 * mm, 30 * mm],
+            repeatRows=1,
+            style=TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), navy),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, pale]),
+                    ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#CBD5E1")),
+                    ("FONTSIZE", (0, 0), (-1, -1), 7.3),
+                    ("PADDING", (0, 0), (-1, -1), 4),
+                ]
+            ),
+        )
+    )
+    first_figure = True
     for figure in figures:
         from PIL import Image as PILImage
 
         with PILImage.open(figure) as source:
             width, height = source.size
-        scale = min(174 * mm / width, 238 * mm / height)
-        story.extend(
-            [
-                PageBreak(),
-                Paragraph(figure.stem.replace("-", " ").title(), styles["DoH1"]),
-                Image(str(figure), width=width * scale, height=height * scale),
-            ]
-        )
-
-    capacity_index = {
-        (row.get("endpoint_id"), row.get("shape")): row
-        for row in capacity
-        if row.get("source_id") == capacity_source
-    }
-    soak_index = {
-        (row.get("endpoint_id"), row.get("shape")): row
-        for row in soak
-        if row.get("source_id") == soak_source
-    }
-    capability_index = {
-        (row.get("endpoint_id"), row.get("capability_dimension")): row for row in capabilities
-    }
+        scale = min(258 * mm / width, 160 * mm / height)
+        chart = Image(str(figure), width=width * scale, height=height * scale)
+        chart.hAlign = "CENTER"
+        page_start: list[Any] = [PageBreak()]
+        if first_figure:
+            page_start = [NextPageTemplate("landscape"), PageBreak()]
+            first_figure = False
+        story.extend(page_start + [chart])
+    story.append(NextPageTemplate("portrait"))
     limits_by_endpoint: dict[str, list[dict[str, str]]] = {}
     for row in limits:
         limits_by_endpoint.setdefault(str(row.get("endpoint_id")), []).append(row)
@@ -568,7 +676,7 @@ def _build_pdf(
                     ),
                 ]
             )
-    document.build(story, onFirstPage=footer, onLaterPages=footer)
+    document.build(story)
 
 
 def generate_digitalocean_atlas(
