@@ -9,6 +9,19 @@ behavior, output length, tools, structured output, vision, sampling controls, qu
 recovery after overload, and variation across the day. Results stay separated by endpoint and
 workload; the software does not manufacture a single global score.
 
+## Published evidence atlases
+
+- [DigitalOcean hosted inference](reports/digitalocean/digitalocean-hosted-inference-evidence-atlas.pdf)
+  — 12 exact hosted endpoints, four capacity workloads, two-minute soak blocks, context and output
+  boundaries, tool/vision/structured-output behavior, quality, recovery, and compact supporting
+  CSV tables. Start with the decision map, then use the endpoint sheets for production decisions.
+- Azure AI Foundry, Amazon Bedrock, and Google Vertex AI — corrected load, sustained-soak, and
+  matched time-panel measurements are in progress. Their atlas will be published only after the
+  final evidence and every rendered page pass the same integrity and visual checks.
+
+The evidence files are observations from exact routes and test windows, not permanent provider-wide
+rankings. A blank or “not established” cell is deliberately different from a measured zero.
+
 ## What is implemented
 
 | Provider transport | Adapter | Status |
