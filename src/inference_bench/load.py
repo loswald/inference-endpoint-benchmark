@@ -288,6 +288,12 @@ def _build_epoch_summary(
     p95_ttft = quantile(ttfts, 0.95) if ttfts else None
     p95_service = quantile(services, 0.95) if services else None
     p95_total = quantile(arrivals, 0.95) if arrivals else None
+    queue_delays = [
+        float(row["queue_delay_seconds"])
+        for row in final_rows
+        if row["queue_delay_seconds"] is not None
+    ]
+    p95_queue_delay = quantile(queue_delays, 0.95) if queue_delays else None
     healthy = bool(
         completed
         and stop_reason is None
@@ -297,7 +303,13 @@ def _build_epoch_summary(
         and physical_count > 0
         and rate_limited / physical_count <= 0.01
         and (server_errors + timeouts + transport_errors) / physical_count <= 0.01
-        and queue_end <= max(1.0, duration_seconds * 0.1)
+        # Response drain after the registered arrival window is not queue growth. A slow final
+        # request may finish well after the window even when every arrival starts immediately.
+        # Coordinated-omission-safe congestion is instead detected from the measured delay between
+        # each registered arrival and admission through the independent concurrency ceiling.
+        and len(queue_delays) == logical_observed
+        and p95_queue_delay is not None
+        and p95_queue_delay <= max(1.0, duration_seconds * 0.1)
         and len(ttfts) == len(success)
         and len(arrivals) == len(success)
         and (

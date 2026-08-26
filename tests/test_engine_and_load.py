@@ -248,6 +248,38 @@ def test_load_epoch_counts_every_physical_retry_and_includes_drain(
     )
 
 
+def test_normal_response_drain_is_not_misclassified_as_queue_growth(
+    tmp_path, campaign, route
+) -> None:
+    class SlowServiceAdapter(SequenceAdapter):
+        async def infer(self, route, request):
+            self.calls[request.logical_id] += 1
+            await asyncio.sleep(1.1)
+            return _result(request.logical_id)
+
+    async def run() -> EpochSummary:
+        engine, ledger = _engine(tmp_path, campaign, SlowServiceAdapter())
+        summary = await run_open_loop_epoch(
+            engine,
+            route,
+            shape="short_short",
+            epoch_id="slow-service-without-queue",
+            phase="baseline",
+            offered_rps=20,
+            duration_seconds=0.05,
+            concurrency=1,
+            seed=11,
+            deterministic_scheduled_count=1,
+        )
+        await engine.close()
+        ledger.close()
+        return summary
+
+    summary = asyncio.run(run())
+    assert summary.queue_end_seconds > 1.0
+    assert summary.healthy
+
+
 def test_zero_arrival_epoch_is_scientifically_censored(tmp_path, campaign, route) -> None:
     kwargs = {
         "shape": "short_short",
