@@ -1,61 +1,143 @@
 # Experiment design
 
-This is a practical campaign, not an unbounded Cartesian product. It maps the important operating
-envelope first, then spends extra samples where the decision is uncertain.
+The design maps an endpoint's operating envelope instead of benchmarking one convenient prompt.
+It is finite, repeatable, and organized around decisions an AI engineer must make.
 
-## Workload shapes
+## 1. Admit the exact route
 
-Use at least four matched shapes for every route:
+Record the provider, endpoint/deployment, model version, API family, region, client location,
+documented context and output limits, price, quota scope, and supported features. A successful model
+catalog lookup is discovery—not evidence that the inference route works.
 
-| Shape | Primary pressure | Example anchors |
-|---|---|---|
-| short input / short output | request rate and queueing | 256 in / 128 out |
-| long input / short output | input TPM and end-to-end prefill proxy | 32K, then route-relative 10–99% |
-| short input / long output | output TPM and post-TTFT decoding proxy | 1K–4K realized output |
-| heterogeneous mixed | production-like interference | deterministic mixture of task families and sizes |
+Run one short streaming control before the main campaign. Verify status, usage fields, response
+parsing, request identifiers, and any routing attribution.
 
-Keep task content and realized token anchors identical across comparable routes. If a documented
-limit forces clipping, the clipped cell receives a different identity and is not pooled with the
-original target.
+## 2. Establish low-load behavior
 
-## Recommended 24-hour sequence
+For every route, measure identical randomized prompts at a rate far below expected capacity:
 
-1. **Admission and warmups.** Serial controls, transport parsing, usage settlement, and explicit
-   warmup labels.
-2. **Low-load baselines.** Randomized endpoint blocks for TTFT, end-to-end latency, output rate,
-   reliability, cost, and deterministic task quality.
-3. **Isolated AIMD.** Open-loop arrivals plus a separate concurrency ceiling. Geometrically bracket,
-   then additively increase and multiplicatively decrease. Two consecutive unhealthy epochs bracket
-   congestion; healthy termination at the configured ceiling is a right-censored lower bound.
-4. **Sustained soaks.** For each endpoint × shape, run a predeclared candidate rate in multiple
-   analysis blocks. Report achieved rate, TPM, reliability, latency, queue growth, quality, and
-   between-block intervals. AIMD alone is never called sustained capacity.
-5. **Capability matrix.** Test exact states for streaming, tools, parallel calls, structured output,
-   vision, stop, seed, logprobs, and sampling controls. Use a strength-two covering array for numeric
-   and categorical interactions rather than a full Cartesian product.
-6. **Context and output envelopes.** Probe route-relative percentages, fixed anchors, just-below,
-   at, and just-above boundaries. Acceptance without retrieval or realized output is not success.
-7. **Matched-control closure.** Re-run unresolved capability cells as control-before → probe →
-   control-after. A 400/413/422 is a parameter rejection only when both controls pass. Authentication,
-   quota, timeout, or 5xx failures remain inconclusive capability evidence.
-8. **Recovery and time variation.** After overload, fall to half the candidate rate and measure
-   recovery. Repeat a sparse sentinel panel over the desired time horizon; do not call a partial
-   day “24-hour variability.”
+- time to first visible token;
+- end-to-end and service latency;
+- visible decode proxy when token accounting permits it;
+- request success and deterministic quality;
+- provider-reported input and output tokens;
+- cost per successful request.
 
-## Statistical units
+Warmups are diagnostics and remain separate. A measured request is not retroactively called warm or
+cold unless that state was explicitly controlled.
 
-- requests for request latency and deterministic quality;
-- AIMD epochs for capacity confirmation;
-- predeclared soak blocks for sustained-load uncertainty;
-- matched pair IDs for quality-versus-load changes.
+## 3. Map the four capacity shapes
 
-Tokens are never independent samples. Suppress p99 unless roughly 1,000 eligible observations exist.
-Use Wilson intervals for binary rates and bootstrap or t intervals only when their sampling-unit
-assumptions are stated. Adjacent time blocks can be correlated, so label four-block intervals
-exploratory rather than pretending they are independent days.
+| Shape | Main pressure | Typical target |
+|---|---|---:|
+| short / short | request rate and queueing | 256 input / 128 output |
+| long / short | input TPM and prefill behavior | 32K or 100K input / 128 output |
+| short / long | output TPM and decode behavior | 256 input / 4K output |
+| heterogeneous mixed | production-like contention | deterministic mixture |
+
+Use the same target token counts and prompt identities for comparable routes. If one route cannot
+fit the target, report the unmatched route-relative cell separately.
+
+## 4. Find the knee with open-loop AIMD
+
+Open-loop means arrivals are scheduled from a clock, not from the completion of the previous
+request. A separate concurrency ceiling prevents unlimited client memory growth. When the endpoint
+slows, arrivals wait and their queue delay remains part of end-to-end latency.
+
+The controller follows this sequence:
+
+1. Measure a low-rate baseline.
+2. Increase geometrically to bracket the neighborhood quickly.
+3. Increase by a fixed additive step after a healthy epoch.
+4. Multiply the offered rate down after congestion, normally by 0.5.
+5. Treat two consecutive unhealthy epochs as an overload bracket.
+6. Confirm the best healthy rate in three separated epochs.
+7. After observed overload, test recovery at half that rate.
+
+An epoch is healthy only when its predeclared reliability, latency, queue-growth, and throttling
+criteria all pass. If the highest configured rate remains healthy, report “at least this rate”;
+there is no observed knee.
+
+## 5. Verify sustained behavior
+
+AIMD epochs are short controller observations. They do not prove sustained capacity.
+
+For every endpoint × shape, run the selected candidate rate as four 30-second blocks. Report every
+block and the aggregate:
+
+- offered, completed, and successful RPM;
+- successful input and output TPM;
+- success, throttle, timeout, and server-error rates;
+- p95 TTFT and end-to-end latency;
+- queue drain after the arrival window;
+- matched deterministic quality.
+
+Call the rate soak-verified only if every required block completes and all health gates pass. If a
+budget, deadline, crash, or missing-usage condition removes a block, label the cell incomplete.
+
+## 6. Exercise capabilities, not just request acceptance
+
+The capability suite includes functional controls for:
+
+- streaming and non-streaming;
+- tool selection, argument validity, nested schemas, and parallel calls;
+- JSON and JSON-schema validity;
+- a generated solid-color image with a deterministic answer;
+- short and long answers;
+- reasoning, coding with executable checks, extraction, summarization, and instruction following;
+- stop, seed, log probabilities, temperature, and top-p;
+- pairwise parameter interactions plus selected three-way performance corners.
+
+A 2xx proves transport acceptance. Functional support requires the deterministic behavior check.
+A validation 4xx supports a boundary only when matched before/after controls still succeed.
+
+## 7. Map context and output envelopes
+
+Probe fixed anchors and percentages of the documented context window: 1%, 10%, 25%, 50%, 75%,
+90%, 95%, and 99%. Long prompts contain independent markers near the beginning, middle, and end.
+Acceptance without correct retrieval is not long-context success.
+
+Probe requested output at small, medium, large, near-limit, limit, and just-over-limit anchors.
+Separate:
+
+1. request-limit acceptance;
+2. realized output length;
+3. prompt-plus-output enforcement;
+4. EOS, truncation, timeout, and infrastructure termination.
+
+## 8. Measure time variation separately
+
+Run a dedicated low-load sentinel campaign. Repeat identical prompts at fixed offsets across the
+desired horizon and randomize route order within each panel. Do not overlap capacity or capability
+traffic from the same provider account.
+
+For a 24-hour screen, use 12 panels two hours apart or 24 hourly panels. Report the observed span,
+panel count, per-panel sample count, and uncertainty. Adjacent panels are temporally correlated;
+they are not independent days.
+
+## 9. Parallelize at the correct level
+
+Run independent providers concurrently. Keep capacity sweeps endpoint-isolated inside each
+provider. Low-load time panels can include all endpoints serially in randomized order. This gives
+fast execution without turning shared quota contention into a false endpoint property.
+
+## 10. Statistical units
+
+- request metrics: final logical requests;
+- AIMD confirmation: epochs;
+- sustained capacity: soak blocks;
+- time variation: matched requests within panels, with panels retained explicitly;
+- quality change: matched task pairs.
+
+Tokens are measurements, not independent samples. Use Wilson intervals for binary proportions and
+request or block bootstrap intervals for medians, quantiles, and rates. Withhold p99 below 1,000
+eligible observations. Publish sample size, unit, interval bounds, and method next to every estimate.
 
 ## Production handoff
 
-Publish tested anchors, not invented headroom. Production should begin below the matched workload
-anchor, retain a separate concurrency ceiling, and use retry/backoff plus AIMD. Re-run admission and
-the relevant cells after any model version, region, quota, API, or serving-stack change.
+Recommend only a workload-matched, soak-verified rate. If no such rate exists, publish the highest
+observed healthy screen and say what remains unverified. Production clients should retain bounded
+concurrency, exponential retry backoff with jitter, and an AIMD-style adaptive offered-rate limit.
+
+Re-run relevant cells after a model, deployment, API version, region, quota, or provider routing
+change. A provider name is not a performance guarantee; the exact route identity is the result.
