@@ -900,14 +900,28 @@ def _build_pdf(
         rows_data = [
             ["Route", route_id],
             ["Provider / region", f"{route.provider} / {route.region}"],
+            ["Exact model / API", f"{route.model} / {route.api_family}"],
             ["Model version", route.model_version],
             [
                 "Context / output",
                 f"{route.context_tokens or 'not documented'} / "
                 f"{route.max_output_tokens or 'not documented'} tokens",
             ],
-            ["Short TTFT p50", f"{_format_metric(latency.get('ttft_p50'))} s"],
-            ["Short latency p50", f"{_format_metric(latency.get('latency_p50'))} s"],
+            [
+                "Input / output price",
+                f"${route.input_usd_per_million:g} / ${route.output_usd_per_million:g} "
+                "per million tokens",
+            ],
+            [
+                "Short TTFT p50 / p95",
+                f"{_format_metric(latency.get('ttft_p50'))} / "
+                f"{_format_metric(latency.get('ttft_p95'))} s",
+            ],
+            [
+                "Short latency p50 / p95",
+                f"{_format_metric(latency.get('latency_p50'))} / "
+                f"{_format_metric(latency.get('latency_p95'))} s",
+            ],
             [
                 "Functional capability probes",
                 f"{functional}/{len(endpoint_capabilities)} measured cells",
