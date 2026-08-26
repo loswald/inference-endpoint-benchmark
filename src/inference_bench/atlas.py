@@ -5,7 +5,6 @@ import math
 import shutil
 from collections import Counter, defaultdict
 from collections.abc import Iterable
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -882,6 +881,7 @@ def _build_pdf(
     from reportlab.lib.pagesizes import A4, landscape
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import mm
+    from reportlab.pdfgen import canvas as pdf_canvas
     from reportlab.platypus import (
         BaseDocTemplate,
         Frame,
@@ -1012,8 +1012,8 @@ def _build_pdf(
         Paragraph("Technical performance and capability evidence atlas", styles["AtlasH1"]),
         Paragraph(
             f"{len(matrix.campaigns)} providers, {len(endpoints)} exact hosted routes, "
-            f"{len(coverage):,} planned evidence cells. Generated "
-            f"{datetime.now(UTC).strftime('%Y-%m-%d %H:%M UTC')}.",
+            f"{len(coverage):,} planned evidence cells. Regenerated from the terminal, "
+            "hash-bound evidence ledgers.",
             styles["AtlasBody"],
         ),
         Spacer(1, 6 * mm),
@@ -1465,7 +1465,11 @@ def _build_pdf(
                 ),
             ]
         )
-    document.build(story)
+    def invariant_canvas(*args: Any, **kwargs: Any) -> Any:
+        kwargs["invariant"] = 1
+        return pdf_canvas.Canvas(*args, **kwargs)
+
+    document.build(story, canvasmaker=invariant_canvas)
 
 
 def generate_atlas(

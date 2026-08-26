@@ -54,6 +54,19 @@ def test_atlas_pdf_and_coverage_figure_are_readable(tmp_path, campaign) -> None:
     material = pdf.read_bytes()
     assert material.startswith(b"%PDF-")
     assert len(material) > 10_000
+    regenerated = tmp_path / "atlas-regenerated.pdf"
+    _build_pdf(
+        regenerated,
+        matrix,
+        {
+            "coverage-ledger.csv": coverage,
+            "matched-cell-summary.csv": [],
+            "controller-summary.csv": [],
+            "load-block-summary.csv": [],
+        },
+        [figure],
+    )
+    assert regenerated.read_bytes() == material
 
 
 def test_load_response_uses_unconnected_matched_endpoint_panels(tmp_path, campaign) -> None:

@@ -22,4 +22,6 @@ Interpret figures at the endpoint × workload level. AIMD points are bounds on t
 only completed fixed-rate soak blocks support sustained-capacity language. Missing evidence is
 labelled instead of imputed, and tokens are never treated as independent statistical samples.
 
-PDF SHA-256: `238c36012147259c80f221ba4e7165e1badebcc03649c2996387700ee4dab8c5`.
+PDF SHA-256: `c091dfbe420bd3363d8f6e24de69ec2343f98776bc01dc97bd67d78a7dabd558`.
+The PDF writer runs in invariant mode: identical evidence tables and source code reproduce the same
+PDF bytes, not merely an equivalent visual document.

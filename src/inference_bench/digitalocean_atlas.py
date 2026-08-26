@@ -357,6 +357,7 @@ def _build_pdf(
     from reportlab.lib.pagesizes import A4, landscape
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import mm
+    from reportlab.pdfgen import canvas as pdf_canvas
     from reportlab.platypus import (
         BaseDocTemplate,
         Frame,
@@ -687,7 +688,11 @@ def _build_pdf(
                     ),
                 ]
             )
-    document.build(story)
+    def invariant_canvas(*args: Any, **kwargs: Any) -> Any:
+        kwargs["invariant"] = 1
+        return pdf_canvas.Canvas(*args, **kwargs)
+
+    document.build(story, canvasmaker=invariant_canvas)
 
 
 def generate_digitalocean_atlas(
