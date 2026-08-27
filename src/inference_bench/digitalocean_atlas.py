@@ -701,6 +701,7 @@ def generate_digitalocean_atlas(
     *,
     capacity_source: str,
     soak_source: str,
+    exclude_endpoints: tuple[str, ...] = (),
 ) -> Path:
     source = Path(summary_dir).resolve()
     output = Path(output_dir).resolve()
@@ -710,11 +711,16 @@ def generate_digitalocean_atlas(
         shutil.rmtree(output)
     figures_dir = output / "figures"
     figures_dir.mkdir(parents=True)
-    inventory = _read_csv(source / "endpoint-inventory.csv")
-    capacity = _read_csv(source / "capacity-summary.csv")
-    soak = _read_csv(source / "soak-cell-summary.csv")
-    capabilities = _read_csv(source / "capability-evidence.csv")
-    limits = _read_csv(source / "observed-limits.csv")
+    excluded = set(exclude_endpoints)
+
+    def included(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+        return [row for row in rows if row.get("endpoint_id") not in excluded]
+
+    inventory = included(_read_csv(source / "endpoint-inventory.csv"))
+    capacity = included(_read_csv(source / "capacity-summary.csv"))
+    soak = included(_read_csv(source / "soak-cell-summary.csv"))
+    capabilities = included(_read_csv(source / "capability-evidence.csv"))
+    limits = included(_read_csv(source / "observed-limits.csv"))
     figures = _plot_capacity(capacity, capacity_source, figures_dir)
     figures.extend(_plot_soak(soak, soak_source, figures_dir))
     figures.append(_plot_capabilities(capabilities, figures_dir))

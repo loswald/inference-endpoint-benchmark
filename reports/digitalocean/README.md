@@ -2,7 +2,7 @@
 
 The [PDF atlas](digitalocean-hosted-inference-evidence-atlas.pdf) is the readable entry point. It
 contains a decision map, matched capacity and sustained-soak plates, a capability matrix, and one
-evidence sheet for each of the 12 exact DigitalOcean-hosted endpoints in the campaign.
+evidence sheet for each of the 11 DigitalOcean-hosted endpoints retained in the publication.
 
 The adjacent CSV files are the compact, machine-readable evidence behind the figures:
 
@@ -22,6 +22,6 @@ Interpret figures at the endpoint × workload level. AIMD points are bounds on t
 only completed fixed-rate soak blocks support sustained-capacity language. Missing evidence is
 labelled instead of imputed, and tokens are never treated as independent statistical samples.
 
-PDF SHA-256: `c091dfbe420bd3363d8f6e24de69ec2343f98776bc01dc97bd67d78a7dabd558`.
+PDF SHA-256: `2433094e20877cc217195b33e4c3eea83e135ee0fc564043a0712d9c9855e1d3`.
 The PDF writer runs in invariant mode: identical evidence tables and source code reproduce the same
 PDF bytes, not merely an equivalent visual document.

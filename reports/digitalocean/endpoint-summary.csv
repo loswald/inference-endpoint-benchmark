@@ -1,5 +1,4 @@
 aggregate_policy,bootstrap_replicates_requested,endpoint_id,epoch_count,error_count,estimated_cost_usd,heterogeneous_metrics_omitted,rate_limit_count,request_count,scientific_success_count,server_error_count,source_kind_count,timeout_count,transport_success_count,workload_cell_count
-"counts_and_cost_only; RPM, TPM, latency, decode, and quality remain in matched workload cells",2000,arcee-trinity-large-thinking,116,116,9.486052899999194,True,0,3210,316,0,4,0,3094,34
 "counts_and_cost_only; RPM, TPM, latency, decode, and quality remain in matched workload cells",2000,deepseek-v4-flash-0731,136,27,4.295549608000028,True,0,9775,9747,0,4,4,9748,32
 "counts_and_cost_only; RPM, TPM, latency, decode, and quality remain in matched workload cells",2000,gemma-4-31B-it,112,83,9.93278124000001,True,29,1063,785,0,4,34,980,34
 "counts_and_cost_only; RPM, TPM, latency, decode, and quality remain in matched workload cells",2000,glm-5.2,114,111,8.119277000000036,True,0,1028,874,0,4,3,917,35

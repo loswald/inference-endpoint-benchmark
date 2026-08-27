@@ -732,6 +732,12 @@ def _parser() -> argparse.ArgumentParser:
     digitalocean.add_argument("--output", type=Path, required=True)
     digitalocean.add_argument("--capacity-source", required=True)
     digitalocean.add_argument("--soak-source", required=True)
+    digitalocean.add_argument(
+        "--exclude-endpoint",
+        action="append",
+        default=[],
+        help="omit one exact endpoint identifier from every atlas panel; repeat as needed",
+    )
     return parser
 
 
@@ -795,6 +801,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.output,
                 capacity_source=args.capacity_source,
                 soak_source=args.soak_source,
+                exclude_endpoints=tuple(args.exclude_endpoint),
             )
         )
         return 0
