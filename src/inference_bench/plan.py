@@ -211,6 +211,12 @@ def build_plan(config: CampaignConfig) -> PlanSummary:
                         max_rps=max_rps,
                     )
                 confirmation_stages = int(aimd.get("confirmation_max_stages", 4))
+                separator_samples = int(
+                    aimd.get("confirmation_separator_samples", baseline_samples)
+                )
+                separator_seconds = max(
+                    seconds, separator_samples / _baseline_rate
+                )
                 confirmation_decrease = float(
                     aimd.get(
                         "confirmation_multiplicative_decrease",
@@ -266,10 +272,10 @@ def build_plan(config: CampaignConfig) -> PlanSummary:
                                     shape_config=aimd,
                                 )
                             )
-                            n = baseline_samples
+                            n = separator_samples
                             load_count += n
                             load_cost += n * shape_cost * attempts_per_logical
-                            load_arrival_window_seconds += baseline_seconds
+                            load_arrival_window_seconds += separator_seconds
                     confirmation_rate = max(minimum_rps, confirmation_rate * confirmation_decrease)
                 # Recovery is conditional on an observed two-epoch overload at runtime. Include
                 # its maximal possible schedule in the upper bound even though the all-healthy

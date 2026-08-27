@@ -194,6 +194,10 @@ def validate_aimd_config(config: dict[str, Any], default_concurrency: int) -> No
     if not 0 < baseline_decrease <= 1:
         raise ValueError("aimd.baseline_multiplicative_decrease must lie in (0, 1]")
     _strict_positive_int(config.get("confirmation_max_stages", 4), "aimd.confirmation_max_stages")
+    _strict_positive_int(
+        config.get("confirmation_separator_samples", samples),
+        "aimd.confirmation_separator_samples",
+    )
     confirmation_decrease = _strict_positive_float(
         config.get("confirmation_multiplicative_decrease", decrease),
         "aimd.confirmation_multiplicative_decrease",
@@ -966,8 +970,9 @@ async def run_aimd(
             _censor_unstarted_load_cells(engine, downstream, reason)
         return results
     baseline_samples = baseline.scheduled
-    baseline_duration = baseline.duration_seconds
     baseline_rate = baseline.offered_rps
+    separator_samples = int(config.get("confirmation_separator_samples", baseline_samples))
+    separator_duration = max(duration, separator_samples / baseline_rate)
     ttft_limit = None if baseline.p95_ttft_seconds is None else 2 * baseline.p95_ttft_seconds
     total_limit = None if baseline.p95_total_seconds is None else 2 * baseline.p95_total_seconds
     unhealthy_streak = 0
@@ -1114,12 +1119,12 @@ async def run_aimd(
                     shape=shape,
                     epoch_id=aimd_separator_epoch_id(route.id, shape, stage, confirmation),
                     phase="confirmation_separator",
-                    offered_rps=baseline_rate,
-                    duration_seconds=baseline_duration,
+                    offered_rps=separator_samples / separator_duration,
+                    duration_seconds=separator_duration,
                     concurrency=ceiling,
                     seed=seed + stage * 1000 + 50 + confirmation,
                     shape_config=config,
-                    deterministic_scheduled_count=baseline_samples,
+                    deterministic_scheduled_count=separator_samples,
                     max_p95_ttft_seconds=ttft_limit,
                     max_p95_total_seconds=total_limit,
                 )

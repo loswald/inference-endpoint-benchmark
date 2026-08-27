@@ -106,6 +106,7 @@ _PUBLIC_SUITE_KEYS = {
         "baseline_multiplicative_decrease",
         "confirmation_max_stages",
         "confirmation_multiplicative_decrease",
+        "confirmation_separator_samples",
         "minimum_rps",
         "long_input_tokens",
         "long_input_tokens_by_route",

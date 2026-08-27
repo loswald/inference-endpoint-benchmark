@@ -10,6 +10,7 @@ import sqlite3
 import subprocess
 import sys
 from contextlib import suppress
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -703,6 +704,25 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("config", type=Path)
     run.add_argument("--output", type=Path, required=True)
     run.add_argument("--confirm-live", action="store_true")
+    run.add_argument(
+        "--only-suite",
+        choices=(
+            "warmup",
+            "latency",
+            "capability",
+            "interactions",
+            "context",
+            "output",
+            "quality",
+            "cache",
+            "time_variation",
+            "aimd",
+            "soak",
+        ),
+        help="run exactly one configured suite while retaining the same route evidence",
+    )
+    run.add_argument("--max-wall-seconds", type=float)
+    run.add_argument("--max-cost-usd", type=float)
     run_matrix_parser = sub.add_parser(
         "run-matrix", help="run providers in parallel; isolate endpoint capacity within provider"
     )
@@ -745,6 +765,18 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.command == "plan":
         config = load_config(args.config)
+        if args.only_suite:
+            if args.only_suite not in config.suites:
+                raise ValueError(f"suite is not configured: {args.only_suite}")
+            config = replace(config, suites={args.only_suite: config.suites[args.only_suite]})
+        if args.max_wall_seconds is not None:
+            if args.max_wall_seconds <= 0:
+                raise ValueError("--max-wall-seconds must be positive")
+            config = replace(config, max_wall_seconds=args.max_wall_seconds)
+        if args.max_cost_usd is not None:
+            if args.max_cost_usd <= 0:
+                raise ValueError("--max-cost-usd must be positive")
+            config = replace(config, max_cost_usd=args.max_cost_usd)
         print(json.dumps(build_plan(config).to_dict(), indent=2, sort_keys=True))
         return 0
     if args.command == "plan-matrix":

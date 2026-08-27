@@ -256,6 +256,7 @@ suites:
     baseline_multiplicative_decrease: 0.5
     confirmation_max_stages: 2
     confirmation_multiplicative_decrease: 0.1
+    confirmation_separator_samples: 5
     minimum_rps: 0.25
   soak:
     enabled: false
