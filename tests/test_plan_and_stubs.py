@@ -84,6 +84,8 @@ def test_plan_uses_runtime_schedule_contract_and_includes_retry_ceiling(route) -
         "initial_rps": 2,
         "additive_rps": 1,
         "baseline_rps": 0.5,
+        "baseline_attempts": 1,
+        "confirmation_max_stages": 1,
     }
     config = CampaignConfig(
         name="schedule",

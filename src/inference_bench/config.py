@@ -14,6 +14,7 @@ import yaml
 from .models import TRANSPORT_HEADER_PROFILE, AuthConfig, RouteConfig, sha256_json
 
 _PUBLIC_CAPABILITY_KEYS = {
+    "batch_inference",
     "caching",
     "documentation_checked_utc",
     "json_schema",
@@ -34,8 +35,10 @@ _PUBLIC_SUITE_KEYS = {
         "repeats",
         "shapes",
         "long_input_tokens",
+        "long_input_tokens_by_route",
         "long_input_overflow",
         "long_output_tokens",
+        "long_output_tokens_by_route",
         "long_output_overflow",
     },
     "latency": {
@@ -43,8 +46,10 @@ _PUBLIC_SUITE_KEYS = {
         "repeats",
         "shapes",
         "long_input_tokens",
+        "long_input_tokens_by_route",
         "long_input_overflow",
         "long_output_tokens",
+        "long_output_tokens_by_route",
         "long_output_overflow",
     },
     "capability": {
@@ -60,7 +65,7 @@ _PUBLIC_SUITE_KEYS = {
         "stream",
         "output_tokens",
     },
-    "context": {"enabled", "percentages"},
+    "context": {"enabled", "percentages", "fixed_tokens"},
     "output": {
         "enabled",
         "fallback_max_output_tokens",
@@ -76,8 +81,10 @@ _PUBLIC_SUITE_KEYS = {
         "shapes",
         "offered_rps",
         "long_input_tokens",
+        "long_input_tokens_by_route",
         "long_input_overflow",
         "long_output_tokens",
+        "long_output_tokens_by_route",
         "long_output_overflow",
     },
     "aimd": {
@@ -89,14 +96,22 @@ _PUBLIC_SUITE_KEYS = {
         "bracket_epochs",
         "bracket_multiplier",
         "max_rps",
+        "max_rps_by_shape",
         "epochs",
         "epoch_seconds",
         "concurrency",
         "baseline_rps",
         "baseline_samples",
+        "baseline_attempts",
+        "baseline_multiplicative_decrease",
+        "confirmation_max_stages",
+        "confirmation_multiplicative_decrease",
+        "minimum_rps",
         "long_input_tokens",
+        "long_input_tokens_by_route",
         "long_input_overflow",
         "long_output_tokens",
+        "long_output_tokens_by_route",
         "long_output_overflow",
     },
     "soak": {
@@ -110,14 +125,21 @@ _PUBLIC_SUITE_KEYS = {
         "concurrency",
         "baseline_rps",
         "baseline_samples",
+        "baseline_attempts",
+        "baseline_multiplicative_decrease",
+        "max_rate_stages",
+        "rate_multiplicative_decrease",
+        "minimum_rps",
         "long_input_tokens",
+        "long_input_tokens_by_route",
         "long_input_overflow",
         "long_output_tokens",
+        "long_output_tokens_by_route",
         "long_output_overflow",
     },
 }
 
-_TOP_LEVEL_KEYS = {"campaign", "routes", "suites"}
+_TOP_LEVEL_KEYS = {"campaign", "route_defaults", "routes", "suites"}
 _CAMPAIGN_KEYS = {
     "name",
     "seed",
@@ -600,9 +622,27 @@ def load_config(path: str | Path) -> CampaignConfig:
     if not isinstance(campaign, dict):
         raise ValueError("campaign must be a mapping")
     _reject_unknown("campaign", campaign, _CAMPAIGN_KEYS)
+    route_defaults = raw.get("route_defaults") or {}
+    if not isinstance(route_defaults, dict):
+        raise ValueError("route_defaults must be a mapping")
+    _reject_unknown("route_defaults", route_defaults, _ROUTE_KEYS)
     routes = raw.get("routes") or []
     if not isinstance(routes, list) or not routes:
         raise ValueError("at least one route is required")
+    merged_routes: list[dict[str, Any]] = []
+    default_capabilities = route_defaults.get("capabilities") or {}
+    for index, item in enumerate(routes):
+        if not isinstance(item, dict):
+            raise ValueError(f"routes[{index}] must be a mapping")
+        merged = {**route_defaults, **item}
+        item_capabilities = item.get("capabilities") or {}
+        if default_capabilities or item_capabilities:
+            if not isinstance(default_capabilities, dict) or not isinstance(
+                item_capabilities, dict
+            ):
+                raise ValueError("route capabilities must be mappings")
+            merged["capabilities"] = {**default_capabilities, **item_capabilities}
+        merged_routes.append(merged)
     suites = raw.get("suites") or {}
     if not isinstance(suites, dict):
         raise ValueError("suites must be a mapping")
@@ -626,7 +666,7 @@ def load_config(path: str | Path) -> CampaignConfig:
             campaign.get("input_token_reservation_factor", 1.5),
             "campaign.input_token_reservation_factor",
         ),
-        routes=tuple(_route(item) for item in routes),
+        routes=tuple(_route(item) for item in merged_routes),
         suites=dict(suites),
     )
 
@@ -728,12 +768,28 @@ def _validate_suites(
         if name in {"warmup", "latency", "aimd", "soak", "time_variation"}:
             for axis in ("input", "output"):
                 target_key = f"long_{axis}_tokens"
+                by_route_key = f"{target_key}_by_route"
                 overflow_key = f"long_{axis}_overflow"
                 if target_key in values:
                     _positive_integer(values[target_key], f"suites.{name}.{target_key}")
+                if by_route_key in values:
+                    by_route = values[by_route_key]
+                    if not isinstance(by_route, dict) or not by_route:
+                        raise ValueError(f"suites.{name}.{by_route_key} must be a nonempty mapping")
+                    for route_id, target in by_route.items():
+                        if route_id not in route_ids:
+                            raise ValueError(
+                                f"suites.{name}.{by_route_key} has unknown route ID: {route_id}"
+                            )
+                        _positive_integer(
+                            target,
+                            f"suites.{name}.{by_route_key}.{route_id}",
+                        )
                 if overflow_key in values:
-                    if target_key not in values:
-                        raise ValueError(f"suites.{name}.{overflow_key} requires {target_key}")
+                    if target_key not in values and by_route_key not in values:
+                        raise ValueError(
+                            f"suites.{name}.{overflow_key} requires {target_key} or {by_route_key}"
+                        )
                     if values[overflow_key] not in {"fail", "clip"}:
                         raise ValueError(f"suites.{name}.{overflow_key} must be fail or clip")
         if name == "static":
@@ -751,13 +807,23 @@ def _validate_suites(
             _positive_number(values.get("offered_rps", 0.2), "suites.time_variation.offered_rps")
         if name == "context":
             percentages = values.get("percentages", [1, 10, 25, 50, 75, 90, 95, 99])
-            if not isinstance(percentages, list) or not percentages:
-                raise ValueError("suites.context.percentages must be a nonempty list")
+            fixed_tokens = values.get("fixed_tokens", [])
+            if not isinstance(percentages, list):
+                raise ValueError("suites.context.percentages must be a list")
+            if not isinstance(fixed_tokens, list):
+                raise ValueError("suites.context.fixed_tokens must be a list")
+            if not percentages and not fixed_tokens:
+                raise ValueError(
+                    "suites.context requires at least one percentage or fixed token anchor"
+                )
             _require_unique(percentages, "suites.context.percentages")
             for index, percentage in enumerate(percentages):
                 number = _positive_number(percentage, f"suites.context.percentages[{index}]")
                 if number > 100:
                     raise ValueError("suites.context.percentages must not exceed 100")
+            _require_unique(fixed_tokens, "suites.context.fixed_tokens")
+            for index, tokens in enumerate(fixed_tokens):
+                _positive_integer(tokens, f"suites.context.fixed_tokens[{index}]")
         if name in {"capability", "interactions"}:
             for key in ("temperatures", "top_ps"):
                 if key in values and (not isinstance(values[key], list) or not values[key]):

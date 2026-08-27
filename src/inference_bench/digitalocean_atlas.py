@@ -14,6 +14,79 @@ SHAPE_LABELS = {
     "short_long": "short input / long output",
     "mixed": "heterogeneous production mix",
 }
+CAPABILITY_DIMENSIONS = (
+    "capability_smoke",
+    "response_format",
+    "tools",
+    "parallel_tool_calls",
+    "vision",
+    "seed",
+    "stop",
+    "temperature",
+    "top_p",
+    "top_logprobs",
+    "automatic_prompt_cache",
+    "batch_open_models",
+)
+
+
+def _merge_platform_capabilities(
+    rows: list[dict[str, str]],
+    cache_rows: list[dict[str, str]],
+    endpoints: list[str],
+) -> list[dict[str, str]]:
+    """Replace the obsolete cache-option probe with the actual DigitalOcean contracts.
+
+    DigitalOcean-hosted open models cache exact prefixes automatically; there is no request option
+    to enable or disable that behaviour. Batch inference is a different service and explicitly
+    excludes open-source/DigitalOcean-hosted models. These platform contracts are kept distinct
+    from endpoint transport probes so an invalid parameter test cannot erase a supported feature.
+    """
+
+    merged = [row for row in rows if row.get("capability_dimension") != "caching_option"]
+    by_endpoint: dict[str, list[dict[str, str]]] = {endpoint: [] for endpoint in endpoints}
+    for row in cache_rows:
+        endpoint = str(row.get("endpoint_id") or "")
+        if endpoint in by_endpoint:
+            by_endpoint[endpoint].append(row)
+    for endpoint in endpoints:
+        observations = by_endpoint[endpoint]
+        hit_count = sum(
+            int(_number(row.get("request_count")) or 0)
+            for row in observations
+            if row.get("cache_state") == "cache_hit_observed"
+        )
+        observed_count = sum(int(_number(row.get("request_count")) or 0) for row in observations)
+        merged.append(
+            {
+                "endpoint_id": endpoint,
+                "capability_dimension": "automatic_prompt_cache",
+                "transport_status": "documented_supported",
+                "functional_status": "passed" if hit_count else "degraded",
+                "functional_pass_count": str(hit_count),
+                "functional_scored_count": str(observed_count),
+                "sampling_unit": "request_id",
+                "measurement_note": (
+                    "automatic exact-prefix cache hit observed"
+                    if hit_count
+                    else "documented automatic best-effort cache; no hit observed in retained rows"
+                ),
+            }
+        )
+        merged.append(
+            {
+                "endpoint_id": endpoint,
+                "capability_dimension": "batch_open_models",
+                "transport_status": "documented_unavailable",
+                "functional_status": "documented_unavailable",
+                "sampling_unit": "product_contract",
+                "measurement_note": (
+                    "DigitalOcean batch inference excludes open-source and "
+                    "DigitalOcean-hosted models"
+                ),
+            }
+        )
+    return merged
 
 
 def _read_csv(path: Path) -> list[dict[str, str]]:
@@ -271,19 +344,7 @@ def _plot_capabilities(rows: list[dict[str, str]], destination: Path) -> Path:
     import numpy as np
     from matplotlib.colors import ListedColormap
 
-    dimensions = (
-        "capability_smoke",
-        "response_format",
-        "tools",
-        "parallel_tool_calls",
-        "vision",
-        "seed",
-        "stop",
-        "temperature",
-        "top_p",
-        "top_logprobs",
-        "caching_option",
-    )
+    dimensions = CAPABILITY_DIMENSIONS
     endpoints = sorted({str(row.get("endpoint_id")) for row in rows})
     matrix = np.full((len(endpoints), len(dimensions)), np.nan)
     symbols = np.full((len(endpoints), len(dimensions)), "", dtype=object)
@@ -645,7 +706,14 @@ def _build_pdf(
             ]
         )
         capabilities_rows = [["Capability", "Transport", "Functional"]]
-        for dimension in ("response_format", "tools", "parallel_tool_calls", "vision"):
+        for dimension in (
+            "response_format",
+            "tools",
+            "parallel_tool_calls",
+            "vision",
+            "automatic_prompt_cache",
+            "batch_open_models",
+        ):
             row = capability_index.get((endpoint_id, dimension), {})
             capabilities_rows.append(
                 [
@@ -688,6 +756,7 @@ def _build_pdf(
                     ),
                 ]
             )
+
     def invariant_canvas(*args: Any, **kwargs: Any) -> Any:
         kwargs["invariant"] = 1
         return pdf_canvas.Canvas(*args, **kwargs)
@@ -720,6 +789,9 @@ def generate_digitalocean_atlas(
     capacity = included(_read_csv(source / "capacity-summary.csv"))
     soak = included(_read_csv(source / "soak-cell-summary.csv"))
     capabilities = included(_read_csv(source / "capability-evidence.csv"))
+    cache_rows = included(_read_csv(source / "cache-state-metrics.csv"))
+    endpoints = [str(row.get("endpoint_id")) for row in inventory]
+    capabilities = _merge_platform_capabilities(capabilities, cache_rows, endpoints)
     limits = included(_read_csv(source / "observed-limits.csv"))
     figures = _plot_capacity(capacity, capacity_source, figures_dir)
     figures.extend(_plot_soak(soak, soak_source, figures_dir))

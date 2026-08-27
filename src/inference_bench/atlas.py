@@ -1465,6 +1465,7 @@ def _build_pdf(
                 ),
             ]
         )
+
     def invariant_canvas(*args: Any, **kwargs: Any) -> Any:
         kwargs["invariant"] = 1
         return pdf_canvas.Canvas(*args, **kwargs)

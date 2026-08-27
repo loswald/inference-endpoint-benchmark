@@ -1,0 +1,261 @@
+campaign:
+  name: digitalocean-hosted-complete-20260827
+  seed: 20260827
+  max_wall_seconds: 14400
+  max_cost_usd: 300
+  launch_reserve_seconds: 120
+  launch_reserve_usd: 5
+  concurrency: 128
+  retries: 1
+  input_token_reservation_factor: 1.2
+  client_location: gcp-europe-west2
+
+route_defaults:
+  provider: digitalocean
+  adapter: digitalocean
+  base_url: https://inference.do-ai.run/v1/chat/completions
+  auth:
+    env: DIGITALOCEAN_INFERENCE_API_KEY
+    header: Authorization
+    prefix: "Bearer "
+  region: provider_does_not_expose_region
+  api_family: chat_completions
+  api_version: v1
+  quota_scope: per_account
+  output_limit_field: max_tokens
+  stream_usage_mode: try
+  request_timeout_seconds: 360
+  http2: true
+  connection_reuse: true
+  transport_max_connections: 128
+  input_token_reservation_overhead: 4096
+  documentation_source_url: https://docs.digitalocean.com/products/inference/details/models/
+  pricing_source_url: https://docs.digitalocean.com/products/inference/details/pricing/
+  evidence_retrieved_at_utc: "2026-08-27T19:20:00Z"
+  evidence_bundle_sha256: f818d02dc14755dab4ba5c68bb6367a235d0883dcf0ecf8a36f6baad481884e5
+  capabilities:
+    streaming: true
+    caching: true
+    batch_inference: false
+    vision: false
+    documentation_checked_utc: "2026-08-27T19:20:00+00:00"
+
+routes:
+  -
+    id: deepseek-v4-flash-0731
+    provider: digitalocean
+    adapter: digitalocean
+    model: deepseek-v4-flash-0731
+    base_url: https://inference.do-ai.run/v1/chat/completions
+    auth:
+      env: DIGITALOCEAN_INFERENCE_API_KEY
+      header: Authorization
+      prefix: "Bearer "
+    region: provider_does_not_expose_region
+    api_family: chat_completions
+    api_version: v1
+    model_version: deepseek-v4-flash-0731
+    quota_scope: per_account
+    context_tokens: 1048576
+    max_output_tokens: 1048576
+    output_limit_field: max_tokens
+    stream_usage_mode: try
+    request_timeout_seconds: 360
+    http2: true
+    connection_reuse: true
+    transport_max_connections: 128
+    input_token_reservation_overhead: 4096
+    input_usd_per_million: 0.08
+    output_usd_per_million: 0.252
+    cached_input_usd_per_million: 0.025
+    documentation_source_url: https://docs.digitalocean.com/products/inference/details/models/
+    pricing_source_url: https://docs.digitalocean.com/products/inference/details/pricing/
+    evidence_retrieved_at_utc: "2026-08-27T19:20:00Z"
+    evidence_bundle_sha256: f818d02dc14755dab4ba5c68bb6367a235d0883dcf0ecf8a36f6baad481884e5
+    capabilities:
+      streaming: true
+      caching: true
+      batch_inference: false
+      vision: false
+      documentation_checked_utc: "2026-08-27T19:20:00+00:00"
+
+  -
+    id: gemma-4-31B-it
+    model: gemma-4-31B-it
+    model_version: gemma-4-31B-it
+    context_tokens: 256000
+    max_output_tokens: 8192
+    input_usd_per_million: 0.18
+    output_usd_per_million: 0.50
+    cached_input_usd_per_million: 0.036
+
+  -
+    id: glm-5.2
+    model: glm-5.2
+    model_version: glm-5.2
+    context_tokens: 262144
+    max_output_tokens: 262144
+    input_usd_per_million: 0.70
+    output_usd_per_million: 2.20
+    cached_input_usd_per_million: 0.105
+
+  -
+    id: kimi-k3
+    model: kimi-k3
+    model_version: kimi-k3
+    context_tokens: null
+    max_output_tokens: null
+    input_usd_per_million: 2.85
+    output_usd_per_million: 14.25
+    cached_input_usd_per_million: 0.285
+    capabilities:
+      vision: true
+
+  -
+    id: minimax-m2.5
+    model: minimax-m2.5
+    model_version: minimax-m2.5
+    context_tokens: 65536
+    max_output_tokens: 65536
+    input_usd_per_million: 0.30
+    output_usd_per_million: 1.20
+    cached_input_usd_per_million: 0.06
+
+  -
+    id: mimo-v2.5-pro
+    model: mimo-v2.5-pro
+    model_version: mimo-v2.5-pro
+    context_tokens: 262144
+    max_output_tokens: 262144
+    input_usd_per_million: 0.40
+    output_usd_per_million: 1.50
+    cached_input_usd_per_million: 0.08
+
+  -
+    id: nemotron-3-ultra-550b
+    model: nemotron-3-ultra-550b
+    model_version: nemotron-3-ultra-550b
+    context_tokens: 131072
+    max_output_tokens: 131072
+    input_usd_per_million: 0.90
+    output_usd_per_million: 1.70
+    cached_input_usd_per_million: null
+
+  -
+    id: nvidia-nemotron-3-super-120b
+    model: nvidia-nemotron-3-super-120b
+    model_version: nvidia-nemotron-3-super-120b
+    context_tokens: 1000000
+    max_output_tokens: 32768
+    input_usd_per_million: 0.30
+    output_usd_per_million: 0.65
+    cached_input_usd_per_million: 0.06
+
+  -
+    id: openai-gpt-oss-120b
+    model: openai-gpt-oss-120b
+    model_version: openai-gpt-oss-120b
+    context_tokens: 128000
+    max_output_tokens: 4096
+    input_usd_per_million: 0.06
+    output_usd_per_million: 0.39
+    cached_input_usd_per_million: null
+
+  -
+    id: qwen3.5-397b-a17b
+    model: qwen3.5-397b-a17b
+    model_version: qwen3.5-397b-a17b
+    context_tokens: 131072
+    max_output_tokens: 131072
+    input_usd_per_million: 0.55
+    output_usd_per_million: 3.50
+    cached_input_usd_per_million: 0.111
+
+  -
+    id: qwen3.8-max
+    model: qwen3.8-max
+    model_version: qwen3.8-max
+    context_tokens: 1000000
+    max_output_tokens: 262144
+    input_usd_per_million: 2.00
+    output_usd_per_million: 6.00
+    cached_input_usd_per_million: 0.20
+    capabilities:
+      vision: true
+
+suites:
+  static:
+    enabled: true
+    offered_rps: 1.0
+  warmup:
+    enabled: true
+    repeats: 1
+    shapes: [short_short]
+  latency:
+    enabled: true
+    repeats: 12
+    shapes: [short_short, long_short, short_long, mixed]
+    long_input_tokens: 100000
+    long_input_tokens_by_route:
+      minimax-m2.5: 50000
+    long_input_overflow: fail
+    long_output_tokens: 4096
+    long_output_overflow: fail
+  capability:
+    enabled: true
+    temperatures: [-0.01, 0.0, 0.5, 1.0, 1.5, 2.0, 2.01]
+    top_ps: [-0.01, 0.0, 0.25, 0.5, 0.75, 1.0, 1.01]
+    tool_counts: [1, 8, 32, 64, 128]
+  interactions:
+    enabled: true
+    temperatures: [0.0, 0.5, 1.0, 2.0]
+    top_ps: [0.1, 0.5, 0.9, 1.0]
+    stream: [false, true]
+    output_tokens: [64, 1024, 4096]
+  context:
+    enabled: true
+    percentages: [1, 10, 25, 50, 75, 90, 95, 99]
+    fixed_tokens: [1024, 8192, 32768, 65536, 100000, 131072, 262144]
+  output:
+    enabled: true
+    fallback_max_output_tokens: 8192
+    realized_generation_ceiling: 8192
+  quality:
+    enabled: true
+    repeats: 6
+  cache:
+    enabled: true
+    repeats: 12
+    prefix_tokens: 8192
+  aimd:
+    enabled: true
+    shapes: [short_short, long_short, short_long, mixed]
+    long_input_tokens: 100000
+    long_input_tokens_by_route:
+      minimax-m2.5: 50000
+    long_input_overflow: fail
+    long_output_tokens: 4096
+    long_output_overflow: fail
+    initial_rps: 0.25
+    additive_rps: 0.5
+    multiplicative_decrease: 0.5
+    bracket_epochs: 9
+    bracket_multiplier: 2
+    max_rps: 64
+    max_rps_by_shape:
+      short_short: 64
+      long_short: 0.5
+      short_long: 1
+      mixed: 2
+    epochs: 9
+    epoch_seconds: 5
+    concurrency: 128
+    baseline_rps: 1.0
+    baseline_samples: 20
+    baseline_attempts: 3
+    baseline_multiplicative_decrease: 0.5
+    confirmation_max_stages: 2
+    confirmation_multiplicative_decrease: 0.1
+    minimum_rps: 0.25
+  soak:
+    enabled: false

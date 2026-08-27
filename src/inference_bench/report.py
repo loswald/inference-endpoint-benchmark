@@ -913,6 +913,9 @@ _AIMD_COMPLETION_STATES = frozenset(
         "completed_confirmations_healthy",
         "completed_confirmations_unhealthy",
         "left_censored_no_healthy_candidate",
+        "completed_no_healthy_at_lowest_tested_rate",
+        "completed_no_healthy_rate_at_floor",
+        "confirmations_inconclusive_after_retries",
     }
 )
 _AIMD_BOUND_STATES = frozenset(
@@ -922,6 +925,12 @@ _AIMD_BOUND_STATES = frozenset(
         "right_censored_highest_tested_healthy_no_overload",
         "left_censored_no_healthy_candidate",
         "campaign_guard_censored_before_confirmation",
+        "bracketed_confirmed_healthy_lower_unhealthy_upper",
+        "confirmed_healthy_after_nonmonotonic_overload",
+        "right_censored_highest_tested_confirmed_healthy_no_overload",
+        "left_censored_no_healthy_at_lowest_tested_rate",
+        "left_censored_no_healthy_rate_at_floor",
+        "confirmation_attempts_inconclusive",
     }
 )
 _SOAK_COMPLETION_STATES = frozenset(
@@ -931,6 +940,9 @@ _SOAK_COMPLETION_STATES = frozenset(
         "completed_healthy",
         "completed_unhealthy",
         "partial_incomplete",
+        "completed_no_healthy_at_lowest_tested_rate",
+        "completed_unhealthy_at_floor",
+        "rate_stages_inconclusive_after_retries",
     }
 )
 
@@ -1008,6 +1020,8 @@ def summarize_controller_events(
                     "confirmation_execution_complete": None,
                     "confirmation_complete": None,
                     "confirmation_all_healthy": None,
+                    "confirmation_stage": None,
+                    "confirmation_stage_history_json": "[]",
                     "confirmation_healthy_json": "[]",
                     "confirmation_eligible_json": "[]",
                     "confirmation_censor_reasons_json": "[]",
@@ -1016,6 +1030,10 @@ def summarize_controller_events(
                     "recovery_eligible": None,
                     "recovery_censor_reason": None,
                     "tested_rate_rps": None,
+                    "requested_rate_rps": None,
+                    "accepted_rate_rps": None,
+                    "rate_stage": None,
+                    "rate_stage_history_json": "[]",
                     "planned_blocks": None,
                     "completed_blocks": None,
                     "block_eligible_json": "[]",
@@ -1100,8 +1118,13 @@ def summarize_controller_events(
             confirmations_required = _strict_nonnegative_int(
                 payload.get("confirmations_required", 3), "confirmations_required"
             )
-            if confirmations_required != 3:
-                raise ValueError("AIMD contract requires exactly three confirmation epochs")
+            baseline_negative = completion_state == "completed_no_healthy_at_lowest_tested_rate"
+            adaptive_confirmation = "confirmation_stage_history" in payload
+            if confirmations_required != (0 if baseline_negative else 3):
+                raise ValueError(
+                    "AIMD contract requires exactly three confirmation epochs unless every "
+                    "floor baseline was measured unhealthy"
+                )
             confirmation_execution_complete = _strict_optional_bool(
                 payload.get("confirmation_execution_complete"),
                 "confirmation_execution_complete",
@@ -1118,17 +1141,28 @@ def summarize_controller_events(
                 raise ValueError("AIMD confirmation execution completeness is inconsistent")
             if confirmation_complete is not expected_scientific_complete:
                 raise ValueError("AIMD scientific confirmation completeness is inconsistent")
-            if expected_scientific_complete:
+            if baseline_negative:
+                if confirmations or confirmation_all_healthy is not False:
+                    raise ValueError("negative floor baseline cannot contain confirmation epochs")
+            elif expected_scientific_complete:
                 if confirmation_all_healthy is not all(bool(value) for value in confirmations):
                     raise ValueError("AIMD aggregate confirmation health is inconsistent")
             elif confirmation_all_healthy is not None:
                 raise ValueError("censored AIMD confirmations cannot have aggregate health")
             if row["censor_reason"] is not None:
                 expected_completion_state = "campaign_guard_censored"
+            elif baseline_negative:
+                expected_completion_state = "completed_no_healthy_at_lowest_tested_rate"
+            elif bound_state == "left_censored_no_healthy_rate_at_floor":
+                expected_completion_state = "completed_no_healthy_rate_at_floor"
             elif bound_state == "left_censored_no_healthy_candidate":
                 expected_completion_state = "left_censored_no_healthy_candidate"
             elif not expected_scientific_complete:
-                expected_completion_state = "confirmations_inconclusive"
+                expected_completion_state = (
+                    "confirmations_inconclusive_after_retries"
+                    if adaptive_confirmation
+                    else "confirmations_inconclusive"
+                )
             elif confirmation_all_healthy:
                 expected_completion_state = "completed_confirmations_healthy"
             else:
@@ -1174,11 +1208,19 @@ def summarize_controller_events(
                 payload.get("nonmonotonic_overload_observed"),
                 "nonmonotonic_overload_observed",
             )
-            if (highest_healthy is None) != (healthy_lower is None) or (
-                highest_healthy is not None
-                and (highest_healthy <= 0 or highest_healthy != healthy_lower)
+            if highest_healthy is not None and highest_healthy <= 0:
+                raise ValueError("AIMD highest observed healthy rate must be positive")
+            if (
+                not adaptive_confirmation
+                and highest_healthy is not None
+                and healthy_lower is not None
+                and highest_healthy != healthy_lower
             ):
                 raise ValueError("AIMD highest healthy rate and healthy lower bound disagree")
+            if healthy_lower is not None and (
+                healthy_lower <= 0 or highest_healthy is None or healthy_lower > highest_healthy
+            ):
+                raise ValueError("confirmed AIMD lower bound exceeds observed healthy evidence")
             if nonmonotonic_overload is True and overload_observed is not True:
                 raise ValueError("nonmonotonic overload evidence requires observed overload")
             if bound_state == "bracketed_healthy_lower_unhealthy_upper" and not (
@@ -1217,6 +1259,36 @@ def summarize_controller_events(
                 or highest_healthy is not None
             ):
                 raise ValueError("left-censored AIMD completion state is inconsistent")
+            if bound_state == "bracketed_confirmed_healthy_lower_unhealthy_upper" and not (
+                healthy_lower is not None
+                and unhealthy_upper is not None
+                and unhealthy_upper > healthy_lower
+                and overload_observed is True
+            ):
+                raise ValueError("adaptive AIMD confirmation bracket is inconsistent")
+            if bound_state == "confirmed_healthy_after_nonmonotonic_overload" and not (
+                healthy_lower is not None and overload_observed is True
+            ):
+                raise ValueError("adaptive nonmonotonic AIMD state is inconsistent")
+            if (
+                bound_state == "right_censored_highest_tested_confirmed_healthy_no_overload"
+                and not (
+                    healthy_lower is not None
+                    and overload_observed is False
+                    and unhealthy_upper is None
+                )
+            ):
+                raise ValueError("adaptive right-censored AIMD state is inconsistent")
+            if (
+                bound_state
+                in {
+                    "left_censored_no_healthy_at_lowest_tested_rate",
+                    "left_censored_no_healthy_rate_at_floor",
+                    "confirmation_attempts_inconclusive",
+                }
+                and healthy_lower is not None
+            ):
+                raise ValueError("unconfirmed adaptive AIMD state cannot contain a healthy bound")
             configured_aimd = suites.get("aimd")
             if not isinstance(configured_aimd, dict):
                 raise ValueError("AIMD controller lacks immutable suite configuration")
@@ -1245,6 +1317,10 @@ def summarize_controller_events(
                     "confirmation_execution_complete": confirmation_execution_complete,
                     "confirmation_complete": confirmation_complete,
                     "confirmation_all_healthy": confirmation_all_healthy,
+                    "confirmation_stage": payload.get("confirmation_stage"),
+                    "confirmation_stage_history_json": canonical_json(
+                        payload.get("confirmation_stage_history", [])
+                    ),
                     "confirmation_healthy_json": canonical_json(confirmations),
                     "confirmation_eligible_json": canonical_json(eligible),
                     "confirmation_censor_reasons_json": canonical_json(reasons),
@@ -1310,41 +1386,80 @@ def summarize_controller_events(
             tested_rate_rps = _strict_optional_nonnegative_number(
                 payload.get("rate_rps"), "rate_rps"
             )
+            adaptive_soak = "rate_stage_history" in payload
+            requested_rate_rps = _strict_optional_nonnegative_number(
+                payload.get("requested_rate_rps", payload.get("rate_rps")),
+                "requested_rate_rps",
+            )
+            accepted_rate_rps = _strict_optional_nonnegative_number(
+                payload.get("accepted_rate_rps"), "accepted_rate_rps"
+            )
             try:
                 configured_rate_rps = soak_rate_rps(
                     configured_soak, str(payload.get("route_id")), str(payload.get("shape"))
                 )
             except (AttributeError, TypeError, ValueError) as exc:
                 raise ValueError("configured soak rate cannot be resolved") from exc
+            baseline_negative = completion_state == "completed_no_healthy_at_lowest_tested_rate"
             if (
-                tested_rate_rps is None
-                or tested_rate_rps <= 0
+                requested_rate_rps is None
+                or requested_rate_rps <= 0
                 or not math.isfinite(configured_rate_rps)
                 or configured_rate_rps <= 0
-                or tested_rate_rps != configured_rate_rps
+                or requested_rate_rps != configured_rate_rps
             ):
-                raise ValueError("soak tested rate contradicts immutable suite configuration")
-            expected_execution_complete = completed_blocks == planned_blocks
-            expected_scientific_complete = expected_execution_complete and all(eligible)
+                message = (
+                    "soak requested rate contradicts immutable suite configuration"
+                    if adaptive_soak
+                    else "soak tested rate contradicts immutable suite configuration"
+                )
+                raise ValueError(message)
+            if not baseline_negative and (
+                tested_rate_rps is None
+                or tested_rate_rps <= 0
+                or tested_rate_rps > requested_rate_rps
+            ):
+                raise ValueError("adaptive soak tested rate is invalid")
+            expected_execution_complete = (
+                True if baseline_negative else completed_blocks == planned_blocks
+            )
+            expected_scientific_complete = (
+                True if baseline_negative else expected_execution_complete and all(eligible)
+            )
             if execution_complete is not expected_execution_complete:
                 raise ValueError("soak execution completeness is inconsistent")
             if scientifically_complete is not expected_scientific_complete:
                 raise ValueError("soak scientific completeness is inconsistent")
-            if expected_scientific_complete:
+            if baseline_negative:
+                if completed_blocks != 0 or health or all_blocks_healthy is not False:
+                    raise ValueError("negative floor baseline cannot contain soak blocks")
+            elif expected_scientific_complete:
                 if all_blocks_healthy is not all(bool(value) for value in health):
                     raise ValueError("soak aggregate health is inconsistent")
             elif all_blocks_healthy is not None:
                 raise ValueError("censored soak blocks cannot have aggregate health")
             if row["censor_reason"] is not None:
                 expected_completion_state = "campaign_guard_censored"
+            elif baseline_negative:
+                expected_completion_state = "completed_no_healthy_at_lowest_tested_rate"
             elif not expected_execution_complete:
-                expected_completion_state = "partial_incomplete"
+                expected_completion_state = (
+                    "rate_stages_inconclusive_after_retries"
+                    if adaptive_soak
+                    else "partial_incomplete"
+                )
             elif not expected_scientific_complete:
-                expected_completion_state = "execution_complete_inconclusive"
+                expected_completion_state = (
+                    "rate_stages_inconclusive_after_retries"
+                    if adaptive_soak
+                    else "execution_complete_inconclusive"
+                )
             elif all_blocks_healthy:
                 expected_completion_state = "completed_healthy"
             else:
-                expected_completion_state = "completed_unhealthy"
+                expected_completion_state = (
+                    "completed_unhealthy_at_floor" if adaptive_soak else "completed_unhealthy"
+                )
             if completion_state != expected_completion_state:
                 raise ValueError("soak controller completion state contradicts its evidence")
             if completion_state == "campaign_guard_censored" and not any(
@@ -1356,6 +1471,12 @@ def summarize_controller_events(
                 {
                     "tested_rate_rps": _strict_optional_nonnegative_number(
                         tested_rate_rps, "rate_rps"
+                    ),
+                    "requested_rate_rps": requested_rate_rps,
+                    "accepted_rate_rps": accepted_rate_rps,
+                    "rate_stage": payload.get("rate_stage"),
+                    "rate_stage_history_json": canonical_json(
+                        payload.get("rate_stage_history", [])
                     ),
                     "planned_blocks": planned_blocks,
                     "completed_blocks": completed_blocks,

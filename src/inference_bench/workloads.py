@@ -94,6 +94,13 @@ def shape_spec(
     # short/adversarial route IDs such as "a" or "do" can occur incidentally in other labels.
     comparison_id = workload_key or logical_id
     comparison_suffix = cell_suffix if matched_cell_suffix is None else matched_cell_suffix
+
+    def route_target(axis: str) -> Any:
+        by_route = shape_config.get(f"long_{axis}_tokens_by_route") or {}
+        if by_route and not isinstance(by_route, dict):
+            raise ValueError(f"long_{axis}_tokens_by_route must be a mapping")
+        return by_route.get(route.id, shape_config.get(f"long_{axis}_tokens"))
+
     if shape == "short_short":
         input_tokens = 256
         if context - input_tokens <= 0:
@@ -104,16 +111,16 @@ def shape_spec(
         output_tokens = min(128, output_max, context - input_tokens)
         prompt = _words(input_tokens, comparison_id) + "\nReply exactly SQWISH_OK."
     elif shape == "long_short":
+        configured_target = route_target("input")
+        if configured_target is not None and route.context_tokens is None:
+            # An explicit fixed anchor is a legitimate boundary probe when the provider does not
+            # publish a window. It is not clipped against the generic 32K planning fallback.
+            context = int(configured_target) + min(128, output_max)
         output_tokens = min(128, output_max, max(1, context - 1))
         available_input_tokens = context - output_tokens
         if available_input_tokens <= 0:
             raise ValueError(
                 f"route {route.id} context window cannot fit the long_short prompt and output"
-            )
-        configured_target = shape_config.get("long_input_tokens")
-        if configured_target is not None and route.context_tokens is None:
-            raise ValueError(
-                f"route {route.id} needs context_tokens before long_input_tokens can be configured"
             )
         if configured_target is None:
             requested_input_tokens = min(32_768, max(2_048, context // 4))
@@ -150,14 +157,7 @@ def shape_spec(
                 "and any positive output"
             )
         available_output_tokens = min(output_max, combined_context_output_allowance)
-        configured_target = shape_config.get("long_output_tokens")
-        if configured_target is not None and (
-            route.max_output_tokens is None or route.context_tokens is None
-        ):
-            raise ValueError(
-                f"route {route.id} needs context_tokens and max_output_tokens before "
-                "long_output_tokens can be configured"
-            )
+        configured_target = route_target("output")
         if configured_target is None:
             requested_output_tokens = 4_096
             output_overflow_policy = "route_relative_default_clip"
@@ -172,7 +172,9 @@ def shape_spec(
             output_overflow_policy = shape_config.get("long_output_overflow", "fail")
             if output_overflow_policy not in {"fail", "clip"}:
                 raise ValueError("long_output_overflow must be fail or clip")
-        if requested_output_tokens > available_output_tokens:
+        if route.max_output_tokens is None and route.context_tokens is None:
+            output_tokens = requested_output_tokens
+        elif requested_output_tokens > available_output_tokens:
             if output_overflow_policy == "fail":
                 raise ValueError(
                     f"route {route.id} long_output_tokens={requested_output_tokens} exceeds the "
@@ -245,6 +247,7 @@ def shape_spec(
                     "workload_input_overflow_policy": overflow_policy,
                     "workload_input_was_clipped": input_tokens != requested_input_tokens,
                     "documented_context_tokens": route.context_tokens,
+                    "route_limit_documented": route.context_tokens is not None,
                 }
                 if shape == "long_short"
                 else {}
@@ -256,6 +259,9 @@ def shape_spec(
                     "workload_output_was_clipped": output_tokens != requested_output_tokens,
                     "documented_context_tokens": route.context_tokens,
                     "documented_max_output_tokens": route.max_output_tokens,
+                    "route_limit_documented": (
+                        route.context_tokens is not None and route.max_output_tokens is not None
+                    ),
                 }
                 if shape == "short_long"
                 else {}
@@ -815,21 +821,35 @@ def plan_interactions(
 
 
 def plan_context(route: RouteConfig, config: dict[str, Any], *, seed: int) -> list[RequestSpec]:
-    if route.context_tokens is None:
-        return []
     percentages = config.get("percentages", [1, 10, 25, 50, 75, 90, 95, 99])
     result: list[RequestSpec] = []
-    for percentage in percentages:
-        target = max(64, round(route.context_tokens * float(percentage) / 100))
+    anchors: list[tuple[str, int, float | None, str]] = []
+    if route.context_tokens is not None:
+        for percentage in percentages:
+            anchors.append(
+                (
+                    f"{percentage:g}pct",
+                    max(64, round(route.context_tokens * float(percentage) / 100)),
+                    float(percentage),
+                    "documented_context_percentage",
+                )
+            )
+    for target in config.get("fixed_tokens", []):
+        anchors.append((f"fixed-{int(target)}", int(target), None, "fixed_token_anchor"))
+    seen_targets: set[int] = set()
+    for label, target, percentage, anchor_basis in anchors:
+        if target in seen_targets:
+            continue
+        seen_targets.add(target)
         output_target = min(64, route.max_output_tokens or 64)
-        logical = f"context:{route.id}:{percentage:g}pct"
-        markers = context_marker_values(f"context:{{route}}:{percentage:g}pct", seed)
+        logical = f"context:{route.id}:{label}"
+        markers = context_marker_values(f"context:{{route}}:{label}", seed)
         result.append(
             RequestSpec(
                 logical_id=logical,
                 route_id=route.id,
                 suite="context",
-                cell_id=f"context_{percentage:g}pct:in{target}:out{output_target}",
+                cell_id=f"context_{label}:in{target}:out{output_target}",
                 messages=(),
                 planned_input_tokens=target,
                 max_output_tokens=output_target,
@@ -839,6 +859,7 @@ def plan_context(route: RouteConfig, config: dict[str, Any], *, seed: int) -> li
                     "quality": "context_markers",
                     "context_markers": list(markers),
                     "percentage": percentage,
+                    "context_anchor_basis": anchor_basis,
                     "prompt_kind": "long_context",
                     "target_tokens": target,
                 },
@@ -846,30 +867,31 @@ def plan_context(route: RouteConfig, config: dict[str, Any], *, seed: int) -> li
         )
     # Synthetic token-like counts are only planning estimates. This nominal target therefore does
     # not claim to exceed the provider-tokenized boundary unless reported usage proves that fact.
-    above = route.context_tokens + 1
-    above_logical = f"context:{route.id}:above"
-    markers = context_marker_values("context:{route}:above", seed)
-    result.append(
-        RequestSpec(
-            logical_id=above_logical,
-            route_id=route.id,
-            suite="context",
-            cell_id=f"context_nominal_100pct_plus_1_target:in{above}:out1",
-            messages=(),
-            planned_input_tokens=above,
-            max_output_tokens=1,
-            stream=True,
-            timeout_seconds=route.request_timeout_seconds,
-            metadata={
-                "quality": "context_markers",
-                "boundary_evidence_scope": "nominal_target_requires_provider_reported_usage",
-                "percentage": 100.0001,
-                "prompt_kind": "long_context",
-                "target_tokens": above,
-                "context_markers": list(markers),
-            },
+    if route.context_tokens is not None:
+        above = route.context_tokens + 1
+        above_logical = f"context:{route.id}:above"
+        markers = context_marker_values("context:{route}:above", seed)
+        result.append(
+            RequestSpec(
+                logical_id=above_logical,
+                route_id=route.id,
+                suite="context",
+                cell_id=f"context_nominal_100pct_plus_1_target:in{above}:out1",
+                messages=(),
+                planned_input_tokens=above,
+                max_output_tokens=1,
+                stream=True,
+                timeout_seconds=route.request_timeout_seconds,
+                metadata={
+                    "quality": "context_markers",
+                    "boundary_evidence_scope": "nominal_target_requires_provider_reported_usage",
+                    "percentage": 100.0001,
+                    "prompt_kind": "long_context",
+                    "target_tokens": above,
+                    "context_markers": list(markers),
+                },
+            )
         )
-    )
     return result
 
 

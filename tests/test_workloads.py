@@ -186,6 +186,36 @@ def test_cache_trials_are_stratified(route) -> None:
     assert uncached[0].messages[0]["content"] != uncached[1].messages[0]["content"]
 
 
+def test_context_fixed_anchors_cover_undocumented_windows(route) -> None:
+    undocumented = replace(route, context_tokens=None, max_output_tokens=None)
+    specs = plan_context(
+        undocumented,
+        {"percentages": [], "fixed_tokens": [1_024, 32_768, 100_000]},
+        seed=2,
+    )
+    assert [spec.planned_input_tokens for spec in specs] == [1_024, 32_768, 100_000]
+    assert all(spec.metadata["context_anchor_basis"] == "fixed_token_anchor" for spec in specs)
+
+    long_input = shape_spec(
+        undocumented,
+        "long_short",
+        "undocumented-long-input",
+        suite="load",
+        shape_config={"long_input_tokens": 100_000, "long_input_overflow": "fail"},
+    )
+    assert long_input.planned_input_tokens == 100_000
+    assert long_input.metadata["route_limit_documented"] is False
+    long_output = shape_spec(
+        undocumented,
+        "short_long",
+        "undocumented-long-output",
+        suite="load",
+        shape_config={"long_output_tokens": 8_192, "long_output_overflow": "fail"},
+    )
+    assert long_output.max_output_tokens == 8_192
+    assert long_output.metadata["route_limit_documented"] is False
+
+
 def test_long_shape_targets_are_explicit_and_fail_or_clip_against_route_limits(route) -> None:
     large = replace(route, context_tokens=131_072, max_output_tokens=65_536)
     long_input = shape_spec(
@@ -286,3 +316,27 @@ def test_long_shape_targets_are_explicit_and_fail_or_clip_against_route_limits(r
         (100_000, 128),
         (256, 32_768),
     ]
+
+
+def test_long_shape_targets_can_be_route_specific(route) -> None:
+    large = replace(route, id="large", context_tokens=131_072, max_output_tokens=65_536)
+    config = {
+        "long_input_tokens": 4_096,
+        "long_input_tokens_by_route": {"large": 100_000},
+        "long_input_overflow": "clip",
+        "long_output_tokens": 4_096,
+        "long_output_tokens_by_route": {"large": 32_768},
+        "long_output_overflow": "clip",
+    }
+    assert shape_spec(
+        large, "long_short", "large-input", suite="load", shape_config=config
+    ).planned_input_tokens == 100_000
+    assert shape_spec(
+        route, "long_short", "small-input", suite="load", shape_config=config
+    ).planned_input_tokens == 4_096
+    assert shape_spec(
+        large, "short_long", "large-output", suite="load", shape_config=config
+    ).max_output_tokens == 32_768
+    assert shape_spec(
+        route, "short_long", "small-output", suite="load", shape_config=config
+    ).max_output_tokens == 2_048

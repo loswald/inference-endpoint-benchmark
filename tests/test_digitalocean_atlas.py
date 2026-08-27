@@ -26,6 +26,7 @@ def test_digitalocean_atlas_excludes_endpoint_from_every_input_table(
         "capacity-summary.csv",
         "soak-cell-summary.csv",
         "capability-evidence.csv",
+        "cache-state-metrics.csv",
         "observed-limits.csv",
     ):
         _write_endpoint_csv(source / name)
@@ -75,4 +76,23 @@ def test_digitalocean_atlas_excludes_endpoint_from_every_input_table(
     )
 
     for rows in captured.values():
-        assert [row["endpoint_id"] for row in rows] == ["keep-endpoint"]
+        assert {row["endpoint_id"] for row in rows} == {"keep-endpoint"}
+
+
+def test_platform_capabilities_replace_obsolete_cache_option() -> None:
+    rows = [
+        {
+            "endpoint_id": "model-a",
+            "capability_dimension": "caching_option",
+            "transport_status": "documented_unavailable",
+            "functional_status": "not_scored",
+        }
+    ]
+    cache_rows = [
+        {"endpoint_id": "model-a", "cache_state": "cache_hit_observed", "request_count": "3"}
+    ]
+    merged = digitalocean_atlas._merge_platform_capabilities(rows, cache_rows, ["model-a"])
+    by_dimension = {row["capability_dimension"]: row for row in merged}
+    assert "caching_option" not in by_dimension
+    assert by_dimension["automatic_prompt_cache"]["functional_status"] == "passed"
+    assert by_dimension["batch_open_models"]["transport_status"] == "documented_unavailable"

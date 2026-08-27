@@ -9,9 +9,14 @@ from .config import (
     validate_route_evidence_identity,
 )
 from .load import (
+    adaptive_baseline_epoch_id,
+    aimd_confirmation_epoch_id,
+    aimd_max_rps,
+    aimd_separator_epoch_id,
     baseline_design,
     next_healthy_aimd_rate,
     scheduled_offsets,
+    soak_block_epoch_id,
     soak_rate_rps,
     validate_aimd_config,
     validate_soak_config,
@@ -139,8 +144,8 @@ def build_plan(config: CampaignConfig) -> PlanSummary:
             additive = float(aimd.get("additive_rps", 0.25))
             bracket_epochs = int(aimd.get("bracket_epochs", min(6, epochs)))
             bracket_multiplier = float(aimd.get("bracket_multiplier", 2.0))
-            max_rps = float(aimd["max_rps"]) if "max_rps" in aimd else None
             for shape in aimd.get("shapes", shapes):
+                max_rps = aimd_max_rps(aimd, shape)
                 rate = float(aimd.get("initial_rps", 0.25))
                 shape_cost = _shape_cost(
                     route,
@@ -151,14 +156,33 @@ def build_plan(config: CampaignConfig) -> PlanSummary:
                 baseline_samples, baseline_seconds, _baseline_rate = baseline_design(
                     aimd, seconds, default_rps=min(rate, 0.1)
                 )
-                load_arrival_window_seconds += baseline_seconds
-                baseline_id = f"aimd-{route.id}-{shape}-baseline"
-                coverage_cells.append(
-                    _load_plan_cell(route, shape, baseline_id, "baseline", shape_config=aimd)
-                )
-                n = baseline_samples
-                load_count += n
-                load_cost += n * shape_cost * attempts_per_logical
+                baseline_attempts = int(aimd.get("baseline_attempts", 3))
+                baseline_decrease = float(aimd.get("baseline_multiplicative_decrease", 0.5))
+                minimum_rps = float(aimd.get("minimum_rps", 0.01))
+                for attempt in range(baseline_attempts):
+                    attempt_rate = max(
+                        minimum_rps, _baseline_rate * baseline_decrease**attempt
+                    )
+                    attempt_seconds = max(baseline_seconds, baseline_samples / attempt_rate)
+                    load_arrival_window_seconds += attempt_seconds
+                    baseline_id = adaptive_baseline_epoch_id("aimd", route.id, shape, attempt)
+                    coverage_cells.append(
+                        _load_plan_cell(
+                            route,
+                            shape,
+                            baseline_id,
+                            "baseline",
+                            planned_disposition=(
+                                "required"
+                                if attempt == 0
+                                else "conditional_on_prior_baseline_failure"
+                            ),
+                            shape_config=aimd,
+                        )
+                    )
+                    n = baseline_samples
+                    load_count += n
+                    load_cost += n * shape_cost * attempts_per_logical
                 best = 0.0
                 for index in range(epochs):
                     epoch_id = f"aimd-{route.id}-{shape}-{index:03d}"
@@ -186,43 +210,67 @@ def build_plan(config: CampaignConfig) -> PlanSummary:
                         bracket_multiplier=bracket_multiplier,
                         max_rps=max_rps,
                     )
-                for confirmation in range(3):
-                    confirmation_id = f"aimd-{route.id}-{shape}-confirm-{confirmation}"
-                    coverage_cells.append(
-                        _load_plan_cell(
-                            route,
-                            shape,
-                            confirmation_id,
-                            "confirmation",
-                            shape_config=aimd,
-                        )
+                confirmation_stages = int(aimd.get("confirmation_max_stages", 4))
+                confirmation_decrease = float(
+                    aimd.get(
+                        "confirmation_multiplicative_decrease",
+                        aimd.get("multiplicative_decrease", 0.5),
                     )
-                    n = len(
-                        scheduled_offsets(
-                            best,
-                            seconds,
-                            seed=config.seed + confirmation + 1,
-                            epoch_id=confirmation_id,
+                )
+                confirmation_rate = max(minimum_rps, best or minimum_rps)
+                for stage in range(confirmation_stages):
+                    for confirmation in range(3):
+                        confirmation_id = aimd_confirmation_epoch_id(
+                            route.id, shape, stage, confirmation
                         )
-                    )
-                    load_count += n
-                    load_cost += n * shape_cost * attempts_per_logical
-                    load_arrival_window_seconds += seconds
-                    if confirmation < 2:
-                        separator_id = f"aimd-{route.id}-{shape}-separator-{confirmation}"
                         coverage_cells.append(
                             _load_plan_cell(
                                 route,
                                 shape,
-                                separator_id,
-                                "confirmation_separator",
+                                confirmation_id,
+                                "confirmation",
+                                planned_disposition=(
+                                    "required"
+                                    if stage == 0
+                                    else "conditional_on_prior_confirmation_failure"
+                                ),
                                 shape_config=aimd,
                             )
                         )
-                        n = baseline_samples
+                        n = len(
+                            scheduled_offsets(
+                                confirmation_rate,
+                                seconds,
+                                seed=config.seed + stage * 1000 + confirmation + 1,
+                                epoch_id=confirmation_id,
+                            )
+                        )
                         load_count += n
                         load_cost += n * shape_cost * attempts_per_logical
-                        load_arrival_window_seconds += baseline_seconds
+                        load_arrival_window_seconds += seconds
+                        if confirmation < 2:
+                            separator_id = aimd_separator_epoch_id(
+                                route.id, shape, stage, confirmation
+                            )
+                            coverage_cells.append(
+                                _load_plan_cell(
+                                    route,
+                                    shape,
+                                    separator_id,
+                                    "confirmation_separator",
+                                    planned_disposition=(
+                                        "required"
+                                        if stage == 0
+                                        else "conditional_on_prior_confirmation_failure"
+                                    ),
+                                    shape_config=aimd,
+                                )
+                            )
+                            n = baseline_samples
+                            load_count += n
+                            load_cost += n * shape_cost * attempts_per_logical
+                            load_arrival_window_seconds += baseline_seconds
+                    confirmation_rate = max(minimum_rps, confirmation_rate * confirmation_decrease)
                 # Recovery is conditional on an observed two-epoch overload at runtime. Include
                 # its maximal possible schedule in the upper bound even though the all-healthy
                 # trajectory itself would omit it.
@@ -262,30 +310,65 @@ def build_plan(config: CampaignConfig) -> PlanSummary:
                 baseline_samples, baseline_seconds, _baseline_rate = baseline_design(
                     soak, seconds, default_rps=min(rate, 0.1)
                 )
-                load_arrival_window_seconds += baseline_seconds
-                baseline_id = f"soak-{route.id}-{shape}-baseline"
-                coverage_cells.append(
-                    _load_plan_cell(route, shape, baseline_id, "soak_baseline", shape_config=soak)
-                )
-                n = baseline_samples
-                load_count += n
-                load_cost += n * shape_cost * attempts_per_logical
-                for block in range(blocks):
-                    epoch_id = f"soak-{route.id}-{shape}-block-{block}"
-                    coverage_cells.append(
-                        _load_plan_cell(route, shape, epoch_id, "soak_block", shape_config=soak)
+                baseline_attempts = int(soak.get("baseline_attempts", 3))
+                baseline_decrease = float(soak.get("baseline_multiplicative_decrease", 0.5))
+                minimum_rps = float(soak.get("minimum_rps", 0.01))
+                for attempt in range(baseline_attempts):
+                    attempt_rate = max(
+                        minimum_rps, _baseline_rate * baseline_decrease**attempt
                     )
-                    n = len(
-                        scheduled_offsets(
-                            rate,
-                            seconds,
-                            seed=config.seed + block,
-                            epoch_id=epoch_id,
+                    attempt_seconds = max(baseline_seconds, baseline_samples / attempt_rate)
+                    load_arrival_window_seconds += attempt_seconds
+                    baseline_id = adaptive_baseline_epoch_id("soak", route.id, shape, attempt)
+                    coverage_cells.append(
+                        _load_plan_cell(
+                            route,
+                            shape,
+                            baseline_id,
+                            "soak_baseline",
+                            planned_disposition=(
+                                "required"
+                                if attempt == 0
+                                else "conditional_on_prior_baseline_failure"
+                            ),
+                            shape_config=soak,
                         )
                     )
+                    n = baseline_samples
                     load_count += n
                     load_cost += n * shape_cost * attempts_per_logical
-                    load_arrival_window_seconds += seconds
+                rate_stages = int(soak.get("max_rate_stages", 4))
+                rate_decrease = float(soak.get("rate_multiplicative_decrease", 0.5))
+                stage_rate = max(minimum_rps, rate)
+                for stage in range(rate_stages):
+                    for block in range(blocks):
+                        epoch_id = soak_block_epoch_id(route.id, shape, stage, block)
+                        coverage_cells.append(
+                            _load_plan_cell(
+                                route,
+                                shape,
+                                epoch_id,
+                                "soak_block",
+                                planned_disposition=(
+                                    "required"
+                                    if stage == 0
+                                    else "conditional_on_prior_soak_failure"
+                                ),
+                                shape_config=soak,
+                            )
+                        )
+                        n = len(
+                            scheduled_offsets(
+                                stage_rate,
+                                seconds,
+                                seed=config.seed + stage * 1000 + block,
+                                epoch_id=epoch_id,
+                            )
+                        )
+                        load_count += n
+                        load_cost += n * shape_cost * attempts_per_logical
+                        load_arrival_window_seconds += seconds
+                    stage_rate = max(minimum_rps, stage_rate * rate_decrease)
     placeholders = tuple(
         route.id for route in config.routes if route.adapter in NATIVE_PLACEHOLDER_ADAPTERS
     )
