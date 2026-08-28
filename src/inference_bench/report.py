@@ -1044,7 +1044,7 @@ def summarize_controller_events(
                     "all_blocks_healthy": None,
                 }
     terminal_reason: str | None = None
-    seen: set[tuple[str, str, str]] = set()
+    seen: dict[tuple[str, str, str], str] = {}
     for event in events:
         kind = str(event.get("kind"))
         if kind not in {
@@ -1065,9 +1065,23 @@ def summarize_controller_events(
         key = (suite_name, str(payload.get("route_id")), str(payload.get("shape")))
         if key not in expected:
             raise ValueError("controller event does not match configured route/suite/shape")
-        if key in seen:
-            raise ValueError("duplicate terminal controller event")
-        seen.add(key)
+        previous_kind = seen.get(key)
+        if previous_kind is not None:
+            complete_kind = "aimd_complete" if suite_name == "aimd" else "soak_complete"
+            censored_kind = (
+                "aimd_controller_censored"
+                if suite_name == "aimd"
+                else "soak_controller_censored"
+            )
+            if {previous_kind, kind} != {complete_kind, censored_kind}:
+                raise ValueError("duplicate terminal controller event")
+            # The runner emits a coarse censored marker immediately before the canonical
+            # completion event for measured baseline-unhealthy controllers.  Retain the
+            # detailed completion payload regardless of event order; two events of the same
+            # kind remain an integrity error.
+            if kind == censored_kind:
+                continue
+        seen[key] = kind
         row = expected[key]
         if kind.endswith("controller_censored"):
             row.update(

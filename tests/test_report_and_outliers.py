@@ -308,6 +308,50 @@ def _valid_aimd_controller_payload() -> dict[str, object]:
     }
 
 
+def test_controller_summary_prefers_complete_event_over_censored_companion() -> None:
+    payload = _valid_aimd_controller_payload()
+    payload.update(
+        {
+            "highest_observed_healthy_rps": None,
+            "healthy_lower_bound_rps": None,
+            "unhealthy_upper_bound_rps": 0.25,
+            "overload_observed": True,
+            "capacity_bound_state": "left_censored_no_healthy_at_lowest_tested_rate",
+            "controller_completion_state": "completed_no_healthy_at_lowest_tested_rate",
+            "confirmations_required": 0,
+            "confirmation_healthy": [],
+            "confirmation_eligible": [],
+            "confirmation_censor_reasons": [],
+            "confirmation_all_healthy": False,
+        }
+    )
+    events = [
+        _controller_event(
+            "aimd_controller_censored",
+            {
+                "route_id": "r",
+                "shape": "cell",
+                "reason": "measured_unhealthy_at_all_baseline_rates",
+            },
+        ),
+        _controller_event("aimd_complete", payload),
+        _controller_event("campaign_terminal", {"reason": "plan_completed"}),
+    ]
+
+    rows = summarize_controller_events(
+        events,
+        public_config=_single_controller_config("aimd"),
+        coverage_rows=[],
+    )
+
+    assert rows[0]["controller_completion_state"] == (
+        "completed_no_healthy_at_lowest_tested_rate"
+    )
+    assert rows[0]["capacity_bound_state"] == (
+        "left_censored_no_healthy_at_lowest_tested_rate"
+    )
+
+
 @pytest.mark.parametrize(
     ("updates", "message"),
     [
