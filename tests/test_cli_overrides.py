@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from inference_bench.cli import _apply_live_overrides, _parser
+from inference_bench.cli import _apply_live_overrides, _parser, main
 from inference_bench.config import load_config
 
 
@@ -27,3 +27,10 @@ def test_run_overrides_apply_suite_wall_and_cost() -> None:
     assert set(amended.suites) == {"aimd"}
     assert amended.max_wall_seconds == 6600
     assert amended.max_cost_usd == 338
+
+
+def test_plan_command_remains_credential_free(capsys) -> None:
+    config_path = Path(__file__).parents[1] / "examples" / "digitalocean-hosted-2026-08-27.yaml"
+
+    assert main(["plan", str(config_path)]) == 0
+    assert '"campaign_hash"' in capsys.readouterr().out

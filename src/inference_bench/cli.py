@@ -782,7 +782,7 @@ def _apply_live_overrides(config: CampaignConfig, args: argparse.Namespace) -> C
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.command == "plan":
-        config = _apply_live_overrides(load_config(args.config), args)
+        config = load_config(args.config)
         print(json.dumps(build_plan(config).to_dict(), indent=2, sort_keys=True))
         return 0
     if args.command == "plan-matrix":
