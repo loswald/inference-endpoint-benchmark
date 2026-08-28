@@ -29,6 +29,18 @@ CAPABILITY_DIMENSIONS = (
     "batch_open_models",
 )
 
+FIXED_RATE_INTERVAL_NOTE = (
+    "Whiskers are exploratory 95% Student-t intervals across four contiguous 30-second "
+    "analysis blocks; serial correlation is not modeled."
+)
+
+_FIXED_RATE_PRESENTATION = {
+    "passed": ("passed", "#0F766E", "o"),
+    "failed": ("failed", "#B91C1C", "X"),
+    "could_not_start": ("could not start", "#64748B", "s"),
+    "not_measured": ("not measured", "#64748B", "s"),
+}
+
 
 def _merge_platform_capabilities(
     rows: list[dict[str, str]],
@@ -120,6 +132,43 @@ def _json_interval(value: str | None) -> tuple[float, float] | None:
     else:
         return None
     return (low, high) if low is not None and high is not None and low <= high else None
+
+
+def _optional_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    normalized = str(value or "").strip().lower()
+    if normalized in {"true", "1", "yes"}:
+        return True
+    if normalized in {"false", "0", "no"}:
+        return False
+    return None
+
+
+def _fixed_rate_result(row: dict[str, Any]) -> str:
+    """Return the publication status for a 120-second fixed-rate stability test.
+
+    Finishing the request schedule is not evidence that the test passed. A pass or failure comes
+    only from the registered ``soak_acceptance_pass`` field. The transport gate is a distinct
+    state because no fixed-rate test could start.
+    """
+
+    if row.get("status") == "baseline_transport_gate_failed":
+        return "could_not_start"
+    acceptance = _optional_bool(row.get("soak_acceptance_pass"))
+    if acceptance is True:
+        return "passed"
+    if acceptance is False:
+        return "failed"
+    return "not_measured"
+
+
+def _fixed_rate_presentation(row: dict[str, Any]) -> tuple[str, str, str]:
+    return _FIXED_RATE_PRESENTATION[_fixed_rate_result(row)]
+
+
+def _accepted_fixed_rate_test_count(rows: list[dict[str, Any]]) -> int:
+    return sum(_fixed_rate_result(row) == "passed" for row in rows)
 
 
 def _style_axis(axis: Any) -> None:
@@ -260,6 +309,7 @@ def _plot_soak(rows: list[dict[str, str]], source_id: str, destination: Path) ->
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
 
     metric_groups = (
         (
@@ -300,21 +350,22 @@ def _plot_soak(rows: list[dict[str, str]], source_id: str, destination: Path) ->
             figure, axes = plt.subplots(1, 2, figsize=(13, max(5.2, 0.4 * len(selected) + 1.8)))
             for axis, (metric, interval_field, label) in zip(axes, metrics, strict=True):
                 for index, row in enumerate(selected):
+                    result_label, result_color, result_marker = _fixed_rate_presentation(row)
                     value = _number(row.get(metric))
                     if value is None:
-                        missing_label = (
-                            "transport-gated"
-                            if row.get("status") == "baseline_transport_gate_failed"
-                            else "TPM censored\n(incomplete usage)"
-                            if group_index == 2
-                            else "not established"
-                        )
+                        missing_label = result_label
+                        if result_label in {"passed", "failed"}:
+                            missing_label += (
+                                "; token counts unavailable"
+                                if group_index == 2
+                                else "; estimate unavailable"
+                            )
                         axis.text(
                             0.01,
                             index,
                             missing_label,
                             transform=axis.get_yaxis_transform(),
-                            color="#B91C1C",
+                            color=result_color,
                             fontsize=7.0,
                             va="center",
                         )
@@ -323,15 +374,16 @@ def _plot_soak(rows: list[dict[str, str]], source_id: str, destination: Path) ->
                     xerr = None
                     if interval is not None and interval[0] <= value <= interval[1]:
                         xerr = [[value - interval[0]], [interval[1] - value]]
-                    complete = row.get("status") == "complete"
                     axis.errorbar(
                         value,
                         index,
                         xerr=xerr,
-                        fmt="o",
-                        markerfacecolor="#0F766E" if complete else "white",
-                        markeredgecolor="#0F766E",
-                        ecolor="#64748B",
+                        fmt=result_marker,
+                        markerfacecolor=(
+                            "white" if result_label == "not measured" else result_color
+                        ),
+                        markeredgecolor=result_color,
+                        ecolor=result_color,
                         capsize=2.5,
                     )
                 axis.set_yticks(range(len(labels)))
@@ -343,21 +395,55 @@ def _plot_soak(rows: list[dict[str, str]], source_id: str, destination: Path) ->
                 axis.set_xlabel(label)
                 _style_axis(axis)
             figure.suptitle(
-                f"DigitalOcean two-minute soak — {SHAPE_LABELS[shape]} — "
+                f"DigitalOcean 120-second fixed-rate stability test — {SHAPE_LABELS[shape]} — "
                 f"{'rate and quality' if group_index == 1 else 'token throughput'}",
                 x=0.055,
                 ha="left",
                 fontweight="bold",
             )
+            figure.legend(
+                handles=[
+                    Line2D(
+                        [0],
+                        [0],
+                        marker="o",
+                        linestyle="none",
+                        markerfacecolor="#0F766E",
+                        markeredgecolor="#0F766E",
+                        label="passed registered acceptance checks",
+                    ),
+                    Line2D(
+                        [0],
+                        [0],
+                        marker="X",
+                        linestyle="none",
+                        markerfacecolor="#B91C1C",
+                        markeredgecolor="#B91C1C",
+                        label="measured failure",
+                    ),
+                    Line2D(
+                        [0],
+                        [0],
+                        marker="s",
+                        linestyle="none",
+                        markerfacecolor="#64748B",
+                        markeredgecolor="#64748B",
+                        label="could not start or not measured",
+                    ),
+                ],
+                frameon=False,
+                ncol=3,
+                loc="upper center",
+                bbox_to_anchor=(0.5, 0.955),
+            )
             figure.text(
                 0.055,
                 0.005,
-                "Whiskers are 95% Student-t intervals across four 30-second blocks. "
-                "Missing estimates are labelled, never plotted as zero.",
+                FIXED_RATE_INTERVAL_NOTE + " Missing metrics are labelled, never plotted as zero.",
                 fontsize=7.5,
                 color="#475569",
             )
-            figure.tight_layout(rect=(0, 0.025, 1, 0.97))
+            figure.tight_layout(rect=(0, 0.025, 1, 0.89))
             path = destination / f"digitalocean-soak-{shape}-part-{group_index}.png"
             figure.savefig(path, dpi=210, bbox_inches="tight", facecolor="white")
             plt.close(figure)
@@ -601,14 +687,17 @@ def _build_pdf(
         Paragraph("Technical evidence atlas", styles["DoH1"]),
         Paragraph(
             f"{len(inventory)} exact hosted endpoints. Capacity source: {capacity_source}. "
-            f"Sustained-load source: {soak_source}.",
+            f"Fixed-rate stability-test source: {soak_source}.",
             styles["DoBody"],
         ),
         Paragraph(
             "The AIMD pages show tested operational bounds, not fitted theoretical maxima. The "
-            "soak pages report four independent 30-second blocks at one candidate rate. Missing "
-            "measurements are labelled as not measured; singleton boundary/capability probes do "
-            "not receive invented confidence intervals.",
+            "fixed-rate stability pages report one 120-second candidate-rate test divided into "
+            "four contiguous 30-second analysis blocks. Their intervals are exploratory because "
+            "serial correlation is not modeled. A test is marked passed only when its registered "
+            "acceptance checks passed; completing the request schedule does not count as a pass. "
+            "Missing measurements are labelled as not measured; singleton boundary/capability "
+            "probes do not receive invented confidence intervals.",
             styles["DoBody"],
         ),
         Paragraph(capacity_provenance_note, styles["DoBody"]),
@@ -622,7 +711,13 @@ def _build_pdf(
         ),
     ]
     decision_rows = [
-        ["Exact endpoint", "Context", "Confirmed AIMD", "Complete soaks", "Capabilities passed"]
+        [
+            "Exact endpoint",
+            "Context",
+            "Confirmed AIMD",
+            "Accepted fixed-rate tests",
+            "Capabilities passed",
+        ]
     ]
     for endpoint in sorted(inventory, key=lambda row: str(row.get("endpoint_id"))):
         endpoint_id = str(endpoint.get("endpoint_id"))
@@ -632,8 +727,8 @@ def _build_pdf(
             ).startswith("confirmed_")
             for shape in SHAPES
         )
-        complete_soaks = sum(
-            soak_index.get((endpoint_id, shape), {}).get("status") == "complete" for shape in SHAPES
+        accepted_fixed_rate_tests = _accepted_fixed_rate_test_count(
+            [soak_index.get((endpoint_id, shape), {}) for shape in SHAPES]
         )
         endpoint_capabilities = [
             row for row in capabilities if row.get("endpoint_id") == endpoint_id
@@ -644,7 +739,7 @@ def _build_pdf(
                 endpoint_id,
                 str(endpoint.get("context_window") or "not documented"),
                 f"{confirmed}/4",
-                f"{complete_soaks}/4",
+                f"{accepted_fixed_rate_tests}/4",
                 f"{passed}/{len(endpoint_capabilities)}",
             ]
         )
@@ -677,7 +772,7 @@ def _build_pdf(
     story.extend(
         [
             PageBreak(),
-            Paragraph("Independent static verification", styles["DoH1"]),
+            Paragraph("Separate static verification", styles["DoH1"]),
             Paragraph(
                 f"Campaign {manifest_campaign} is a separate, hash-bound verification layer "
                 f"({manifest_sha}). It contributes static, caching, capability, context, output, "
@@ -840,21 +935,19 @@ def _build_pdf(
                 ),
             )
         )
-        capacity_rows = [["Workload", "AIMD evidence", "Healthy bound", "Soak rate / state"]]
+        capacity_rows = [["Workload", "AIMD evidence", "Healthy bound", "120 s fixed-rate test"]]
         for shape in SHAPES:
             aimd = capacity_index.get((endpoint_id, shape), {})
             sustained = soak_index.get((endpoint_id, shape), {})
             bound = _number(aimd.get("capacity_lower_bound_rps"))
             soak_rate = _number(sustained.get("two_minute_soak_observed_rps"))
-            soak_state = str(sustained.get("status") or "not measured").replace("_", " ")
+            soak_state, _, _ = _fixed_rate_presentation(sustained)
             capacity_rows.append(
                 [
                     SHAPE_LABELS[shape],
                     str(aimd.get("capacity_claim") or "not measured").replace("_", " "),
                     "not established" if bound is None else f"{_format(bound)} RPS",
-                    f"not measured / {soak_state}"
-                    if soak_rate is None
-                    else f"{_format(soak_rate)} RPS / {soak_state}",
+                    soak_state if soak_rate is None else f"{_format(soak_rate)} RPS / {soak_state}",
                 ]
             )
         story.extend(

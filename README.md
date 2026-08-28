@@ -9,12 +9,13 @@ behavior, output length, tools, structured output, vision, sampling controls, qu
 recovery after overload, and variation across the day. Results stay separated by endpoint and
 workload; the software does not manufacture a single global score.
 
-## Published evidence atlases
+## Evidence status
 
-- [DigitalOcean hosted inference](reports/digitalocean/digitalocean-hosted-inference-evidence-atlas.pdf)
-  — 12 exact hosted endpoints, four capacity workloads, two-minute soak blocks, context and output
-  boundaries, tool/vision/structured-output behavior, quality, recovery, and compact supporting
-  CSV tables. Start with the decision map, then use the endpoint sheets for production decisions.
+- [DigitalOcean hosted inference status](reports/digitalocean/README.md) — 11 exact hosted open-model
+  endpoints. This is an auditable partial dataset, not a complete production-qualification report.
+  The former PDF decision aid is withdrawn while its pass/fail and 32K-versus-100K comparison defects
+  are corrected. Current headline evidence: 19/44 confirmed adaptive-load bounds and 3/44 passing
+  120-second fixed-rate stability tests.
 - Azure AI Foundry, Amazon Bedrock, and Google Vertex AI — corrected load, sustained-soak, and
   matched time-panel measurements are in progress. Their atlas will be published only after the
   final evidence and every rendered page pass the same integrity and visual checks.
@@ -50,7 +51,7 @@ upstream provider in the response. A missing or mismatched attestation is a fail
 - How quickly are visible output tokens delivered after the first token?
 - What successful RPM, input TPM, and output TPM are achieved—not merely offered?
 - Where does reliability or latency begin to deteriorate as load rises?
-- Does a candidate rate remain healthy for a sustained two-minute test, block by block?
+- Does a candidate rate remain healthy for a 120-second fixed-rate stability test, block by block?
 - How does the answer change for short requests, long prompts, long outputs, and a mixed workload?
 - Which tool, JSON, vision, streaming, and parameter combinations work functionally?
 - At which context anchors are requests accepted, and can the model still retrieve separated facts?
@@ -64,7 +65,7 @@ The same four capacity shapes are used for every admitted route:
 | Shape | Default target | What it stresses |
 |---|---:|---|
 | `short_short` | 256 input / 128 output | request rate, queueing, fixed overhead |
-| `long_short` | 32K input / 128 output | input TPM and end-to-end prefill behavior |
+| `long_short` | configured long input / 128 output | input TPM and end-to-end prefill behavior |
 | `short_long` | 256 input / 4K output | output TPM and decoding |
 | `mixed` | deterministic mixture | production-like contention |
 
@@ -102,10 +103,11 @@ endpoint slows, requests queue and that delay remains in the measurement. This a
 omission, where a closed-loop client appears healthy merely because it stops offering work while
 the server is slow.
 
-An AIMD sweep finds a knee or a highest-tested healthy lower bound. It does **not** by itself prove
-sustained capacity. The soak suite tests a fixed candidate rate in multiple 30-second blocks. A
-sustained claim requires every planned block to complete with the declared reliability, latency,
-queue, and usage criteria.
+An adaptive load search finds a transition region or a highest-tested repeatedly passing rate. It
+does **not** by itself prove sustained capacity. The fixed-rate stability suite (internally named
+`soak`) tests one candidate rate in multiple 30-second blocks. A passing claim requires every
+registered reliability, latency, queue, usage, quality, and recovery criterion to hold. Merely
+finishing the program is not a pass.
 
 ## Parallelism without contaminating capacity
 

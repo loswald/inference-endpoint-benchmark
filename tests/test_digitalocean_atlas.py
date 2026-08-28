@@ -1,6 +1,8 @@
 import csv
 from pathlib import Path
 
+import pytest
+
 from inference_bench import digitalocean_atlas
 
 
@@ -96,3 +98,61 @@ def test_platform_capabilities_replace_obsolete_cache_option() -> None:
     assert "caching_option" not in by_dimension
     assert by_dimension["automatic_prompt_cache"]["functional_status"] == "passed"
     assert by_dimension["batch_open_models"]["transport_status"] == "documented_unavailable"
+
+
+@pytest.mark.parametrize(
+    ("row", "expected_result", "expected_label", "expected_color"),
+    (
+        (
+            {"status": "complete", "soak_acceptance_pass": "True"},
+            "passed",
+            "passed",
+            "#0F766E",
+        ),
+        (
+            {"status": "complete", "soak_acceptance_pass": "False"},
+            "failed",
+            "failed",
+            "#B91C1C",
+        ),
+        (
+            {"status": "baseline_transport_gate_failed", "soak_acceptance_pass": ""},
+            "could_not_start",
+            "could not start",
+            "#64748B",
+        ),
+        (
+            {"status": "complete", "soak_acceptance_pass": ""},
+            "not_measured",
+            "not measured",
+            "#64748B",
+        ),
+    ),
+)
+def test_fixed_rate_result_uses_acceptance_not_execution_status(
+    row: dict[str, str],
+    expected_result: str,
+    expected_label: str,
+    expected_color: str,
+) -> None:
+    assert digitalocean_atlas._fixed_rate_result(row) == expected_result
+    label, color, _ = digitalocean_atlas._fixed_rate_presentation(row)
+    assert label == expected_label
+    assert color == expected_color
+
+
+def test_accepted_fixed_rate_count_excludes_completed_failures_and_transport_gates() -> None:
+    rows = [
+        {"status": "complete", "soak_acceptance_pass": "True"},
+        {"status": "complete", "soak_acceptance_pass": "False"},
+        {"status": "baseline_transport_gate_failed", "soak_acceptance_pass": ""},
+        {"status": "complete", "soak_acceptance_pass": ""},
+    ]
+    assert digitalocean_atlas._accepted_fixed_rate_test_count(rows) == 1
+
+
+def test_fixed_rate_interval_wording_is_honest_about_contiguous_blocks() -> None:
+    note = digitalocean_atlas.FIXED_RATE_INTERVAL_NOTE.lower()
+    assert "contiguous" in note
+    assert "serial correlation is not modeled" in note
+    assert "independent" not in note
