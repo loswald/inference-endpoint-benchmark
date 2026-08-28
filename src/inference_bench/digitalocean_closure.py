@@ -35,7 +35,11 @@ def _read_csv(path: Path) -> list[dict[str, str]]:
 
 
 def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    """Hash the repository's canonical UTF-8/LF representation of a text artifact."""
+
+    text = path.read_text(encoding="utf-8")
+    canonical = text.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 def _optional_bool(value: str | None) -> bool | None:

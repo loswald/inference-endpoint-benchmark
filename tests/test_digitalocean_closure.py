@@ -16,12 +16,20 @@ from inference_bench.cli import (
     _run_time_variation_panel,
 )
 from inference_bench.config import load_config, selected_capacity_cells
-from inference_bench.digitalocean_closure import build_digitalocean_closure_package
+from inference_bench.digitalocean_closure import _sha256, build_digitalocean_closure_package
 from inference_bench.load import LoadRunResult
 from inference_bench.models import RequestSpec
 from inference_bench.workloads import plan_static_suites
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_closure_source_hash_is_stable_across_platform_line_endings(tmp_path: Path) -> None:
+    lf = tmp_path / "lf.csv"
+    crlf = tmp_path / "crlf.csv"
+    lf.write_bytes(b"a,b\n1,2\n")
+    crlf.write_bytes(b"a,b\r\n1,2\r\n")
+    assert _sha256(lf) == _sha256(crlf)
 
 
 def test_digitalocean_six_hour_closure_compiles_exact_registered_gaps(tmp_path: Path) -> None:
