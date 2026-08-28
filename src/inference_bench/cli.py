@@ -761,22 +761,28 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _apply_live_overrides(config: CampaignConfig, args: argparse.Namespace) -> CampaignConfig:
+    """Apply the shared plan/run scope and guard overrides exactly once."""
+
+    if args.only_suite:
+        if args.only_suite not in config.suites:
+            raise ValueError(f"suite is not configured: {args.only_suite}")
+        config = replace(config, suites={args.only_suite: config.suites[args.only_suite]})
+    if args.max_wall_seconds is not None:
+        if args.max_wall_seconds <= 0:
+            raise ValueError("--max-wall-seconds must be positive")
+        config = replace(config, max_wall_seconds=args.max_wall_seconds)
+    if args.max_cost_usd is not None:
+        if args.max_cost_usd <= 0:
+            raise ValueError("--max-cost-usd must be positive")
+        config = replace(config, max_cost_usd=args.max_cost_usd)
+    return config
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.command == "plan":
-        config = load_config(args.config)
-        if args.only_suite:
-            if args.only_suite not in config.suites:
-                raise ValueError(f"suite is not configured: {args.only_suite}")
-            config = replace(config, suites={args.only_suite: config.suites[args.only_suite]})
-        if args.max_wall_seconds is not None:
-            if args.max_wall_seconds <= 0:
-                raise ValueError("--max-wall-seconds must be positive")
-            config = replace(config, max_wall_seconds=args.max_wall_seconds)
-        if args.max_cost_usd is not None:
-            if args.max_cost_usd <= 0:
-                raise ValueError("--max-cost-usd must be positive")
-            config = replace(config, max_cost_usd=args.max_cost_usd)
+        config = _apply_live_overrides(load_config(args.config), args)
         print(json.dumps(build_plan(config).to_dict(), indent=2, sort_keys=True))
         return 0
     if args.command == "plan-matrix":
@@ -786,7 +792,7 @@ def main(argv: list[str] | None = None) -> int:
         if not args.confirm_live:
             print("refusing live traffic without --confirm-live", file=sys.stderr)
             return 2
-        config = load_config(args.config)
+        config = _apply_live_overrides(load_config(args.config), args)
         raw_argv = tuple(sys.argv if argv is None else ("inference-bench", *argv))
         asyncio.run(run_campaign(config, args.output, invocation=raw_argv))
         return 0
