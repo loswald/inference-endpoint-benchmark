@@ -1,0 +1,13 @@
+{
+  "campaign_sha256s": "do-capacity-20260828-r2:32d27ca2642c71f787a1c87d449f5a308e7aebdd2bf15a9b054d6ad5415230c1",
+  "cells": 44,
+  "combined_source_id": "do-combined-capacity-20260828",
+  "controller_summary_sha256": "a0f633bb6492e3f816f3c535df1ffd21e362d85e6e1b09ef0380976b598574d3",
+  "fallback_source_id": "do-sixhour-aimd-20260824-r1",
+  "load_block_summary_sha256": "9cb7200fcf02e8a5bdf358ffd4a514aceedd2b917bb720485ea6b3ac1bb59e53",
+  "output_sha256": "a7bcc4ac6bc7288a95b3510670551b0772d5f80b7ecd59a84daa9f882ad74cbe",
+  "provenance_counts": {
+    "do-capacity-20260828-r2": 21,
+    "do-sixhour-aimd-20260824-r1": 23
+  }
+}

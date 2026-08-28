@@ -154,6 +154,19 @@ def _plot_capacity(rows: list[dict[str, str]], source_id: str, destination: Path
                 value = _number(row.get("highest_observed_healthy_rps"))
             upper = _number(row.get("capacity_upper_bound_rps"))
             if value is None:
+                if upper is not None:
+                    positive.append(upper)
+                    axis.scatter(upper, index, marker="x", color="#B91C1C", s=52, zorder=3)
+                    axis.annotate(
+                        f"unhealthy at {upper:g} RPS",
+                        (upper, index),
+                        xytext=(5, 0),
+                        textcoords="offset points",
+                        color="#B91C1C",
+                        fontsize=7,
+                        va="center",
+                    )
+                    continue
                 axis.text(
                     0.01,
                     index,
@@ -210,6 +223,14 @@ def _plot_capacity(rows: list[dict[str, str]], source_id: str, destination: Path
                 color="#D97706",
                 label="unhealthy upper bound",
             ),
+            Line2D(
+                [0],
+                [0],
+                marker="x",
+                linestyle="none",
+                color="#B91C1C",
+                label="unhealthy at lowest tested rate",
+            ),
         ]
         figure.suptitle(
             f"DigitalOcean AIMD capacity — {SHAPE_LABELS[shape]}",
@@ -221,7 +242,7 @@ def _plot_capacity(rows: list[dict[str, str]], source_id: str, destination: Path
         figure.legend(
             handles=legend_handles,
             frameon=False,
-            ncol=3,
+            ncol=4,
             loc="upper center",
             bbox_to_anchor=(0.5, 0.955),
         )
@@ -281,13 +302,20 @@ def _plot_soak(rows: list[dict[str, str]], source_id: str, destination: Path) ->
                 for index, row in enumerate(selected):
                     value = _number(row.get(metric))
                     if value is None:
+                        missing_label = (
+                            "transport-gated"
+                            if row.get("status") == "baseline_transport_gate_failed"
+                            else "TPM censored\n(incomplete usage)"
+                            if group_index == 2
+                            else "not established"
+                        )
                         axis.text(
                             0.01,
                             index,
-                            "not established",
+                            missing_label,
                             transform=axis.get_yaxis_transform(),
                             color="#B91C1C",
-                            fontsize=7.5,
+                            fontsize=7.0,
                             va="center",
                         )
                         continue
@@ -315,7 +343,8 @@ def _plot_soak(rows: list[dict[str, str]], source_id: str, destination: Path) ->
                 axis.set_xlabel(label)
                 _style_axis(axis)
             figure.suptitle(
-                f"DigitalOcean two-minute soak — {SHAPE_LABELS[shape]}",
+                f"DigitalOcean two-minute soak — {SHAPE_LABELS[shape]} — "
+                f"{'rate and quality' if group_index == 1 else 'token throughput'}",
                 x=0.055,
                 ha="left",
                 fontweight="bold",
@@ -346,13 +375,14 @@ def _plot_capabilities(rows: list[dict[str, str]], destination: Path) -> Path:
 
     dimensions = CAPABILITY_DIMENSIONS
     endpoints = sorted({str(row.get("endpoint_id")) for row in rows})
-    matrix = np.full((len(endpoints), len(dimensions)), np.nan)
-    symbols = np.full((len(endpoints), len(dimensions)), "", dtype=object)
+    matrix = np.zeros((len(endpoints), len(dimensions)))
+    symbols = np.full((len(endpoints), len(dimensions)), "N", dtype=object)
     status_value = {
-        "documented_unavailable": (0, "U"),
-        "failed": (1, "F"),
-        "degraded": (2, "D"),
-        "passed": (3, "P"),
+        "not_measured": (0, "N"),
+        "documented_unavailable": (1, "U"),
+        "failed": (2, "F"),
+        "degraded": (3, "D"),
+        "passed": (4, "P"),
     }
     for row in rows:
         dimension = str(row.get("capability_dimension"))
@@ -363,14 +393,20 @@ def _plot_capabilities(rows: list[dict[str, str]], destination: Path) -> Path:
         transport = str(row.get("transport_status"))
         key = "documented_unavailable" if transport == "documented_unavailable" else functional
         if key not in status_value:
-            key = "degraded" if transport == "observed_transport_degraded" else "failed"
+            key = (
+                "degraded"
+                if transport == "observed_transport_degraded"
+                else "not_measured"
+                if transport in {"", "not_measured", "not_tested"}
+                else "failed"
+            )
         value, symbol = status_value[key]
         row_index, column = endpoints.index(endpoint), dimensions.index(dimension)
         matrix[row_index, column] = value
         symbols[row_index, column] = symbol
     figure, axis = plt.subplots(figsize=(13.5, max(5.2, 0.4 * len(endpoints) + 2)))
-    cmap = ListedColormap(["#7C3AED", "#DC2626", "#D97706", "#0F766E"])
-    image = axis.imshow(matrix, aspect="auto", vmin=-0.5, vmax=3.5, cmap=cmap)
+    cmap = ListedColormap(["#94A3B8", "#7C3AED", "#DC2626", "#D97706", "#0F766E"])
+    image = axis.imshow(matrix, aspect="auto", vmin=-0.5, vmax=4.5, cmap=cmap)
     for row_index in range(len(endpoints)):
         for column in range(len(dimensions)):
             if symbols[row_index, column]:
@@ -388,8 +424,10 @@ def _plot_capabilities(rows: list[dict[str, str]], destination: Path) -> Path:
     axis.tick_params(axis="x", labelrotation=35)
     axis.set_yticks(range(len(endpoints)), endpoints)
     axis.set_title("DigitalOcean functional capability evidence", loc="left", fontweight="bold")
-    colorbar = figure.colorbar(image, ax=axis, fraction=0.025, pad=0.02, ticks=range(4))
-    colorbar.ax.set_yticklabels(["documented unavailable", "failed", "degraded", "passed"])
+    colorbar = figure.colorbar(image, ax=axis, fraction=0.025, pad=0.02, ticks=range(5))
+    colorbar.ax.set_yticklabels(
+        ["not measured", "documented unavailable", "failed", "degraded", "passed"]
+    )
     figure.tight_layout()
     path = destination / "digitalocean-capabilities.png"
     figure.savefig(path, dpi=210, bbox_inches="tight", facecolor="white")
@@ -411,6 +449,10 @@ def _build_pdf(
     limits: list[dict[str, str]],
     figures: list[Path],
     *,
+    static_verification: list[dict[str, str]],
+    cache_verification: list[dict[str, str]],
+    verification_manifest: dict[str, Any],
+    capacity_manifest: dict[str, Any],
     capacity_source: str,
     soak_source: str,
 ) -> None:
@@ -541,6 +583,18 @@ def _build_pdf(
     capability_index = {
         (row.get("endpoint_id"), row.get("capability_dimension")): row for row in capabilities
     }
+    provenance_counts = capacity_manifest.get("provenance_counts") or {}
+    current_capacity_cells = int(provenance_counts.get("do-capacity-20260828-r2") or 0)
+    fallback_capacity_cells = int(provenance_counts.get("do-sixhour-aimd-20260824-r1") or 0)
+    capacity_provenance_note = (
+        f"The combined capacity table uses {current_capacity_cells} exact endpoint-by-workload "
+        f"controllers from the corrected 2026-08-28 closure and {fallback_capacity_cells} "
+        "matching cells from the earlier verified six-hour campaign. The corrected closure's "
+        "four-hour guard censored those fallback cells before start; none is presented as new "
+        "evidence."
+        if current_capacity_cells or fallback_capacity_cells
+        else "Capacity provenance is recorded per exact endpoint-by-workload cell."
+    )
     story: list[Any] = [
         Spacer(1, 19 * mm),
         Paragraph("DigitalOcean hosted inference", styles["DoTitle"]),
@@ -553,10 +607,11 @@ def _build_pdf(
         Paragraph(
             "The AIMD pages show tested operational bounds, not fitted theoretical maxima. The "
             "soak pages report four independent 30-second blocks at one candidate rate. Missing "
-            "values remain blank; singleton boundary/capability probes do not receive invented "
-            "confidence intervals.",
+            "measurements are labelled as not measured; singleton boundary/capability probes do "
+            "not receive invented confidence intervals.",
             styles["DoBody"],
         ),
+        Paragraph(capacity_provenance_note, styles["DoBody"]),
         PageBreak(),
         Paragraph("Engineering decision map", styles["DoH1"]),
         Paragraph(
@@ -611,6 +666,126 @@ def _build_pdf(
             ),
         )
     )
+    verification_by_endpoint: dict[str, list[dict[str, str]]] = {}
+    for row in static_verification:
+        verification_by_endpoint.setdefault(str(row.get("endpoint_id")), []).append(row)
+    cache_verification_index = {
+        str(row.get("endpoint_id")): row for row in cache_verification
+    }
+    manifest_campaign = str(verification_manifest.get("campaign_id") or "not provided")
+    manifest_sha = str(verification_manifest.get("source_bundle_sha256") or "not provided")
+    story.extend(
+        [
+            PageBreak(),
+            Paragraph("Independent static verification", styles["DoH1"]),
+            Paragraph(
+                f"Campaign {manifest_campaign} is a separate, hash-bound verification layer "
+                f"({manifest_sha}). It contributes static, caching, capability, context, output, "
+                "quality, and latency evidence only. It contributes no AIMD or sustained-capacity "
+                "claim. Cells not reached before its wall-time guard remain explicitly labelled.",
+                styles["DoBody"],
+            ),
+        ]
+    )
+    verification_rows = [
+        ["Exact endpoint", "Suites reached", "Attempts", "Successes", "Observed state"]
+    ]
+    for endpoint in sorted(inventory, key=lambda row: str(row.get("endpoint_id"))):
+        endpoint_id = str(endpoint.get("endpoint_id"))
+        rows = verification_by_endpoint.get(endpoint_id, [])
+        attempts = sum(int(row.get("attempts_n") or 0) for row in rows)
+        successes = sum(int(row.get("successes_n") or 0) for row in rows)
+        suites = ", ".join(sorted({str(row.get("suite")) for row in rows}))
+        verification_rows.append(
+            [
+                endpoint_id,
+                suites or "not reached",
+                str(attempts) if rows else "not measured",
+                str(successes) if rows else "not measured",
+                "measured" if rows else "wall-time censored before start",
+            ]
+        )
+    story.append(
+        Table(
+            verification_rows,
+            colWidths=[55 * mm, 51 * mm, 20 * mm, 20 * mm, 34 * mm],
+            repeatRows=1,
+            style=TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), navy),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, pale]),
+                    ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#CBD5E1")),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("FONTSIZE", (0, 0), (-1, -1), 6.6),
+                    ("PADDING", (0, 0), (-1, -1), 3.2),
+                ]
+            ),
+        )
+    )
+    if cache_verification:
+        story.extend(
+            [
+                Spacer(1, 5 * mm),
+                Paragraph("Automatic exact-prefix cache verification", styles["DoH1"]),
+                Paragraph(
+                    "DigitalOcean-hosted open models apply best-effort exact-prefix caching "
+                    "automatically. The matched pairs below report observed cached-token counters, "
+                    "TTFT when the transport exposed it, and settled-cost ratios. A missing row "
+                    "means the verification campaign did not reach that endpoint; it is not a "
+                    "claim that caching is unavailable.",
+                    styles["DoBody"],
+                ),
+            ]
+        )
+        cache_rows = [
+            [
+                "Endpoint",
+                "Pairs",
+                "Hits / misses",
+                "Cached tokens",
+                "TTFT cached / uncached",
+                "Cost ratio",
+            ]
+        ]
+        for endpoint_id in sorted(cache_verification_index):
+            row = cache_verification_index[endpoint_id]
+            cached_ttft = _number(row.get("cached_ttft_p50_seconds"))
+            uncached_ttft = _number(row.get("uncached_ttft_p50_seconds"))
+            ratio = _number(row.get("observed_cost_ratio_cached_over_uncached"))
+            cache_rows.append(
+                [
+                    endpoint_id,
+                    f"{row.get('cached_requests_n')}/{row.get('uncached_requests_n')}",
+                    f"{row.get('cached_token_hits_n')}/{row.get('cached_token_misses_n')}",
+                    str(row.get("cache_read_tokens_sum") or "0"),
+                    (
+                        "not reported"
+                        if cached_ttft is None or uncached_ttft is None
+                        else f"{_format(cached_ttft)} / {_format(uncached_ttft)} s"
+                    ),
+                    "not established" if ratio is None else f"{ratio:.2f}x",
+                ]
+            )
+        story.append(
+            Table(
+                cache_rows,
+                colWidths=[48 * mm, 19 * mm, 24 * mm, 24 * mm, 40 * mm, 24 * mm],
+                repeatRows=1,
+                style=TableStyle(
+                    [
+                        ("BACKGROUND", (0, 0), (-1, 0), teal),
+                        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, pale]),
+                        ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#CBD5E1")),
+                        ("FONTSIZE", (0, 0), (-1, -1), 6.5),
+                        ("PADDING", (0, 0), (-1, -1), 3.1),
+                    ]
+                ),
+            )
+        )
     first_figure = True
     for figure in figures:
         from PIL import Image as PILImage
@@ -790,6 +965,30 @@ def generate_digitalocean_atlas(
     soak = included(_read_csv(source / "soak-cell-summary.csv"))
     capabilities = included(_read_csv(source / "capability-evidence.csv"))
     cache_rows = included(_read_csv(source / "cache-state-metrics.csv"))
+    static_verification_path = source / "static-verification-summary.csv"
+    cache_verification_path = source / "cache-verification-pairs.csv"
+    verification_manifest_path = source / "static-verification-manifest.json"
+    capacity_manifest_path = source / "capacity-provenance-manifest.json"
+    static_verification = (
+        included(_read_csv(static_verification_path))
+        if static_verification_path.is_file()
+        else []
+    )
+    cache_verification = (
+        included(_read_csv(cache_verification_path))
+        if cache_verification_path.is_file()
+        else []
+    )
+    verification_manifest = (
+        json.loads(verification_manifest_path.read_text(encoding="utf-8"))
+        if verification_manifest_path.is_file()
+        else {}
+    )
+    capacity_manifest = (
+        json.loads(capacity_manifest_path.read_text(encoding="utf-8"))
+        if capacity_manifest_path.is_file()
+        else {}
+    )
     endpoints = [str(row.get("endpoint_id")) for row in inventory]
     capabilities = _merge_platform_capabilities(capabilities, cache_rows, endpoints)
     limits = included(_read_csv(source / "observed-limits.csv"))
@@ -805,6 +1004,10 @@ def generate_digitalocean_atlas(
         capabilities,
         limits,
         figures,
+        static_verification=static_verification,
+        cache_verification=cache_verification,
+        verification_manifest=verification_manifest,
+        capacity_manifest=capacity_manifest,
         capacity_source=capacity_source,
         soak_source=soak_source,
     )
