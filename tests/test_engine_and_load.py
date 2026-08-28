@@ -467,6 +467,164 @@ def test_aimd_and_soak_forward_identity_bound_long_shape_targets(
     )
 
 
+def test_aimd_pauses_at_panel_boundaries_and_resumes_without_duplicate_epochs(
+    tmp_path, campaign, route, monkeypatch
+) -> None:
+    clock = [0.0]
+    provider_epoch_calls: dict[str, int] = defaultdict(int)
+    summaries: dict[str, EpochSummary] = {}
+    guarded_route = replace(route, request_timeout_seconds=1.0)
+
+    monkeypatch.setattr("inference_bench.load._monotonic_time", lambda: clock[0])
+
+    async def healthy_epoch(engine, route, **kwargs):
+        epoch_id = kwargs["epoch_id"]
+        if epoch_id in summaries:
+            return summaries[epoch_id]
+        provider_epoch_calls[epoch_id] += 1
+        summary = _epoch_summary(
+            epoch_id=epoch_id,
+            phase=kwargs["phase"],
+            offered_rps=kwargs["offered_rps"],
+            healthy=True,
+        )
+        summaries[epoch_id] = summary
+        engine.ledger.record_event_once(
+            f"load_epoch:{epoch_id}", "load_epoch", summary.to_dict()
+        )
+        # Simulate the conservative arrival-window-plus-timeout drain in a deterministic clock.
+        clock[0] += 2.1
+        return summary
+
+    monkeypatch.setattr("inference_bench.load.run_open_loop_epoch", healthy_epoch)
+
+    async def run() -> tuple[bool, bool, bool, list[dict[str, object]]]:
+        engine, ledger = _engine(
+            tmp_path, replace(campaign, routes=(guarded_route,)), SequenceAdapter()
+        )
+        config = {
+            "epochs": 1,
+            "epoch_seconds": 1,
+            "initial_rps": 1,
+            "additive_rps": 1,
+            "baseline_samples": 20,
+            "baseline_rps": 20,
+        }
+        first = await run_aimd(
+            engine,
+            guarded_route,
+            "short_short",
+            config,
+            seed=7,
+            not_after_monotonic=3.0,
+        )
+        assert ledger.event_by_key("aimd_complete:route-a:short_short") is None
+        second = await run_aimd(
+            engine,
+            guarded_route,
+            "short_short",
+            config,
+            seed=7,
+            not_after_monotonic=5.0,
+        )
+        assert ledger.event_by_key("aimd_complete:route-a:short_short") is None
+        final = await run_aimd(
+            engine,
+            guarded_route,
+            "short_short",
+            config,
+            seed=7,
+            not_after_monotonic=100.0,
+        )
+        events = ledger.event_rows()
+        await engine.close()
+        ledger.close()
+        return (
+            first.paused_for_window,
+            second.paused_for_window,
+            final.paused_for_window,
+            events,
+        )
+
+    first_paused, second_paused, final_paused, events = asyncio.run(run())
+    assert first_paused is True
+    assert second_paused is True
+    assert final_paused is False
+    assert provider_epoch_calls
+    assert set(provider_epoch_calls.values()) == {1}
+    assert sum(event["kind"] == "aimd_complete" for event in events) == 1
+
+
+def test_soak_pause_does_not_mark_unstarted_blocks_or_complete_the_cell(
+    tmp_path, campaign, route, monkeypatch
+) -> None:
+    clock = [0.0]
+    provider_epoch_calls: dict[str, int] = defaultdict(int)
+    summaries: dict[str, EpochSummary] = {}
+    guarded_route = replace(route, request_timeout_seconds=1.0)
+
+    monkeypatch.setattr("inference_bench.load._monotonic_time", lambda: clock[0])
+
+    async def healthy_epoch(engine, route, **kwargs):
+        epoch_id = kwargs["epoch_id"]
+        if epoch_id in summaries:
+            return summaries[epoch_id]
+        provider_epoch_calls[epoch_id] += 1
+        summary = _epoch_summary(
+            epoch_id=epoch_id,
+            phase=kwargs["phase"],
+            offered_rps=kwargs["offered_rps"],
+            healthy=True,
+        )
+        summaries[epoch_id] = summary
+        engine.ledger.record_event_once(
+            f"load_epoch:{epoch_id}", "load_epoch", summary.to_dict()
+        )
+        clock[0] += 2.1
+        return summary
+
+    monkeypatch.setattr("inference_bench.load.run_open_loop_epoch", healthy_epoch)
+
+    async def run() -> tuple[bool, bool, list[dict[str, object]]]:
+        engine, ledger = _engine(
+            tmp_path, replace(campaign, routes=(guarded_route,)), SequenceAdapter()
+        )
+        config = {
+            "blocks": 2,
+            "block_seconds": 1,
+            "rate_rps": 1,
+            "baseline_samples": 20,
+            "baseline_rps": 20,
+        }
+        first = await run_soak(
+            engine,
+            guarded_route,
+            "short_short",
+            config,
+            seed=7,
+            not_after_monotonic=3.0,
+        )
+        assert ledger.event_by_key("soak_complete:route-a:short_short") is None
+        final = await run_soak(
+            engine,
+            guarded_route,
+            "short_short",
+            config,
+            seed=7,
+            not_after_monotonic=100.0,
+        )
+        events = ledger.event_rows()
+        await engine.close()
+        ledger.close()
+        return first.paused_for_window, final.paused_for_window, events
+
+    first_paused, final_paused, events = asyncio.run(run())
+    assert first_paused is True
+    assert final_paused is False
+    assert set(provider_epoch_calls.values()) == {1}
+    assert sum(event["kind"] == "soak_complete" for event in events) == 1
+
+
 @pytest.mark.parametrize(
     "censor_reason",
     ["interrupted_epoch_incomplete_no_replay", "zero_scheduled_poisson_arrivals"],

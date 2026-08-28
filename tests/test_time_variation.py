@@ -52,6 +52,35 @@ def test_time_variation_builds_matched_fixed_offset_panels(route) -> None:
     assert [spec.planned_input_tokens for spec in panel_zero] == [
         spec.planned_input_tokens for spec in panel_one
     ]
+    assert {
+        spec.metadata["cache_condition"] for spec in specs
+    } == {"stable_exact_prompt_across_panels"}
+
+
+def test_time_variation_requires_complete_explicit_cache_repeat_design(route) -> None:
+    with pytest.raises(ValueError, match="requires both"):
+        _config(
+            route,
+            {
+                "time_variation": {
+                    "enabled": True,
+                    "samples_per_route_shape": 4,
+                    "stable_exact_prompt_repeats": 2,
+                }
+            },
+        )
+    with pytest.raises(ValueError, match="must sum"):
+        _config(
+            route,
+            {
+                "time_variation": {
+                    "enabled": True,
+                    "samples_per_route_shape": 4,
+                    "stable_exact_prompt_repeats": 1,
+                    "panel_unique_cache_cold_repeats": 2,
+                }
+            },
+        )
 
 
 def test_time_variation_refuses_overlap_with_capacity(route) -> None:

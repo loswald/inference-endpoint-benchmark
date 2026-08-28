@@ -6,6 +6,7 @@ from typing import Any
 from .config import (
     NATIVE_PLACEHOLDER_ADAPTERS,
     CampaignConfig,
+    selected_capacity_cells,
     validate_route_evidence_identity,
 )
 from .load import (
@@ -133,6 +134,8 @@ def build_plan(config: CampaignConfig) -> PlanSummary:
     shapes = ["short_short", "long_short", "short_long", "mixed"]
     aimd = config.suites.get("aimd")
     soak = config.suites.get("soak")
+    aimd_cells = {(route.id, shape) for route, shape in selected_capacity_cells(config, "aimd")}
+    soak_cells = {(route.id, shape) for route, shape in selected_capacity_cells(config, "soak")}
     if aimd and aimd.get("enabled", True):
         validate_aimd_config(aimd, config.concurrency)
     if soak and soak.get("enabled", True):
@@ -145,6 +148,8 @@ def build_plan(config: CampaignConfig) -> PlanSummary:
             bracket_epochs = int(aimd.get("bracket_epochs", min(6, epochs)))
             bracket_multiplier = float(aimd.get("bracket_multiplier", 2.0))
             for shape in aimd.get("shapes", shapes):
+                if (route.id, shape) not in aimd_cells:
+                    continue
                 max_rps = aimd_max_rps(aimd, shape)
                 rate = float(aimd.get("initial_rps", 0.25))
                 shape_cost = _shape_cost(
@@ -306,6 +311,8 @@ def build_plan(config: CampaignConfig) -> PlanSummary:
             blocks = int(soak.get("blocks", 4))
             seconds = float(soak.get("block_seconds", 30))
             for shape in soak.get("shapes", shapes):
+                if (route.id, shape) not in soak_cells:
+                    continue
                 rate = soak_rate_rps(soak, route.id, shape)
                 shape_cost = _shape_cost(
                     route,
@@ -403,6 +410,15 @@ def build_plan(config: CampaignConfig) -> PlanSummary:
         notes.append(
             "At least one route timeout exceeds the launchable campaign wall interval; that route "
             "cannot launch unless the wall cap or route timeout is changed."
+        )
+    variation = config.suites.get("time_variation")
+    if variation and variation.get("interleave_gap_work", False):
+        for cell in coverage_cells:
+            if cell.get("suite") != "time_variation":
+                cell["planned_disposition"] = "optional_gap_closure_within_six_hour_window"
+        notes.append(
+            "Matched time-variation panels are the guaranteed six-hour core; all non-panel "
+            "cells are optional gap closure and may remain honestly untested at the send cutoff."
         )
     if not coverage_cells:
         raise ValueError(

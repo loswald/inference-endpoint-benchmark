@@ -15,7 +15,9 @@ workload; the software does not manufacture a single global score.
   endpoints. This is an auditable partial dataset, not a complete production-qualification report.
   The former PDF decision aid is withdrawn while its pass/fail and 32K-versus-100K comparison defects
   are corrected. Current headline evidence: 19/44 confirmed adaptive-load bounds and 3/44 passing
-  120-second fixed-rate stability tests.
+  120-second fixed-rate stability tests. The corrected, plain-language
+  [interim evidence atlas](published/digitalocean-atlas/digitalocean-hosted-inference-evidence-atlas.pdf)
+  shows every measured, failed, unsupported, and unresolved cell without treating blanks as results.
 - Azure AI Foundry, Amazon Bedrock, and Google Vertex AI — corrected load, sustained-soak, and
   matched time-panel measurements are in progress. Their atlas will be published only after the
   final evidence and every rendered page pass the same integrity and visual checks.

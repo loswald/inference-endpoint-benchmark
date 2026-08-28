@@ -275,6 +275,56 @@ class EpochSummary:
         return asdict(self)
 
 
+class LoadRunResult(list[EpochSummary]):
+    """Epoch summaries plus a non-terminal scheduling-pause signal.
+
+    A panel-boundary pause is deliberately not written as controller evidence: it is neither a
+    failed experiment nor a campaign guard. The same controller call can replay completed epoch
+    summaries from the immutable ledger and continue with the first unstarted phase in a later
+    scheduling interval.
+    """
+
+    def __init__(
+        self,
+        values: list[EpochSummary] | None = None,
+        *,
+        paused_for_window: bool = False,
+    ) -> None:
+        super().__init__(values or [])
+        self.paused_for_window = paused_for_window
+
+
+def _monotonic_time() -> float:
+    return asyncio.get_running_loop().time()
+
+
+def _phase_fits_before(
+    engine: BenchmarkEngine,
+    route: RouteConfig,
+    *,
+    epoch_id: str,
+    arrival_window_seconds: float,
+    not_after_monotonic: float | None,
+) -> bool:
+    """Return whether a new provider-bearing phase can drain before a local guard.
+
+    Completed phases are safe to restore because ``run_open_loop_epoch`` returns their immutable
+    summary without a provider call. For a new phase, the registered arrival window and the
+    route's full-stream request timeout form the conservative drain bound.
+    """
+
+    if engine.ledger.event_by_key(f"load_epoch:{epoch_id}") is not None:
+        return True
+    if not_after_monotonic is None:
+        return True
+    now = _monotonic_time()
+    return now + arrival_window_seconds + route.request_timeout_seconds <= not_after_monotonic
+
+
+def _paused_result(values: list[EpochSummary]) -> LoadRunResult:
+    return LoadRunResult(values, paused_for_window=True)
+
+
 _RETRYABLE_STATUSES = {"rate_limited", "server_error", "timeout", "transport_error"}
 
 
@@ -789,7 +839,8 @@ async def _run_adaptive_baselines(
     default_rps: float,
     concurrency: int,
     seed: int,
-) -> tuple[list[EpochSummary], EpochSummary | None]:
+    not_after_monotonic: float | None = None,
+) -> tuple[list[EpochSummary], EpochSummary | None, bool]:
     """Repeat a low-load reference at progressively lower rates until it is healthy.
 
     A single transport wobble must not erase an endpoint/shape cell.  Every attempt remains
@@ -806,11 +857,20 @@ async def _run_adaptive_baselines(
     for attempt in range(attempts):
         rate = max(minimum_rps, initial_rate * decrease**attempt)
         duration = max(initial_duration, samples / rate)
+        epoch_id = adaptive_baseline_epoch_id(controller, route.id, shape, attempt)
+        if not _phase_fits_before(
+            engine,
+            route,
+            epoch_id=epoch_id,
+            arrival_window_seconds=duration,
+            not_after_monotonic=not_after_monotonic,
+        ):
+            return summaries, None, True
         summary = await run_open_loop_epoch(
             engine,
             route,
             shape=shape,
-            epoch_id=adaptive_baseline_epoch_id(controller, route.id, shape, attempt),
+            epoch_id=epoch_id,
             phase=phase,
             offered_rps=samples / duration,
             duration_seconds=duration,
@@ -833,8 +893,8 @@ async def _run_adaptive_baselines(
                         "not_applicable",
                         "healthy_baseline_already_established",
                     )
-            return summaries, summary
-    return summaries, None
+            return summaries, summary, False
+    return summaries, None, False
 
 
 async def run_aimd(
@@ -844,7 +904,8 @@ async def run_aimd(
     config: dict[str, Any],
     *,
     seed: int,
-) -> list[EpochSummary]:
+    not_after_monotonic: float | None = None,
+) -> LoadRunResult:
     validate_aimd_config(config, engine.config.concurrency)
     epochs = int(config.get("epochs", 12))
     duration = float(config.get("epoch_seconds", 20))
@@ -858,7 +919,7 @@ async def run_aimd(
     confirmation_max_stages = int(config.get("confirmation_max_stages", 4))
     confirmation_decrease = float(config.get("confirmation_multiplicative_decrease", decrease))
     minimum_rps = float(config.get("minimum_rps", 0.01))
-    baseline_attempts, baseline = await _run_adaptive_baselines(
+    baseline_attempts, baseline, paused = await _run_adaptive_baselines(
         engine,
         route,
         controller="aimd",
@@ -869,8 +930,11 @@ async def run_aimd(
         default_rps=min(rate, 0.5),
         concurrency=ceiling,
         seed=seed,
+        not_after_monotonic=not_after_monotonic,
     )
-    results: list[EpochSummary] = list(baseline_attempts)
+    results = LoadRunResult(list(baseline_attempts))
+    if paused:
+        return _paused_result(results)
     baseline_guard = next(
         (summary for summary in baseline_attempts if summary.launch_guard_triggered), None
     )
@@ -982,11 +1046,20 @@ async def run_aimd(
     nonmonotonic_overload_observed = False
     healthy_increases = 0
     for index in range(epochs):
+        epoch_id = f"aimd-{route.id}-{shape}-{index:03d}"
+        if not _phase_fits_before(
+            engine,
+            route,
+            epoch_id=epoch_id,
+            arrival_window_seconds=duration,
+            not_after_monotonic=not_after_monotonic,
+        ):
+            return _paused_result(results)
         summary = await run_open_loop_epoch(
             engine,
             route,
             shape=shape,
-            epoch_id=f"aimd-{route.id}-{shape}-{index:03d}",
+            epoch_id=epoch_id,
             phase="aimd",
             offered_rps=rate,
             duration_seconds=duration,
@@ -1093,11 +1166,22 @@ async def run_aimd(
     for stage in range(confirmation_max_stages):
         stage_confirmations: list[EpochSummary] = []
         for confirmation in range(3):
+            confirmation_id = aimd_confirmation_epoch_id(
+                route.id, shape, stage, confirmation
+            )
+            if not _phase_fits_before(
+                engine,
+                route,
+                epoch_id=confirmation_id,
+                arrival_window_seconds=duration,
+                not_after_monotonic=not_after_monotonic,
+            ):
+                return _paused_result(results)
             summary = await run_open_loop_epoch(
                 engine,
                 route,
                 shape=shape,
-                epoch_id=aimd_confirmation_epoch_id(route.id, shape, stage, confirmation),
+                epoch_id=confirmation_id,
                 phase="confirmation",
                 offered_rps=candidate_rate,
                 duration_seconds=duration,
@@ -1113,11 +1197,22 @@ async def run_aimd(
                 guarded = summary
                 break
             if confirmation < 2:
+                separator_id = aimd_separator_epoch_id(
+                    route.id, shape, stage, confirmation
+                )
+                if not _phase_fits_before(
+                    engine,
+                    route,
+                    epoch_id=separator_id,
+                    arrival_window_seconds=separator_duration,
+                    not_after_monotonic=not_after_monotonic,
+                ):
+                    return _paused_result(results)
                 separator = await run_open_loop_epoch(
                     engine,
                     route,
                     shape=shape,
-                    epoch_id=aimd_separator_epoch_id(route.id, shape, stage, confirmation),
+                    epoch_id=separator_id,
                     phase="confirmation_separator",
                     offered_rps=separator_samples / separator_duration,
                     duration_seconds=separator_duration,
@@ -1187,11 +1282,20 @@ async def run_aimd(
     recovery_epochs: list[EpochSummary] = []
     if overload_observed and accepted_rate is not None and guarded is None:
         recovery_rate = max(minimum_rps, accepted_rate * 0.5)
+        recovery_id = f"aimd-{route.id}-{shape}-recovery"
+        if not _phase_fits_before(
+            engine,
+            route,
+            epoch_id=recovery_id,
+            arrival_window_seconds=duration,
+            not_after_monotonic=not_after_monotonic,
+        ):
+            return _paused_result(results)
         recovery = await run_open_loop_epoch(
             engine,
             route,
             shape=shape,
-            epoch_id=f"aimd-{route.id}-{shape}-recovery",
+            epoch_id=recovery_id,
             phase="recovery_after_observed_overload",
             offered_rps=recovery_rate,
             duration_seconds=duration,
@@ -1316,7 +1420,8 @@ async def run_soak(
     config: dict[str, Any],
     *,
     seed: int,
-) -> list[EpochSummary]:
+    not_after_monotonic: float | None = None,
+) -> LoadRunResult:
     validate_soak_config(config, engine.config.concurrency)
     rate = soak_rate_rps(config, route.id, shape)
     if rate <= 0:
@@ -1324,7 +1429,7 @@ async def run_soak(
     blocks = int(config.get("blocks", 4))
     block_seconds = float(config.get("block_seconds", 30))
     ceiling = int(config.get("concurrency", engine.config.concurrency))
-    baseline_attempts, baseline = await _run_adaptive_baselines(
+    baseline_attempts, baseline, paused = await _run_adaptive_baselines(
         engine,
         route,
         controller="soak",
@@ -1335,8 +1440,11 @@ async def run_soak(
         default_rps=min(rate, 0.5),
         concurrency=ceiling,
         seed=seed,
+        not_after_monotonic=not_after_monotonic,
     )
-    results: list[EpochSummary] = list(baseline_attempts)
+    results = LoadRunResult(list(baseline_attempts))
+    if paused:
+        return _paused_result(results)
     baseline_guard = next(
         (summary for summary in baseline_attempts if summary.launch_guard_triggered), None
     )
@@ -1432,11 +1540,20 @@ async def run_soak(
     for stage in range(max_rate_stages):
         stage_blocks: list[EpochSummary] = []
         for block in range(blocks):
+            block_id = soak_block_epoch_id(route.id, shape, stage, block)
+            if not _phase_fits_before(
+                engine,
+                route,
+                epoch_id=block_id,
+                arrival_window_seconds=block_seconds,
+                not_after_monotonic=not_after_monotonic,
+            ):
+                return _paused_result(results)
             summary = await run_open_loop_epoch(
                 engine,
                 route,
                 shape=shape,
-                epoch_id=soak_block_epoch_id(route.id, shape, stage, block),
+                epoch_id=block_id,
                 phase="soak_block",
                 offered_rps=candidate_rate,
                 duration_seconds=block_seconds,

@@ -8,6 +8,11 @@ and one comparison combined 32K-input and 100K-input experiments under a 32K lab
 The evidence package covers the 11 DigitalOcean-hosted open-model endpoints that were in scope.
 Commercial pass-through routes, including Arcee, are excluded everywhere.
 
+The current clean rebuild is the
+[interim evidence atlas](../../published/digitalocean-atlas/digitalocean-hosted-inference-evidence-atlas.pdf).
+It is intentionally explicit about unfinished evidence; the six-hour matched-panel study described
+in the atlas is the next live experiment, not a result already obtained.
+
 ## What is actually established
 
 | Experiment | Established result | Unresolved or failed |

@@ -29,7 +29,7 @@ _PUBLIC_CAPABILITY_KEYS = {
     "vision",
 }
 _PUBLIC_SUITE_KEYS = {
-    "static": {"enabled", "offered_rps"},
+    "static": {"enabled", "offered_rps", "route_ids"},
     "warmup": {
         "enabled",
         "repeats",
@@ -40,6 +40,7 @@ _PUBLIC_SUITE_KEYS = {
         "long_output_tokens",
         "long_output_tokens_by_route",
         "long_output_overflow",
+        "route_ids",
     },
     "latency": {
         "enabled",
@@ -57,6 +58,9 @@ _PUBLIC_SUITE_KEYS = {
         "temperatures",
         "top_ps",
         "tool_counts",
+        "route_ids",
+        "probe_groups",
+        "probe_groups_by_route",
     },
     "interactions": {
         "enabled",
@@ -65,27 +69,36 @@ _PUBLIC_SUITE_KEYS = {
         "stream",
         "output_tokens",
     },
-    "context": {"enabled", "percentages", "fixed_tokens"},
+    "context": {"enabled", "percentages", "fixed_tokens", "route_ids"},
     "output": {
         "enabled",
         "fallback_max_output_tokens",
         "realized_generation_ceiling",
+        "route_ids",
     },
-    "quality": {"enabled", "repeats"},
-    "cache": {"enabled", "repeats", "prefix_tokens"},
+    "quality": {"enabled", "repeats", "route_ids"},
+    "cache": {"enabled", "repeats", "prefix_tokens", "route_ids"},
     "time_variation": {
         "enabled",
         "panels",
         "interval_minutes",
         "samples_per_route_shape",
+        "stable_exact_prompt_repeats",
+        "panel_unique_cache_cold_repeats",
         "shapes",
         "offered_rps",
+        "concurrency",
         "long_input_tokens",
         "long_input_tokens_by_route",
         "long_input_overflow",
         "long_output_tokens",
         "long_output_tokens_by_route",
         "long_output_overflow",
+        "route_ids",
+        "interleave_gap_work",
+        "panel_guard_seconds",
+        "panel_deadline_seconds",
+        "send_cutoff_seconds",
     },
     "aimd": {
         "enabled",
@@ -114,6 +127,8 @@ _PUBLIC_SUITE_KEYS = {
         "long_output_tokens",
         "long_output_tokens_by_route",
         "long_output_overflow",
+        "route_ids",
+        "cells",
     },
     "soak": {
         "enabled",
@@ -137,6 +152,8 @@ _PUBLIC_SUITE_KEYS = {
         "long_output_tokens",
         "long_output_tokens_by_route",
         "long_output_overflow",
+        "route_ids",
+        "cells",
     },
 }
 
@@ -189,6 +206,50 @@ _ROUTE_KEYS = {
 }
 _AUTH_KEYS = {"env", "header", "prefix"}
 _SHAPES = {"short_short", "long_short", "short_long", "mixed"}
+_CAPABILITY_PROBE_GROUPS = {
+    "transport_baseline",
+    "structured_output",
+    "tool_calling",
+    "vision",
+    "parameter_validation",
+}
+
+
+def suite_applies_to_route(values: dict[str, Any], route_id: str) -> bool:
+    """Return whether a suite explicitly includes an endpoint.
+
+    ``route_ids`` is a plan-level selector. It never changes route identity and therefore keeps
+    one immutable campaign manifest while avoiding duplicate requests for already-settled cells.
+    """
+
+    selected = values.get("route_ids")
+    return selected is None or route_id in selected
+
+
+def selected_capacity_cells(
+    config: CampaignConfig, suite_name: str
+) -> list[tuple[RouteConfig, str]]:
+    """Resolve the exact endpoint/workload cells for one capacity suite."""
+
+    if suite_name not in {"aimd", "soak"}:
+        raise ValueError("capacity selection supports only aimd or soak")
+    suite = config.suites.get(suite_name)
+    if not suite or not suite.get("enabled", True):
+        return []
+    shapes = tuple(suite.get("shapes", ("short_short", "long_short", "short_long", "mixed")))
+    declared = suite.get("cells")
+    selected = (
+        {tuple(str(value).rsplit(":", 1)) for value in declared}
+        if declared is not None
+        else None
+    )
+    return [
+        (route, shape)
+        for route in config.routes
+        if suite_applies_to_route(suite, route.id)
+        for shape in shapes
+        if selected is None or (route.id, shape) in selected
+    ]
 NATIVE_PLACEHOLDER_ADAPTERS = frozenset(
     {
         "bedrock_native",
@@ -333,7 +394,12 @@ class CampaignConfig:
             for name, value in self.suites.items()
         ):
             raise ValueError("suites must map names to configuration mappings")
-        _validate_suites(self.suites, self.concurrency, {route.id for route in self.routes})
+        _validate_suites(
+            self.suites,
+            self.concurrency,
+            {route.id for route in self.routes},
+            retries=self.retries,
+        )
 
     @property
     def identity_hash(self) -> str:
@@ -727,7 +793,11 @@ def _require_unique(values: list[Any], field_name: str) -> None:
 
 
 def _validate_suites(
-    suites: dict[str, dict[str, Any]], default_concurrency: int, route_ids: set[str]
+    suites: dict[str, dict[str, Any]],
+    default_concurrency: int,
+    route_ids: set[str],
+    *,
+    retries: int,
 ) -> None:
     unknown_suites = sorted(set(suites) - set(_PUBLIC_SUITE_KEYS))
     if unknown_suites:
@@ -741,10 +811,10 @@ def _validate_suites(
             for name, values in suites.items()
             if name != "time_variation" and values.get("enabled", True)
         ]
-        if other_enabled:
+        if other_enabled and not time_variation.get("interleave_gap_work", False):
             raise ValueError(
                 "time_variation must run as a dedicated low-load campaign; overlapping it with "
-                "capacity or capability suites would confound either measurement"
+                "capacity or capability suites requires explicit interleave_gap_work scheduling"
             )
     for name, values in suites.items():
         _reject_unknown(f"suites.{name}", values, _PUBLIC_SUITE_KEYS[name])
@@ -752,6 +822,20 @@ def _validate_suites(
             _strict_bool(values["enabled"], f"suites.{name}.enabled")
         if not values.get("enabled", True):
             continue
+        if "route_ids" in values:
+            selected_routes = values["route_ids"]
+            if (
+                not isinstance(selected_routes, list)
+                or not selected_routes
+                or any(not isinstance(route_id, str) for route_id in selected_routes)
+            ):
+                raise ValueError(f"suites.{name}.route_ids must be a nonempty list")
+            _require_unique(selected_routes, f"suites.{name}.route_ids")
+            unknown_routes = sorted(set(selected_routes) - route_ids)
+            if unknown_routes:
+                raise ValueError(
+                    f"suites.{name}.route_ids has unknown routes: {unknown_routes}"
+                )
         if "repeats" in values:
             _positive_integer(values["repeats"], f"suites.{name}.repeats")
         if "shapes" in values:
@@ -805,7 +889,92 @@ def _validate_suites(
                 values.get("samples_per_route_shape", 3),
                 "suites.time_variation.samples_per_route_shape",
             )
+            stable_repeats = values.get("stable_exact_prompt_repeats")
+            cold_repeats = values.get("panel_unique_cache_cold_repeats")
+            if (stable_repeats is None) != (cold_repeats is None):
+                raise ValueError(
+                    "time_variation prompt-repeat design requires both "
+                    "stable_exact_prompt_repeats and panel_unique_cache_cold_repeats"
+                )
+            if stable_repeats is not None and cold_repeats is not None:
+                _positive_integer(
+                    stable_repeats,
+                    "suites.time_variation.stable_exact_prompt_repeats",
+                )
+                _positive_integer(
+                    cold_repeats,
+                    "suites.time_variation.panel_unique_cache_cold_repeats",
+                )
+                if stable_repeats + cold_repeats != int(
+                    values.get("samples_per_route_shape", 3)
+                ):
+                    raise ValueError(
+                        "time_variation stable and cache-cold repeats must sum to "
+                        "samples_per_route_shape"
+                    )
             _positive_number(values.get("offered_rps", 0.2), "suites.time_variation.offered_rps")
+            _positive_integer(
+                values.get("concurrency", default_concurrency),
+                "suites.time_variation.concurrency",
+            )
+            if "interleave_gap_work" in values:
+                _strict_bool(
+                    values["interleave_gap_work"],
+                    "suites.time_variation.interleave_gap_work",
+                )
+            guard = _positive_number(
+                values.get("panel_guard_seconds", 300),
+                "suites.time_variation.panel_guard_seconds",
+                allow_zero=True,
+            )
+            cutoff = _positive_number(
+                values.get("send_cutoff_seconds", 0),
+                "suites.time_variation.send_cutoff_seconds",
+                allow_zero=True,
+            )
+            deadline = _positive_number(
+                values.get("panel_deadline_seconds", 600),
+                "suites.time_variation.panel_deadline_seconds",
+            )
+            if values.get("interleave_gap_work", False):
+                if retries:
+                    raise ValueError(
+                        "interleaved time_variation requires campaign.retries=0 so the "
+                        "panel deadline has one hard request-timeout bound"
+                    )
+                selected_route_count = len(values.get("route_ids", route_ids))
+                panel_arrivals = (
+                    selected_route_count
+                    * len(values.get("shapes", ["short_short", "long_short"]))
+                    * int(values.get("samples_per_route_shape", 3))
+                )
+                if int(values.get("concurrency", default_concurrency)) < panel_arrivals:
+                    raise ValueError(
+                        "interleaved time_variation concurrency must admit every registered "
+                        "panel arrival without client-side queueing"
+                    )
+                if cutoff <= 0:
+                    raise ValueError(
+                        "interleaved time_variation requires a positive send_cutoff_seconds"
+                    )
+                last_panel = (
+                    (int(values.get("panels", 12)) - 1)
+                    * float(values.get("interval_minutes", 120))
+                    * 60
+                )
+                if last_panel >= cutoff:
+                    raise ValueError(
+                        "the last time_variation panel must begin before send_cutoff_seconds"
+                    )
+                if guard >= float(values.get("interval_minutes", 120)) * 60:
+                    raise ValueError(
+                        "time_variation.panel_guard_seconds must be shorter than the panel interval"
+                    )
+                if deadline >= float(values.get("interval_minutes", 120)) * 60:
+                    raise ValueError(
+                        "time_variation.panel_deadline_seconds must be shorter than "
+                        "the panel interval"
+                    )
         if name == "context":
             percentages = values.get("percentages", [1, 10, 25, 50, 75, 90, 95, 99])
             fixed_tokens = values.get("fixed_tokens", [])
@@ -835,6 +1004,40 @@ def _validate_suites(
                     _number(value, f"suites.{name}.{key}[{index}]")
                     if not math.isfinite(float(value)):
                         raise ValueError(f"suites.{name}.{key}[{index}] must be finite")
+        if name == "capability":
+            groups = values.get("probe_groups")
+            if groups is not None:
+                if not isinstance(groups, list) or not groups:
+                    raise ValueError("suites.capability.probe_groups must be a nonempty list")
+                _require_unique(groups, "suites.capability.probe_groups")
+                unknown_groups = sorted(set(groups) - _CAPABILITY_PROBE_GROUPS)
+                if unknown_groups:
+                    raise ValueError(
+                        "suites.capability.probe_groups has unknown groups: "
+                        + ", ".join(unknown_groups)
+                    )
+            groups_by_route = values.get("probe_groups_by_route")
+            if groups_by_route is not None:
+                if not isinstance(groups_by_route, dict) or not groups_by_route:
+                    raise ValueError(
+                        "suites.capability.probe_groups_by_route must be a nonempty mapping"
+                    )
+                for route_id, route_groups in groups_by_route.items():
+                    if route_id not in route_ids:
+                        raise ValueError(f"unknown capability probe route ID: {route_id}")
+                    if not isinstance(route_groups, list) or not route_groups:
+                        raise ValueError(
+                            f"capability probe groups for {route_id} must be a nonempty list"
+                        )
+                    _require_unique(
+                        route_groups,
+                        f"suites.capability.probe_groups_by_route.{route_id}",
+                    )
+                    unknown_groups = sorted(set(route_groups) - _CAPABILITY_PROBE_GROUPS)
+                    if unknown_groups:
+                        raise ValueError(
+                            f"unknown capability probe groups for {route_id}: {unknown_groups}"
+                        )
         if name == "capability" and "tool_counts" in values:
             tool_counts = values["tool_counts"]
             if not isinstance(tool_counts, list) or not tool_counts:
@@ -873,6 +1076,23 @@ def _validate_suites(
             from .load import validate_aimd_config
 
             validate_aimd_config(values, default_concurrency)
+        if name in {"aimd", "soak"} and "cells" in values:
+            cells = values["cells"]
+            if not isinstance(cells, list) or not cells:
+                raise ValueError(f"suites.{name}.cells must be a nonempty list")
+            _require_unique(cells, f"suites.{name}.cells")
+            selected_routes = set(values.get("route_ids") or route_ids)
+            selected_shapes = set(values.get("shapes") or _SHAPES)
+            for index, cell in enumerate(cells):
+                if not isinstance(cell, str) or ":" not in cell:
+                    raise ValueError(
+                        f"suites.{name}.cells[{index}] must use '<route_id>:<shape>'"
+                    )
+                route_id, shape = cell.rsplit(":", 1)
+                if route_id not in selected_routes:
+                    raise ValueError(f"{name} cell uses an unselected route: {route_id}")
+                if shape not in selected_shapes:
+                    raise ValueError(f"{name} cell uses an unselected shape: {shape}")
         if name == "soak":
             from .load import validate_soak_config
 

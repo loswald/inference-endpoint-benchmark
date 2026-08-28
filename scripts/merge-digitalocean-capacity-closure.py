@@ -9,7 +9,7 @@ from pathlib import Path
 
 SHAPE_MAP = {
     "short_short": "short_short",
-    "long_short": "input32k_short",
+    "long_short": "input100k_short",
     "short_long": "short_long",
     "mixed": "mixed",
 }
@@ -70,6 +70,8 @@ def main() -> int:
     parser.add_argument("--campaign-sha256s", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, required=True)
+    parser.add_argument("--long-input-tokens", type=int, default=100_000)
+    parser.add_argument("--minimax-long-input-tokens", type=int, default=50_000)
     args = parser.parse_args()
 
     fields, base_rows = read_csv(args.base)
@@ -154,6 +156,22 @@ def main() -> int:
                 "provenance_controller_state": state,
                 "provenance_capacity_bound_state": bound_state,
                 "provenance_campaign_sha256s": args.campaign_sha256s,
+                "workload_input_target_tokens": (
+                    str(
+                        args.minimax_long_input_tokens
+                        if endpoint == "minimax-m2.5"
+                        else args.long_input_tokens
+                    )
+                    if runner_shape == "long_short"
+                    else ""
+                ),
+                "workload_recipe_identity": (
+                    "input100k_short"
+                    if runner_shape == "long_short" and endpoint != "minimax-m2.5"
+                    else "input50k_short"
+                    if runner_shape == "long_short"
+                    else public_shape
+                ),
             }
         )
         if candidate is not None:
@@ -201,6 +219,8 @@ def main() -> int:
             "provenance_controller_state",
             "provenance_capacity_bound_state",
             "provenance_campaign_sha256s",
+            "workload_input_target_tokens",
+            "workload_recipe_identity",
         }
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)

@@ -8,6 +8,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
+from .config import suite_applies_to_route
 from .models import RequestSpec, RouteConfig
 
 
@@ -730,7 +731,26 @@ def plan_capability(route: RouteConfig, config: dict[str, Any], *, seed: int) ->
                 },
             )
         )
-    return probes
+    configured_groups = (config.get("probe_groups_by_route") or {}).get(
+        route.id, config.get("probe_groups")
+    )
+    if configured_groups is None:
+        return probes
+    selected_groups = set(configured_groups)
+
+    def probe_group(spec: RequestSpec) -> str:
+        suffix = spec.logical_id.removeprefix(f"capability:{route.id}:")
+        if suffix in {"baseline", "nonstream"}:
+            return "transport_baseline"
+        if suffix in {"json", "json-schema"}:
+            return "structured_output"
+        if suffix.startswith(("tool", "parallel-tools", "nested-tool-schema")):
+            return "tool_calling"
+        if suffix.startswith("vision"):
+            return "vision"
+        return "parameter_validation"
+
+    return [probe for probe in probes if probe_group(probe) in selected_groups]
 
 
 def _pairwise_cover(factors: dict[str, list[Any]]) -> list[dict[str, Any]]:
@@ -1054,29 +1074,69 @@ def plan_cache(route: RouteConfig, config: dict[str, Any], *, seed: int) -> list
 def plan_time_variation(
     route: RouteConfig, config: dict[str, Any], *, seed: int
 ) -> list[RequestSpec]:
-    """Matched low-load sentinels sampled at fixed offsets across the day.
+    """Matched low-load measurements sampled at fixed offsets in a bounded study.
 
     This is intentionally a dedicated campaign, not traffic overlapped with capacity tests. Each
-    panel repeats the same route-neutral workloads, allowing within-route time-of-day comparisons
-    without changing task content or offered load.
+    panel repeats the same route-neutral workloads, allowing within-route comparisons across the
+    registered study window without changing task content or offered load.
     """
 
     panels = int(config.get("panels", 12))
     interval_seconds = float(config.get("interval_minutes", 120)) * 60
     repeats = int(config.get("samples_per_route_shape", 3))
+    stable_repeats = int(config.get("stable_exact_prompt_repeats", repeats))
     shapes = config.get("shapes", ["short_short", "long_short"])
     result: list[RequestSpec] = []
+
+    def panel_unique_key_with_matched_mixed_subtype(
+        shape: str, stable_key: str, panel: int, repeat_index: int
+    ) -> str:
+        """Change prompt bytes without changing the registered mixed-workload subtype."""
+
+        prefix = (
+            f"time-variation:{{route}}:{shape}:panel-{panel:03d}:"
+            f"cache-cold-repeat-{repeat_index:03d}"
+        )
+        if shape != "mixed":
+            return prefix
+        stable_choice = int(hashlib.sha256(stable_key.encode()).hexdigest(), 16) % 4
+        for nonce in range(256):
+            candidate = f"{prefix}:nonce-{nonce:03d}"
+            if int(hashlib.sha256(candidate.encode()).hexdigest(), 16) % 4 == stable_choice:
+                return candidate
+        raise AssertionError("unable to construct a matched cache-cold mixed-workload key")
+
     for panel in range(panels):
         for shape in shapes:
             for repeat in range(repeats):
                 logical = f"time-variation:{route.id}:panel-{panel:03d}:{shape}:{repeat:03d}"
+                if repeat < stable_repeats:
+                    repeat_index = repeat
+                    cache_condition = "stable_exact_prompt_across_panels"
+                    prompt_identity = f"stable-{repeat_index:03d}"
+                    workload_key = (
+                        f"time-variation:{{route}}:{shape}:stable-repeat-{repeat_index:03d}"
+                    )
+                else:
+                    repeat_index = repeat - stable_repeats
+                    cache_condition = "panel_unique_cache_cold"
+                    prompt_identity = f"panel-{panel:03d}-cold-{repeat_index:03d}"
+                    stable_key = (
+                        f"time-variation:{{route}}:{shape}:stable-repeat-{repeat_index:03d}"
+                    )
+                    workload_key = panel_unique_key_with_matched_mixed_subtype(
+                        shape,
+                        stable_key,
+                        panel,
+                        repeat_index,
+                    )
                 spec = shape_spec(
                     route,
                     shape,
                     logical,
                     suite="time_variation",
                     seed=seed,
-                    workload_key=f"time-variation:{{route}}:{shape}:repeat-{repeat:03d}",
+                    workload_key=workload_key,
                     matched_cell_suffix=f":panel={panel:03d}",
                     shape_config=config,
                 )
@@ -1088,6 +1148,8 @@ def plan_time_variation(
                             "time_variation_panel": panel,
                             "time_variation_offset_seconds": panel * interval_seconds,
                             "time_variation_repeat": repeat,
+                            "time_variation_prompt_identity": prompt_identity,
+                            "cache_condition": cache_condition,
                         },
                     )
                 )
@@ -1114,7 +1176,11 @@ def plan_static_suites(
     for route in routes:
         for name, planner in PLANNERS.items():
             config = suites.get(name)
-            if config is not None and config.get("enabled", True):
+            if (
+                config is not None
+                and config.get("enabled", True)
+                and suite_applies_to_route(config, route.id)
+            ):
                 result.extend(planner(route, config, seed=seed))
     return result
 
