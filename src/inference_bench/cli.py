@@ -10,17 +10,23 @@ import sqlite3
 import subprocess
 import sys
 from contextlib import suppress
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .config import CampaignConfig, load_config
+from .atlas import generate_atlas
+from .config import CampaignConfig, load_config, selected_capacity_cells
+from .digitalocean_atlas import generate_digitalocean_atlas
+from .digitalocean_closure import build_digitalocean_closure_package
 from .engine import BenchmarkEngine, PaymentRequiredLatched, ReservationOverrunLatched
 from .environment import locked_distribution_versions, validate_run_directory_separation
 from .ledger import BudgetExceeded, Ledger, TimeLimitReached
 from .load import run_aimd, run_soak
+from .matrix import load_matrix, matrix_plan, run_matrix
 from .models import TRANSPORT_HEADER_PROFILE, RequestSpec, RouteConfig, canonical_json
 from .plan import build_plan
 from .report import generate_report
+from .soak_config import derive_soak_config
 from .workloads import plan_static_suites
 
 _RETRYABLE_STATUSES = {"rate_limited", "server_error", "timeout", "transport_error"}
@@ -64,11 +70,7 @@ def _capacity_execution_order(
     suite = config.suites.get(suite_name)
     if not suite or not suite.get("enabled", True):
         return []
-    cells = [
-        (route, shape)
-        for route in config.routes
-        for shape in suite.get("shapes", _DEFAULT_CAPACITY_SHAPES)
-    ]
+    cells = selected_capacity_cells(config, suite_name)
     random.Random(f"capacity-order/v1:{config.seed}:{suite_name}").shuffle(cells)
     return cells
 
@@ -179,7 +181,11 @@ def _pending_static_specs(engine: BenchmarkEngine, specs: list[RequestSpec]) -> 
 
 
 async def _run_static(
-    engine: BenchmarkEngine, specs: list[RequestSpec], config: CampaignConfig
+    engine: BenchmarkEngine,
+    specs: list[RequestSpec],
+    config: CampaignConfig,
+    *,
+    offered_rps: float | None = None,
 ) -> str | None:
     """Run one endpoint × suite block serially with no coordinated-omission claim.
 
@@ -188,7 +194,11 @@ async def _run_static(
     behind each other or contaminating another endpoint's latency baseline.
     """
 
-    static_rps = float(config.suites.get("static", {}).get("offered_rps", 1.0))
+    static_rps = (
+        float(offered_rps)
+        if offered_rps is not None
+        else float(config.suites.get("static", {}).get("offered_rps", 1.0))
+    )
     loop = asyncio.get_running_loop()
     not_before = loop.time()
     for spec in specs:
@@ -216,6 +226,389 @@ async def _run_static(
     return None
 
 
+async def _run_time_variation(
+    engine: BenchmarkEngine, specs: list[RequestSpec], config: CampaignConfig
+) -> str | None:
+    """Execute fixed-offset, low-load panels without overlapping other benchmark traffic."""
+
+    suite = config.suites["time_variation"]
+    offered_rps = float(suite.get("offered_rps", 0.2))
+    by_panel: dict[int, list[RequestSpec]] = {}
+    for spec in specs:
+        panel = int(spec.metadata["time_variation_panel"])
+        by_panel.setdefault(panel, []).append(spec)
+    loop = asyncio.get_running_loop()
+    campaign_anchor = loop.time()
+    for panel in sorted(by_panel):
+        panel_specs = by_panel[panel]
+        offset = float(panel_specs[0].metadata["time_variation_offset_seconds"])
+        await asyncio.sleep(max(0.0, campaign_anchor + offset - loop.time()))
+        random.Random(f"time-variation-panel/v1:{config.seed}:{panel}").shuffle(panel_specs)
+        engine.ledger.record_event_once(
+            f"time_variation_panel_started:{panel}",
+            "time_variation_panel_started",
+            {"panel": panel, "planned_offset_seconds": offset, "requests": len(panel_specs)},
+        )
+        pending = _pending_static_specs(engine, panel_specs)
+        for spec in pending:
+            scheduled_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+            try:
+                result = await engine.execute(
+                    spec, scheduled_at_utc=scheduled_at, queue_delay_seconds=0.0
+                )
+            except BudgetExceeded:
+                return "cost_guard"
+            except TimeLimitReached:
+                return "time_guard"
+            except PaymentRequiredLatched:
+                return "http_402_latch"
+            except ReservationOverrunLatched:
+                return "reservation_overrun_latch"
+            if result is not None and result.http_status == 402:
+                return "http_402_latch"
+            await asyncio.sleep(1.0 / offered_rps)
+        engine.ledger.record_event_once(
+            f"time_variation_panel_completed:{panel}",
+            "time_variation_panel_completed",
+            {"panel": panel, "planned_offset_seconds": offset},
+        )
+    return None
+
+
+async def _run_time_variation_panel(
+    engine: BenchmarkEngine,
+    panel: int,
+    specs: list[RequestSpec],
+    *,
+    offered_rps: float,
+    concurrency: int,
+    planned_offset_seconds: float,
+    deadline_seconds: float,
+    not_after_monotonic: float | None = None,
+) -> str | None:
+    """Run one resume-safe open-loop panel with no concurrent gap traffic."""
+
+    pending = _pending_static_specs(engine, specs)
+    ordered = sorted(pending, key=lambda spec: spec.logical_id)
+    random.Random(f"time-variation-panel/v2:{engine.config.seed}:{panel}").shuffle(ordered)
+    if concurrency < len(ordered):
+        raise ValueError(
+            f"time variation panel {panel} concurrency is below its pending arrival count"
+        )
+    launch_span = max(0.0, (len(ordered) - 1) / offered_rps)
+    maximum_timeout = max((spec.timeout_seconds for spec in ordered), default=0.0)
+    if launch_span + maximum_timeout > deadline_seconds:
+        raise ValueError(
+            f"time variation panel {panel} cannot drain inside its explicit deadline"
+        )
+    loop = asyncio.get_running_loop()
+    panel_started = loop.time()
+    if (
+        not_after_monotonic is not None
+        and panel_started + launch_span > not_after_monotonic
+    ):
+        # A matched panel is indivisible. If all registered arrivals cannot launch before
+        # the provider cutoff, send none of it and preserve an honest time-guard result.
+        return "time_guard"
+    engine.ledger.record_event_once(
+        f"time_variation_panel_started:{panel}",
+        "time_variation_panel_started",
+        {
+            "panel": panel,
+            "planned_offset_seconds": planned_offset_seconds,
+            "requests": len(specs),
+            "offered_rps": offered_rps,
+            "concurrency": concurrency,
+            "panel_deadline_seconds": deadline_seconds,
+            "arrival_pattern": "deterministic open-loop global schedule",
+        },
+    )
+
+    stop = asyncio.Event()
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def execute(index: int, spec: RequestSpec) -> str | None:
+        due = index / offered_rps
+        started = panel_started
+        await asyncio.sleep(max(0.0, started + due - loop.time()))
+        async with semaphore:
+            if stop.is_set():
+                return None
+            if not_after_monotonic is not None and loop.time() > not_after_monotonic:
+                stop.set()
+                return "time_guard"
+            scheduled_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+            try:
+                result = await engine.execute(
+                    spec,
+                    scheduled_at_utc=scheduled_at,
+                    queue_delay_seconds=max(0.0, loop.time() - (started + due)),
+                )
+            except BudgetExceeded:
+                reason = "cost_guard"
+            except TimeLimitReached:
+                reason = "time_guard"
+            except PaymentRequiredLatched:
+                reason = "http_402_latch"
+            except ReservationOverrunLatched:
+                reason = "reservation_overrun_latch"
+            else:
+                reason = (
+                    "http_402_latch"
+                    if result is not None and result.http_status == 402
+                    else None
+                )
+        if reason:
+            stop.set()
+        return reason
+
+    results = await asyncio.gather(
+        *(execute(index, spec) for index, spec in enumerate(ordered))
+    )
+    reason = next((value for value in results if value), None)
+    if reason:
+        return reason
+    engine.ledger.record_event_once(
+        f"time_variation_panel_completed:{panel}",
+        "time_variation_panel_completed",
+        {"panel": panel, "planned_offset_seconds": planned_offset_seconds},
+    )
+    return None
+
+
+def _capacity_job_seconds(config: CampaignConfig, suite_name: str) -> float:
+    """Strict phase-by-phase wall bound used only to protect matched time panels."""
+
+    suite = config.suites[suite_name]
+    minimum = float(suite.get("minimum_rps", 0.01))
+    baseline_rate = float(suite.get("baseline_rps", minimum))
+    baseline_samples = int(suite.get("baseline_samples", 5))
+    baseline_attempts = int(suite.get("baseline_attempts", 3))
+    baseline_decrease = float(suite.get("baseline_multiplicative_decrease", 0.5))
+    timeout = max(route.request_timeout_seconds for route in config.routes)
+    baseline_nominal = float(
+        suite.get("block_seconds", 30)
+        if suite_name == "soak"
+        else suite.get("epoch_seconds", 20)
+    )
+    baseline_seconds = sum(
+        max(
+            baseline_nominal,
+            baseline_samples / max(minimum, baseline_rate * baseline_decrease**attempt),
+        )
+        + timeout
+        for attempt in range(baseline_attempts)
+    )
+    if suite_name == "soak":
+        scheduled = (
+            int(suite.get("blocks", 4))
+            * int(suite.get("max_rate_stages", 4))
+            * (float(suite.get("block_seconds", 30)) + timeout)
+        )
+    else:
+        epoch_seconds = float(suite.get("epoch_seconds", 20))
+        separator_samples = int(suite.get("confirmation_separator_samples", baseline_samples))
+        separator_seconds = max(epoch_seconds, separator_samples / baseline_rate)
+        scheduled = (
+            int(suite.get("epochs", 12)) * (epoch_seconds + timeout)
+            + int(suite.get("confirmation_max_stages", 4))
+            * (3 * (epoch_seconds + timeout) + 2 * (separator_seconds + timeout))
+            + epoch_seconds
+            + timeout
+        )
+    return baseline_seconds + scheduled + 10.0
+
+
+async def _run_interleaved_six_hour_study(
+    engine: BenchmarkEngine,
+    variation_specs: list[RequestSpec],
+    gap_static_specs: list[RequestSpec],
+    config: CampaignConfig,
+) -> str | None:
+    """Protect matched time panels while filling every safe interval with gap work.
+
+    Only one provider-bearing job runs at a time. Static work starts only when its conservative
+    request bound fits; capacity work checks every provider-bearing phase against the next panel
+    guard and pauses between phases when necessary. The immutable ledger makes every panel,
+    static request, AIMD cell, and fixed-rate cell resume-safe without duplicate sends.
+    """
+
+    suite = config.suites["time_variation"]
+    offered_rps = float(suite.get("offered_rps", 0.2))
+    panel_concurrency = int(suite.get("concurrency", config.concurrency))
+    guard_seconds = float(suite.get("panel_guard_seconds", 300))
+    deadline_seconds = float(suite.get("panel_deadline_seconds", 600))
+    cutoff_seconds = float(suite["send_cutoff_seconds"])
+    started_text = engine.ledger.meta("started_at_utc")
+    if not started_text:
+        raise RuntimeError("interleaved study requires the immutable campaign start time")
+    anchor = datetime.fromisoformat(started_text.replace("Z", "+00:00"))
+
+    by_panel: dict[int, list[RequestSpec]] = {}
+    offsets: dict[int, float] = {}
+    for spec in variation_specs:
+        panel = int(spec.metadata["time_variation_panel"])
+        by_panel.setdefault(panel, []).append(spec)
+        offsets[panel] = float(spec.metadata["time_variation_offset_seconds"])
+
+    static_jobs = list(gap_static_specs)
+    random.Random(f"six-hour-static-order/v1:{config.seed}").shuffle(static_jobs)
+    capacity_jobs: list[tuple[str, RouteConfig, str]] = [
+        (suite_name, route, shape)
+        for suite_name in ("aimd", "soak")
+        for route, shape in _capacity_execution_order(config, suite_name)
+    ]
+    quick_static = [spec for spec in static_jobs if spec.suite in {"capability", "cache"}]
+    long_static = [spec for spec in static_jobs if spec.suite not in {"capability", "cache"}]
+    aimd_jobs = [job for job in capacity_jobs if job[0] == "aimd"]
+    soak_jobs = [job for job in capacity_jobs if job[0] == "soak"]
+    gap_jobs: list[tuple[str, object]] = [
+        *(("static", spec) for spec in quick_static),
+        *(("capacity", job) for job in aimd_jobs),
+        *(("capacity", job) for job in soak_jobs),
+        *(("static", spec) for spec in long_static),
+    ]
+
+    def elapsed() -> float:
+        return max(0.0, (datetime.now(UTC) - anchor).total_seconds())
+
+    def unfinished_panels() -> list[int]:
+        return [
+            panel
+            for panel in sorted(by_panel)
+            if engine.ledger.event_by_key(f"time_variation_panel_completed:{panel}") is None
+        ]
+
+    def pending_job(job: tuple[str, object]) -> bool:
+        kind, value = job
+        if kind == "static":
+            return bool(_pending_static_specs(engine, [value]))  # type: ignore[list-item]
+        suite_name, route, shape = value  # type: ignore[misc]
+        return engine.ledger.event_by_key(f"{suite_name}_complete:{route.id}:{shape}") is None
+
+    while elapsed() < cutoff_seconds:
+        panels = unfinished_panels()
+        due = [panel for panel in panels if offsets[panel] <= elapsed()]
+        if due:
+            panel = due[0]
+            if elapsed() > offsets[panel] + deadline_seconds:
+                return "time_guard"
+            loop = asyncio.get_running_loop()
+            not_after_monotonic = loop.time() + max(0.0, cutoff_seconds - elapsed())
+            reason = await _run_time_variation_panel(
+                engine,
+                panel,
+                by_panel[panel],
+                offered_rps=offered_rps,
+                concurrency=panel_concurrency,
+                planned_offset_seconds=offsets[panel],
+                deadline_seconds=deadline_seconds,
+                not_after_monotonic=not_after_monotonic,
+            )
+            if reason:
+                return reason
+            continue
+
+        gap_jobs = [job for job in gap_jobs if pending_job(job)]
+        next_panel = min((offsets[panel] for panel in panels), default=cutoff_seconds)
+        usable_seconds = min(next_panel - guard_seconds, cutoff_seconds) - elapsed()
+        selected_index: int | None = None
+        for index, (kind, value) in enumerate(gap_jobs):
+            if kind == "static":
+                spec = value
+                estimate = (  # type: ignore[union-attr]
+                    float(spec.timeout_seconds) + 1.0 / offered_rps + 10.0
+                )
+            else:
+                suite_name, route, _ = value  # type: ignore[misc]
+                capacity_suite = config.suites[suite_name]
+                # A controller is deliberately resumable at every baseline/epoch/block boundary.
+                # Admit a useful slice when one nominal phase can fit; the controller itself
+                # performs the exact duration-plus-route-timeout check before every new phase.
+                nominal_seconds = float(
+                    capacity_suite.get("block_seconds", 30)
+                    if suite_name == "soak"
+                    else capacity_suite.get("epoch_seconds", 20)
+                )
+                estimate = nominal_seconds + route.request_timeout_seconds + 10.0
+            if estimate <= usable_seconds:
+                selected_index = index
+                break
+        if selected_index is None:
+            if panels:
+                await asyncio.sleep(max(0.0, next_panel - elapsed()))
+                continue
+            break
+
+        kind, value = gap_jobs.pop(selected_index)
+        if kind == "static":
+            reason = await _run_static(
+                engine,
+                [value],  # type: ignore[list-item]
+                config,
+                offered_rps=offered_rps,
+            )
+        else:
+            suite_name, route, shape = value  # type: ignore[misc]
+            loop = asyncio.get_running_loop()
+            boundary_elapsed = min(next_panel - guard_seconds, cutoff_seconds)
+            not_after_monotonic = loop.time() + max(0.0, boundary_elapsed - elapsed())
+            blocks = (
+                await run_aimd(
+                    engine,
+                    route,
+                    shape,
+                    config.suites[suite_name],
+                    seed=config.seed,
+                    not_after_monotonic=not_after_monotonic,
+                )
+                if suite_name == "aimd"
+                else await run_soak(
+                    engine,
+                    route,
+                    shape,
+                    config.suites[suite_name],
+                    seed=config.seed,
+                    not_after_monotonic=not_after_monotonic,
+                )
+            )
+            if blocks.paused_for_window:
+                # Keep the exact controller cell pending. Completed epoch IDs restore from the
+                # ledger in the next interval, so reinserting the job resumes rather than
+                # duplicates it.
+                gap_jobs.insert(selected_index, (kind, value))
+                if panels:
+                    await asyncio.sleep(max(0.0, next_panel - elapsed()))
+                    continue
+                break
+            reason = next(
+                (
+                    block.launch_guard_reason
+                    for block in blocks
+                    if block.launch_guard_triggered
+                ),
+                None,
+            )
+        if reason:
+            if reason == "time_guard" and not unfinished_panels():
+                break
+            return str(reason)
+
+    if unfinished_panels():
+        return "time_guard"
+    remaining_gap_jobs = sum(pending_job(job) for job in gap_jobs)
+    engine.ledger.record_event_once(
+        "six_hour_window_completed",
+        "six_hour_window_completed",
+        {
+            "time_panels_completed": len(by_panel),
+            "optional_gap_jobs_remaining": remaining_gap_jobs,
+            "send_cutoff_seconds": cutoff_seconds,
+        },
+    )
+    return "six_hour_window_completed"
+
+
 async def run_campaign(
     config: CampaignConfig, output: Path, *, invocation: tuple[str, ...] = ()
 ) -> None:
@@ -230,12 +623,17 @@ async def run_campaign(
         raise ValueError(
             "live run contains fail-closed native adapter placeholders: " + ", ".join(placeholders)
         )
+    # Validate the source/runtime identity before creating any run state. A dirty checkout,
+    # missing dependency, or other local provenance failure must leave the requested output path
+    # untouched so the operator can fix the checkout and retry normally.
+    run_manifest = _runtime_manifest(config, invocation, output_dir=output)
     output.mkdir(parents=True, exist_ok=True)
     ledger = Ledger(output, exclusive_owner=True)
     try:
         ledger.initialize(
             campaign_hash=config.identity_hash, config_json=canonical_json(config.public_dict())
         )
+        ledger.set_meta_once("run_manifest_json", canonical_json(run_manifest))
         if ledger.event_by_key("campaign_terminal") is not None:
             # A crash may commit the canonical terminal event just before its prompt-free JSONL
             # projection or terminal source digest is fsynced. Repairing either derived artifact
@@ -260,19 +658,6 @@ async def run_campaign(
         ledger.close()
         raise
     try:
-        run_manifest = _runtime_manifest(config, invocation, output_dir=output)
-    except Exception:
-        ledger.finalize_plan("preflight_failed")
-        ledger.record_event_once(
-            "campaign_terminal",
-            "campaign_terminal",
-            {"reason": "preflight_failed", "error_kind": "runtime_manifest_preflight_error"},
-        )
-        ledger.rebuild_events_jsonl()
-        ledger.close()
-        raise
-    try:
-        ledger.set_meta_once("run_manifest_json", canonical_json(run_manifest))
         recovered = ledger.recover_in_flight()
         if recovered:
             ledger.record_event("resume_notice", {"unknown_in_flight_count": recovered})
@@ -302,6 +687,39 @@ async def run_campaign(
             )
             raise
         static_specs = plan_static_suites(config.routes, config.suites, seed=config.seed)
+        time_variation_specs = [spec for spec in static_specs if spec.suite == "time_variation"]
+        static_specs = [spec for spec in static_specs if spec.suite != "time_variation"]
+        time_variation = config.suites.get("time_variation")
+        if time_variation and time_variation.get("interleave_gap_work", False):
+            static_blocks = _static_execution_blocks(config, static_specs)
+            _record_static_execution_order(ledger, static_blocks)
+            for suite_name in ("aimd", "soak"):
+                order = _capacity_execution_order(config, suite_name)
+                if order:
+                    _record_capacity_execution_order(ledger, suite_name, order)
+            reason = await _run_interleaved_six_hour_study(
+                engine,
+                time_variation_specs,
+                [spec for _, block in static_blocks for spec in block],
+                config,
+            )
+            if reason == "six_hour_window_completed":
+                ledger.finalize_plan(reason)
+                ledger.record_event_once(
+                    "campaign_terminal", "campaign_terminal", {"reason": reason}
+                )
+                return
+            if reason:
+                ledger.finalize_plan(reason)
+                ledger.record_event_once(
+                    "campaign_terminal", "campaign_terminal", {"reason": reason}
+                )
+                return
+            ledger.finalize_plan("plan_completed")
+            ledger.record_event_once(
+                "campaign_terminal", "campaign_terminal", {"reason": "plan_completed"}
+            )
+            return
         static_blocks = _static_execution_blocks(config, static_specs)
         _record_static_execution_order(ledger, static_blocks)
         for _, block in static_blocks:
@@ -316,6 +734,16 @@ async def run_campaign(
                         {"reason": static_reason},
                     )
                     return
+        if time_variation_specs:
+            time_variation_reason = await _run_time_variation(engine, time_variation_specs, config)
+            if time_variation_reason:
+                ledger.finalize_plan(time_variation_reason)
+                ledger.record_event_once(
+                    "campaign_terminal",
+                    "campaign_terminal",
+                    {"reason": time_variation_reason},
+                )
+                return
         aimd = config.suites.get("aimd")
         if aimd and aimd.get("enabled", True):
             aimd_order = _capacity_execution_order(config, "aimd")
@@ -638,13 +1066,100 @@ def _parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     plan = sub.add_parser("plan", help="credential-free plan and conservative cost calculation")
     plan.add_argument("config", type=Path)
+    plan_matrix = sub.add_parser(
+        "plan-matrix", help="credential-free plan for parallel provider campaigns"
+    )
+    plan_matrix.add_argument("matrix", type=Path)
     run = sub.add_parser("run", help="execute a live campaign")
     run.add_argument("config", type=Path)
     run.add_argument("--output", type=Path, required=True)
     run.add_argument("--confirm-live", action="store_true")
+    run.add_argument(
+        "--only-suite",
+        choices=(
+            "warmup",
+            "latency",
+            "capability",
+            "interactions",
+            "context",
+            "output",
+            "quality",
+            "cache",
+            "time_variation",
+            "aimd",
+            "soak",
+        ),
+        help="run exactly one configured suite while retaining the same route evidence",
+    )
+    run.add_argument("--max-wall-seconds", type=float)
+    run.add_argument("--max-cost-usd", type=float)
+    run_matrix_parser = sub.add_parser(
+        "run-matrix", help="run providers in parallel; isolate endpoint capacity within provider"
+    )
+    run_matrix_parser.add_argument("matrix", type=Path)
+    run_matrix_parser.add_argument("--output-root", type=Path, required=True)
+    run_matrix_parser.add_argument("--confirm-live", action="store_true")
     report = sub.add_parser("report", help="build matched-cell tables, audit, plots, and Markdown")
     report.add_argument("run_dir", type=Path)
+    report_matrix = sub.add_parser(
+        "report-matrix", help="combine terminal provider runs into a readable PDF evidence atlas"
+    )
+    report_matrix.add_argument("matrix", type=Path)
+    report_matrix.add_argument("--run-root", action="append", type=Path, required=True)
+    report_matrix.add_argument("--output", type=Path, required=True)
+    derive_soak = sub.add_parser(
+        "derive-soak", help="build a two-minute soak config from observed AIMD bounds"
+    )
+    derive_soak.add_argument("source_config", type=Path)
+    derive_soak.add_argument("controller_summary", type=Path)
+    derive_soak.add_argument("--output", type=Path, required=True)
+    derive_soak.add_argument("--fallback-rps", type=float)
+    digitalocean = sub.add_parser(
+        "report-digitalocean-summary",
+        help="render a clean atlas from a sanitized DigitalOcean direct summary package",
+    )
+    digitalocean.add_argument("summary_dir", type=Path)
+    digitalocean.add_argument("--output", type=Path, required=True)
+    digitalocean.add_argument("--capacity-source", required=True)
+    digitalocean.add_argument("--soak-source", required=True)
+    digitalocean.add_argument(
+        "--exclude-endpoint",
+        action="append",
+        default=[],
+        help="omit one exact endpoint identifier from every atlas panel; repeat as needed",
+    )
+    closure = sub.add_parser(
+        "plan-digitalocean-closure",
+        help="compile the credential-free six-hour DigitalOcean gap-closure package",
+    )
+    closure.add_argument("base_config", type=Path)
+    closure.add_argument("summary_dir", type=Path)
+    closure.add_argument("--output", type=Path, required=True)
+    closure.add_argument(
+        "--capacity-source", default="do-combined-capacity-20260828"
+    )
+    closure.add_argument(
+        "--fixed-rate-source", default="do-direct-soak-20260823-r1"
+    )
     return parser
+
+
+def _apply_live_overrides(config: CampaignConfig, args: argparse.Namespace) -> CampaignConfig:
+    """Apply the shared plan/run scope and guard overrides exactly once."""
+
+    if args.only_suite:
+        if args.only_suite not in config.suites:
+            raise ValueError(f"suite is not configured: {args.only_suite}")
+        config = replace(config, suites={args.only_suite: config.suites[args.only_suite]})
+    if args.max_wall_seconds is not None:
+        if args.max_wall_seconds <= 0:
+            raise ValueError("--max-wall-seconds must be positive")
+        config = replace(config, max_wall_seconds=args.max_wall_seconds)
+    if args.max_cost_usd is not None:
+        if args.max_cost_usd <= 0:
+            raise ValueError("--max-cost-usd must be positive")
+        config = replace(config, max_cost_usd=args.max_cost_usd)
+    return config
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -653,16 +1168,73 @@ def main(argv: list[str] | None = None) -> int:
         config = load_config(args.config)
         print(json.dumps(build_plan(config).to_dict(), indent=2, sort_keys=True))
         return 0
+    if args.command == "plan-matrix":
+        print(json.dumps(matrix_plan(load_matrix(args.matrix)), indent=2, sort_keys=True))
+        return 0
     if args.command == "run":
         if not args.confirm_live:
             print("refusing live traffic without --confirm-live", file=sys.stderr)
             return 2
-        config = load_config(args.config)
+        config = _apply_live_overrides(load_config(args.config), args)
         raw_argv = tuple(sys.argv if argv is None else ("inference-bench", *argv))
         asyncio.run(run_campaign(config, args.output, invocation=raw_argv))
         return 0
+    if args.command == "run-matrix":
+        if not args.confirm_live:
+            print("refusing live traffic without --confirm-live", file=sys.stderr)
+            return 2
+        raw_argv = tuple(sys.argv if argv is None else ("inference-bench", *argv))
+
+        async def matrix_runner(
+            config: CampaignConfig, output: Path, invocation: tuple[str, ...]
+        ) -> None:
+            await run_campaign(config, output, invocation=invocation)
+
+        asyncio.run(
+            run_matrix(
+                load_matrix(args.matrix),
+                args.output_root,
+                matrix_runner,
+                invocation=raw_argv,
+            )
+        )
+        return 0
     if args.command == "report":
         print(generate_report(args.run_dir))
+        return 0
+    if args.command == "report-matrix":
+        print(generate_atlas(load_matrix(args.matrix), args.run_root, args.output))
+        return 0
+    if args.command == "derive-soak":
+        print(
+            derive_soak_config(
+                args.source_config,
+                args.controller_summary,
+                args.output,
+                fallback_rps=args.fallback_rps,
+            )
+        )
+        return 0
+    if args.command == "report-digitalocean-summary":
+        print(
+            generate_digitalocean_atlas(
+                args.summary_dir,
+                args.output,
+                capacity_source=args.capacity_source,
+                soak_source=args.soak_source,
+                exclude_endpoints=tuple(args.exclude_endpoint),
+            )
+        )
+        return 0
+    if args.command == "plan-digitalocean-closure":
+        config_path, manifest_path = build_digitalocean_closure_package(
+            args.base_config,
+            args.summary_dir,
+            args.output,
+            capacity_source=args.capacity_source,
+            fixed_rate_source=args.fixed_rate_source,
+        )
+        print(json.dumps({"config": str(config_path), "plan": str(manifest_path)}))
         return 0
     raise AssertionError("unreachable")
 

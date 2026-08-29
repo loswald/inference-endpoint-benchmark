@@ -18,6 +18,7 @@ from inference_bench.workloads import (
     plan_context,
     plan_interactions,
     plan_latency,
+    plan_output,
     shape_spec,
 )
 
@@ -111,14 +112,57 @@ def test_context_plan_is_lazy_and_retrieval_aware(route) -> None:
     assert "BEGIN_MARKER" in message and "MIDDLE_MARKER" in message and "END_MARKER" in message
 
 
+def test_common_shape_omits_optional_sampling_controls(route) -> None:
+    spec = shape_spec(route, "short_short", "baseline", suite="latency", seed=1)
+    assert spec.temperature is None
+    assert spec.top_p is None
+    assert spec.seed is None
+
+
 def test_unverified_capability_parameters_are_acceptance_only(route) -> None:
     specs = plan_capability(route, {}, seed=1)
     acceptance = [spec for spec in specs if spec.cell_id.startswith("parameter_acceptance_only_")]
-    assert len(acceptance) == 16
+    assert len(acceptance) == 13
     assert {spec.metadata["capability_evidence_scope"] for spec in acceptance} == {
         "parameter_acceptance_only"
     }
     assert all("feature_behavior_unverified_reason" in spec.metadata for spec in acceptance)
+
+
+def test_every_capacity_shape_has_predeclared_quality(route) -> None:
+    specs = [
+        shape_spec(route, shape, f"quality-{shape}-{index}", suite="load", seed=1)
+        for index, shape in enumerate(("short_short", "long_short", "short_long"))
+    ]
+    assert [spec.metadata["quality"] for spec in specs] == [
+        "exact",
+        "context_markers",
+        "longform_completion",
+    ]
+    structured = next(
+        shape_spec(route, "mixed", f"quality-mixed-{index}", suite="load", seed=1)
+        for index in range(100)
+        if int(hashlib.sha256(f"quality-mixed-{index}".encode()).hexdigest(), 16) % 4 == 3
+    )
+    assert structured.metadata["quality"] == "json_keys"
+    assert structured.metadata["expected_keys"] == ["summary", "risks"]
+
+
+def test_output_plan_separates_realized_generation_from_limit_acceptance(route) -> None:
+    large = replace(route, max_output_tokens=100_000)
+    specs = plan_output(large, {"realized_generation_ceiling": 8_192}, seed=1)
+    realized = [
+        spec for spec in specs if spec.metadata["output_evidence_scope"] == "realized_generation"
+    ]
+    acceptance = [
+        spec
+        for spec in specs
+        if spec.metadata["output_evidence_scope"] == "requested_limit_acceptance_only"
+    ]
+    assert max(spec.max_output_tokens for spec in realized) == 8_192
+    assert {spec.max_output_tokens for spec in acceptance} == {90_000, 100_000, 100_001}
+    assert all(spec.metadata["quality"] == "longform_completion" for spec in realized)
+    assert all(spec.metadata["quality"] == "exact" for spec in acceptance)
 
 
 def test_nominal_above_context_target_never_claims_expected_rejection(route) -> None:
@@ -140,6 +184,36 @@ def test_cache_trials_are_stratified(route) -> None:
     assert cached[0].messages[0]["content"] == cached[1].messages[0]["content"]
     uncached = [spec for spec in specs if spec.cell_id.startswith("uncached_trial:")]
     assert uncached[0].messages[0]["content"] != uncached[1].messages[0]["content"]
+
+
+def test_context_fixed_anchors_cover_undocumented_windows(route) -> None:
+    undocumented = replace(route, context_tokens=None, max_output_tokens=None)
+    specs = plan_context(
+        undocumented,
+        {"percentages": [], "fixed_tokens": [1_024, 32_768, 100_000]},
+        seed=2,
+    )
+    assert [spec.planned_input_tokens for spec in specs] == [1_024, 32_768, 100_000]
+    assert all(spec.metadata["context_anchor_basis"] == "fixed_token_anchor" for spec in specs)
+
+    long_input = shape_spec(
+        undocumented,
+        "long_short",
+        "undocumented-long-input",
+        suite="load",
+        shape_config={"long_input_tokens": 100_000, "long_input_overflow": "fail"},
+    )
+    assert long_input.planned_input_tokens == 100_000
+    assert long_input.metadata["route_limit_documented"] is False
+    long_output = shape_spec(
+        undocumented,
+        "short_long",
+        "undocumented-long-output",
+        suite="load",
+        shape_config={"long_output_tokens": 8_192, "long_output_overflow": "fail"},
+    )
+    assert long_output.max_output_tokens == 8_192
+    assert long_output.metadata["route_limit_documented"] is False
 
 
 def test_long_shape_targets_are_explicit_and_fail_or_clip_against_route_limits(route) -> None:
@@ -242,3 +316,27 @@ def test_long_shape_targets_are_explicit_and_fail_or_clip_against_route_limits(r
         (100_000, 128),
         (256, 32_768),
     ]
+
+
+def test_long_shape_targets_can_be_route_specific(route) -> None:
+    large = replace(route, id="large", context_tokens=131_072, max_output_tokens=65_536)
+    config = {
+        "long_input_tokens": 4_096,
+        "long_input_tokens_by_route": {"large": 100_000},
+        "long_input_overflow": "clip",
+        "long_output_tokens": 4_096,
+        "long_output_tokens_by_route": {"large": 32_768},
+        "long_output_overflow": "clip",
+    }
+    assert shape_spec(
+        large, "long_short", "large-input", suite="load", shape_config=config
+    ).planned_input_tokens == 100_000
+    assert shape_spec(
+        route, "long_short", "small-input", suite="load", shape_config=config
+    ).planned_input_tokens == 4_096
+    assert shape_spec(
+        large, "short_long", "large-output", suite="load", shape_config=config
+    ).max_output_tokens == 32_768
+    assert shape_spec(
+        route, "short_long", "small-output", suite="load", shape_config=config
+    ).max_output_tokens == 2_048

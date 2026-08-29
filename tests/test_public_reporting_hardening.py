@@ -121,6 +121,8 @@ def _epoch_rows(epoch_id: str, *, complete: bool = True) -> list[dict[str, objec
             "usage_eligible": int(complete or index == 0),
             "input_tokens": 100 if complete or index == 0 else None,
             "output_tokens": 20 if complete or index == 0 else None,
+            "quality_eligible": 1,
+            "quality_score": 1.0 if index == 0 else 0.0,
         }
         for index in range(2)
     ]
@@ -149,6 +151,10 @@ def test_load_report_uses_drain_time_block_cis_and_verified_usage() -> None:
     assert result["completion_rate"] == pytest.approx(2 / 30)
     assert result["physical_attempt_success_rate"] == pytest.approx(2 / 3)
     assert result["tpm_reporting_state"] == "complete"
+    assert result["quality_reporting_state"] == "complete"
+    assert result["quality_mean"] == pytest.approx(0.5)
+    assert result["quality_adjusted_rpm"] == pytest.approx(1.0)
+    assert result["quality_mean_n"] == 4
 
 
 def test_achieved_rate_denominator_never_undercuts_arrival_window() -> None:

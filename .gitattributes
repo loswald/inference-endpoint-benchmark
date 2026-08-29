@@ -1,4 +1,8 @@
-* text=auto eol=lf
-*.png binary
-*.sqlite3 binary
-
+*.pdf binary
+published/digitalocean-final-report/**/*.csv text eol=lf
+published/digitalocean-final-report/**/*.json text eol=lf
+published/digitalocean-final-report/**/*.md text eol=lf
+published/digitalocean-final-report/**/*.png binary
+reports/digitalocean/*.csv text eol=lf
+reports/digitalocean/*.json text eol=lf
+reports/digitalocean/*.md text eol=lf

@@ -131,6 +131,14 @@ def soak_rate_rps(config: dict[str, Any], route_id: str, shape: str) -> float:
     return float(by_route.get(route_id, config.get("rate_rps", 0.25)))
 
 
+def aimd_max_rps(config: dict[str, Any], shape: str) -> float | None:
+    """Resolve a shape-specific AIMD ceiling without conflating RPM and TPM stress."""
+    by_shape = config.get("max_rps_by_shape") or {}
+    if shape in by_shape:
+        return float(by_shape[shape])
+    return float(config["max_rps"]) if "max_rps" in config else None
+
+
 def validate_aimd_config(config: dict[str, Any], default_concurrency: int) -> None:
     epochs = _strict_positive_int(config.get("epochs", 12), "aimd.epochs")
     _strict_positive_float(config.get("epoch_seconds", 20), "aimd.epoch_seconds")
@@ -151,10 +159,25 @@ def validate_aimd_config(config: dict[str, Any], default_concurrency: int) -> No
     )
     if bracket_epochs and bracket_multiplier <= 1:
         raise ValueError("aimd.bracket_multiplier must exceed 1 when bracketing is enabled")
+    max_rps: float | None = None
     if "max_rps" in config:
         max_rps = _strict_positive_float(config["max_rps"], "aimd.max_rps")
         if max_rps < initial_rps:
             raise ValueError("aimd.max_rps must be at least aimd.initial_rps")
+    by_shape = config.get("max_rps_by_shape") or {}
+    if not isinstance(by_shape, dict):
+        raise ValueError("aimd.max_rps_by_shape must be a mapping")
+    unknown_shapes = set(by_shape) - {"short_short", "long_short", "short_long", "mixed"}
+    if unknown_shapes:
+        raise ValueError(
+            "aimd.max_rps_by_shape has unknown shapes: " + ", ".join(sorted(unknown_shapes))
+        )
+    for shape, value in by_shape.items():
+        ceiling = _strict_positive_float(value, f"aimd.max_rps_by_shape.{shape}")
+        if ceiling < initial_rps:
+            raise ValueError(
+                f"aimd.max_rps_by_shape.{shape} must be at least aimd.initial_rps"
+            )
     _strict_positive_int(config.get("concurrency", default_concurrency), "aimd.concurrency")
     if "baseline_rps" in config:
         _strict_positive_float(config["baseline_rps"], "aimd.baseline_rps")
@@ -163,6 +186,27 @@ def validate_aimd_config(config: dict[str, Any], default_concurrency: int) -> No
     )
     if samples < MIN_BASELINE_SAMPLES:
         raise ValueError(f"aimd.baseline_samples must be at least {MIN_BASELINE_SAMPLES}")
+    _strict_positive_int(config.get("baseline_attempts", 3), "aimd.baseline_attempts")
+    baseline_decrease = _strict_positive_float(
+        config.get("baseline_multiplicative_decrease", 0.5),
+        "aimd.baseline_multiplicative_decrease",
+    )
+    if not 0 < baseline_decrease <= 1:
+        raise ValueError("aimd.baseline_multiplicative_decrease must lie in (0, 1]")
+    _strict_positive_int(config.get("confirmation_max_stages", 4), "aimd.confirmation_max_stages")
+    _strict_positive_int(
+        config.get("confirmation_separator_samples", samples),
+        "aimd.confirmation_separator_samples",
+    )
+    confirmation_decrease = _strict_positive_float(
+        config.get("confirmation_multiplicative_decrease", decrease),
+        "aimd.confirmation_multiplicative_decrease",
+    )
+    if not 0 < confirmation_decrease < 1:
+        raise ValueError("aimd.confirmation_multiplicative_decrease must lie in (0, 1)")
+    minimum_rps = _strict_positive_float(config.get("minimum_rps", 0.01), "aimd.minimum_rps")
+    if max_rps is not None and minimum_rps > max_rps:
+        raise ValueError("aimd.minimum_rps must not exceed aimd.max_rps")
 
 
 def validate_soak_config(config: dict[str, Any], default_concurrency: int) -> None:
@@ -176,6 +220,21 @@ def validate_soak_config(config: dict[str, Any], default_concurrency: int) -> No
     )
     if samples < MIN_BASELINE_SAMPLES:
         raise ValueError(f"soak.baseline_samples must be at least {MIN_BASELINE_SAMPLES}")
+    _strict_positive_int(config.get("baseline_attempts", 3), "soak.baseline_attempts")
+    baseline_decrease = _strict_positive_float(
+        config.get("baseline_multiplicative_decrease", 0.5),
+        "soak.baseline_multiplicative_decrease",
+    )
+    if not 0 < baseline_decrease <= 1:
+        raise ValueError("soak.baseline_multiplicative_decrease must lie in (0, 1]")
+    _strict_positive_int(config.get("max_rate_stages", 4), "soak.max_rate_stages")
+    rate_decrease = _strict_positive_float(
+        config.get("rate_multiplicative_decrease", 0.5),
+        "soak.rate_multiplicative_decrease",
+    )
+    if not 0 < rate_decrease < 1:
+        raise ValueError("soak.rate_multiplicative_decrease must lie in (0, 1)")
+    _strict_positive_float(config.get("minimum_rps", 0.01), "soak.minimum_rps")
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,6 +273,56 @@ class EpochSummary:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+class LoadRunResult(list[EpochSummary]):
+    """Epoch summaries plus a non-terminal scheduling-pause signal.
+
+    A panel-boundary pause is deliberately not written as controller evidence: it is neither a
+    failed experiment nor a campaign guard. The same controller call can replay completed epoch
+    summaries from the immutable ledger and continue with the first unstarted phase in a later
+    scheduling interval.
+    """
+
+    def __init__(
+        self,
+        values: list[EpochSummary] | None = None,
+        *,
+        paused_for_window: bool = False,
+    ) -> None:
+        super().__init__(values or [])
+        self.paused_for_window = paused_for_window
+
+
+def _monotonic_time() -> float:
+    return asyncio.get_running_loop().time()
+
+
+def _phase_fits_before(
+    engine: BenchmarkEngine,
+    route: RouteConfig,
+    *,
+    epoch_id: str,
+    arrival_window_seconds: float,
+    not_after_monotonic: float | None,
+) -> bool:
+    """Return whether a new provider-bearing phase can drain before a local guard.
+
+    Completed phases are safe to restore because ``run_open_loop_epoch`` returns their immutable
+    summary without a provider call. For a new phase, the registered arrival window and the
+    route's full-stream request timeout form the conservative drain bound.
+    """
+
+    if engine.ledger.event_by_key(f"load_epoch:{epoch_id}") is not None:
+        return True
+    if not_after_monotonic is None:
+        return True
+    now = _monotonic_time()
+    return now + arrival_window_seconds + route.request_timeout_seconds <= not_after_monotonic
+
+
+def _paused_result(values: list[EpochSummary]) -> LoadRunResult:
+    return LoadRunResult(values, paused_for_window=True)
 
 
 _RETRYABLE_STATUSES = {"rate_limited", "server_error", "timeout", "transport_error"}
@@ -288,6 +397,12 @@ def _build_epoch_summary(
     p95_ttft = quantile(ttfts, 0.95) if ttfts else None
     p95_service = quantile(services, 0.95) if services else None
     p95_total = quantile(arrivals, 0.95) if arrivals else None
+    queue_delays = [
+        float(row["queue_delay_seconds"])
+        for row in final_rows
+        if row["queue_delay_seconds"] is not None
+    ]
+    p95_queue_delay = quantile(queue_delays, 0.95) if queue_delays else None
     healthy = bool(
         completed
         and stop_reason is None
@@ -297,7 +412,13 @@ def _build_epoch_summary(
         and physical_count > 0
         and rate_limited / physical_count <= 0.01
         and (server_errors + timeouts + transport_errors) / physical_count <= 0.01
-        and queue_end <= max(1.0, duration_seconds * 0.1)
+        # Response drain after the registered arrival window is not queue growth. A slow final
+        # request may finish well after the window even when every arrival starts immediately.
+        # Coordinated-omission-safe congestion is instead detected from the measured delay between
+        # each registered arrival and admission through the independent concurrency ceiling.
+        and len(queue_delays) == logical_observed
+        and p95_queue_delay is not None
+        and p95_queue_delay <= max(1.0, duration_seconds * 0.1)
         and len(ttfts) == len(success)
         and len(arrivals) == len(success)
         and (
@@ -683,6 +804,99 @@ async def run_open_loop_epoch(
     return summary
 
 
+def adaptive_baseline_epoch_id(controller: str, route_id: str, shape: str, attempt: int) -> str:
+    base = f"{controller}-{route_id}-{shape}-baseline"
+    return base if attempt == 0 else f"{base}-attempt-{attempt}"
+
+
+def aimd_confirmation_epoch_id(route_id: str, shape: str, stage: int, index: int) -> str:
+    if stage == 0:
+        return f"aimd-{route_id}-{shape}-confirm-{index}"
+    return f"aimd-{route_id}-{shape}-confirm-stage-{stage}-{index}"
+
+
+def aimd_separator_epoch_id(route_id: str, shape: str, stage: int, index: int) -> str:
+    if stage == 0:
+        return f"aimd-{route_id}-{shape}-separator-{index}"
+    return f"aimd-{route_id}-{shape}-separator-stage-{stage}-{index}"
+
+
+def soak_block_epoch_id(route_id: str, shape: str, stage: int, block: int) -> str:
+    if stage == 0:
+        return f"soak-{route_id}-{shape}-block-{block}"
+    return f"soak-{route_id}-{shape}-stage-{stage}-block-{block}"
+
+
+async def _run_adaptive_baselines(
+    engine: BenchmarkEngine,
+    route: RouteConfig,
+    *,
+    controller: str,
+    phase: str,
+    shape: str,
+    config: dict[str, Any],
+    nominal_duration: float,
+    default_rps: float,
+    concurrency: int,
+    seed: int,
+    not_after_monotonic: float | None = None,
+) -> tuple[list[EpochSummary], EpochSummary | None, bool]:
+    """Repeat a low-load reference at progressively lower rates until it is healthy.
+
+    A single transport wobble must not erase an endpoint/shape cell.  Every attempt remains
+    visible as evidence, while only an eligible healthy attempt supplies latency thresholds.
+    """
+
+    samples, initial_duration, initial_rate = baseline_design(
+        config, nominal_duration, default_rps=default_rps
+    )
+    attempts = int(config.get("baseline_attempts", 3))
+    decrease = float(config.get("baseline_multiplicative_decrease", 0.5))
+    minimum_rps = float(config.get("minimum_rps", 0.01))
+    summaries: list[EpochSummary] = []
+    for attempt in range(attempts):
+        rate = max(minimum_rps, initial_rate * decrease**attempt)
+        duration = max(initial_duration, samples / rate)
+        epoch_id = adaptive_baseline_epoch_id(controller, route.id, shape, attempt)
+        if not _phase_fits_before(
+            engine,
+            route,
+            epoch_id=epoch_id,
+            arrival_window_seconds=duration,
+            not_after_monotonic=not_after_monotonic,
+        ):
+            return summaries, None, True
+        summary = await run_open_loop_epoch(
+            engine,
+            route,
+            shape=shape,
+            epoch_id=epoch_id,
+            phase=phase,
+            offered_rps=samples / duration,
+            duration_seconds=duration,
+            concurrency=concurrency,
+            seed=seed - 1 - attempt,
+            shape_config=config,
+            deterministic_scheduled_count=samples,
+        )
+        summaries.append(summary)
+        if summary.launch_guard_triggered:
+            break
+        if summary.controller_eligible and summary.healthy:
+            for unused_attempt in range(attempt + 1, attempts):
+                with suppress(KeyError):
+                    unused_id = adaptive_baseline_epoch_id(
+                        controller, route.id, shape, unused_attempt
+                    )
+                    engine.ledger.mark_plan_cell(
+                        f"load_epoch:{unused_id}",
+                        "not_applicable",
+                        "healthy_baseline_already_established",
+                    )
+            return summaries, summary, False
+    return summaries, None, False
+
+
 async def run_aimd(
     engine: BenchmarkEngine,
     route: RouteConfig,
@@ -690,7 +904,8 @@ async def run_aimd(
     config: dict[str, Any],
     *,
     seed: int,
-) -> list[EpochSummary]:
+    not_after_monotonic: float | None = None,
+) -> LoadRunResult:
     validate_aimd_config(config, engine.config.concurrency)
     epochs = int(config.get("epochs", 12))
     duration = float(config.get("epoch_seconds", 20))
@@ -699,27 +914,32 @@ async def run_aimd(
     decrease = float(config.get("multiplicative_decrease", 0.5))
     bracket_epochs = int(config.get("bracket_epochs", min(6, epochs)))
     bracket_multiplier = float(config.get("bracket_multiplier", 2.0))
-    max_rps = float(config["max_rps"]) if "max_rps" in config else None
+    max_rps = aimd_max_rps(config, shape)
     ceiling = int(config.get("concurrency", engine.config.concurrency))
-    baseline_samples, baseline_duration, baseline_rate = baseline_design(
-        config, duration, default_rps=min(rate, 0.1)
-    )
-    baseline = await run_open_loop_epoch(
+    confirmation_max_stages = int(config.get("confirmation_max_stages", 4))
+    confirmation_decrease = float(config.get("confirmation_multiplicative_decrease", decrease))
+    minimum_rps = float(config.get("minimum_rps", 0.01))
+    baseline_attempts, baseline, paused = await _run_adaptive_baselines(
         engine,
         route,
-        shape=shape,
-        epoch_id=f"aimd-{route.id}-{shape}-baseline",
+        controller="aimd",
         phase="baseline",
-        offered_rps=baseline_rate,
-        duration_seconds=baseline_duration,
+        shape=shape,
+        config=config,
+        nominal_duration=duration,
+        default_rps=min(rate, 0.5),
         concurrency=ceiling,
-        seed=seed - 1,
-        shape_config=config,
-        deterministic_scheduled_count=baseline_samples,
+        seed=seed,
+        not_after_monotonic=not_after_monotonic,
     )
-    results: list[EpochSummary] = [baseline]
-    if baseline.launch_guard_triggered:
-        reason = baseline.launch_guard_reason or "launch_guard"
+    results = LoadRunResult(list(baseline_attempts))
+    if paused:
+        return _paused_result(results)
+    baseline_guard = next(
+        (summary for summary in baseline_attempts if summary.launch_guard_triggered), None
+    )
+    if baseline_guard is not None:
+        reason = baseline_guard.launch_guard_reason or "launch_guard"
         engine.ledger.record_event_once(
             f"aimd_controller_censored:{route.id}:{shape}",
             "aimd_controller_censored",
@@ -727,24 +947,33 @@ async def run_aimd(
                 "route_id": route.id,
                 "shape": shape,
                 "reason": reason,
-                "source_epoch_id": baseline.epoch_id,
+                "source_epoch_id": baseline_guard.epoch_id,
             },
         )
         downstream = [f"aimd-{route.id}-{shape}-{index:03d}" for index in range(epochs)]
         downstream.extend(
-            f"aimd-{route.id}-{shape}-confirm-{confirmation}" for confirmation in range(3)
+            aimd_confirmation_epoch_id(route.id, shape, stage, confirmation)
+            for stage in range(confirmation_max_stages)
+            for confirmation in range(3)
         )
         downstream.extend(
-            f"aimd-{route.id}-{shape}-separator-{separator}" for separator in range(2)
+            aimd_separator_epoch_id(route.id, shape, stage, separator)
+            for stage in range(confirmation_max_stages)
+            for separator in range(2)
         )
         downstream.append(f"aimd-{route.id}-{shape}-recovery")
         _censor_unstarted_load_cells(engine, downstream, reason)
         return results
-    if not baseline.controller_eligible or not baseline.healthy:
+    if baseline is None:
+        last_baseline = baseline_attempts[-1]
+        all_measured_unhealthy = all(
+            item.controller_eligible and not item.launch_guard_triggered and not item.healthy
+            for item in baseline_attempts
+        )
         reason = (
-            baseline.scientific_censor_reason
-            if not baseline.controller_eligible
-            else "unhealthy_low_load_baseline"
+            "measured_unhealthy_at_all_baseline_rates"
+            if all_measured_unhealthy
+            else last_baseline.scientific_censor_reason or "baseline_attempts_inconclusive"
         )
         engine.ledger.record_event_once(
             f"aimd_controller_censored:{route.id}:{shape}",
@@ -753,19 +982,61 @@ async def run_aimd(
                 "route_id": route.id,
                 "shape": shape,
                 "reason": reason,
-                "source_epoch_id": baseline.epoch_id,
+                "source_epoch_id": last_baseline.epoch_id,
             },
         )
         downstream = [f"aimd-{route.id}-{shape}-{index:03d}" for index in range(epochs)]
         downstream.extend(
-            f"aimd-{route.id}-{shape}-confirm-{confirmation}" for confirmation in range(3)
+            aimd_confirmation_epoch_id(route.id, shape, stage, confirmation)
+            for stage in range(confirmation_max_stages)
+            for confirmation in range(3)
         )
         downstream.extend(
-            f"aimd-{route.id}-{shape}-separator-{separator}" for separator in range(2)
+            aimd_separator_epoch_id(route.id, shape, stage, separator)
+            for stage in range(confirmation_max_stages)
+            for separator in range(2)
         )
         downstream.append(f"aimd-{route.id}-{shape}-recovery")
-        _censor_unstarted_load_cells(engine, downstream, reason)
+        if all_measured_unhealthy:
+            for epoch_id in downstream:
+                with suppress(KeyError):
+                    engine.ledger.mark_plan_cell(f"load_epoch:{epoch_id}", "not_applicable", reason)
+            engine.ledger.record_event_once(
+                f"aimd_complete:{route.id}:{shape}",
+                "aimd_complete",
+                {
+                    "route_id": route.id,
+                    "shape": shape,
+                    "highest_observed_healthy_rps": None,
+                    "healthy_lower_bound_rps": None,
+                    "unhealthy_upper_bound_rps": baseline_attempts[-1].offered_rps,
+                    "overload_observed": True,
+                    "nonmonotonic_overload_observed": False,
+                    "capacity_bound_state": "left_censored_no_healthy_at_lowest_tested_rate",
+                    "controller_completion_state": "completed_no_healthy_at_lowest_tested_rate",
+                    "censor_reason": None,
+                    "confirmations_required": 0,
+                    "confirmation_stage": None,
+                    "confirmation_stage_history": [],
+                    "confirmation_healthy": [],
+                    "confirmation_eligible": [],
+                    "confirmation_censor_reasons": [],
+                    "confirmation_execution_complete": True,
+                    "confirmation_complete": True,
+                    "confirmation_all_healthy": False,
+                    "recovery_run": False,
+                    "recovery_healthy": None,
+                    "recovery_eligible": None,
+                    "recovery_censor_reason": None,
+                },
+            )
+        else:
+            _censor_unstarted_load_cells(engine, downstream, reason)
         return results
+    baseline_samples = baseline.scheduled
+    baseline_rate = baseline.offered_rps
+    separator_samples = int(config.get("confirmation_separator_samples", baseline_samples))
+    separator_duration = max(duration, separator_samples / baseline_rate)
     ttft_limit = None if baseline.p95_ttft_seconds is None else 2 * baseline.p95_ttft_seconds
     total_limit = None if baseline.p95_total_seconds is None else 2 * baseline.p95_total_seconds
     unhealthy_streak = 0
@@ -775,11 +1046,20 @@ async def run_aimd(
     nonmonotonic_overload_observed = False
     healthy_increases = 0
     for index in range(epochs):
+        epoch_id = f"aimd-{route.id}-{shape}-{index:03d}"
+        if not _phase_fits_before(
+            engine,
+            route,
+            epoch_id=epoch_id,
+            arrival_window_seconds=duration,
+            not_after_monotonic=not_after_monotonic,
+        ):
+            return _paused_result(results)
         summary = await run_open_loop_epoch(
             engine,
             route,
             shape=shape,
-            epoch_id=f"aimd-{route.id}-{shape}-{index:03d}",
+            epoch_id=epoch_id,
             phase="aimd",
             offered_rps=rate,
             duration_seconds=duration,
@@ -833,10 +1113,14 @@ async def run_aimd(
     if ramp_guard is not None:
         reason = ramp_guard.launch_guard_reason or "launch_guard"
         downstream = [
-            f"aimd-{route.id}-{shape}-confirm-{confirmation}" for confirmation in range(3)
+            aimd_confirmation_epoch_id(route.id, shape, stage, confirmation)
+            for stage in range(confirmation_max_stages)
+            for confirmation in range(3)
         ]
         downstream.extend(
-            f"aimd-{route.id}-{shape}-separator-{separator}" for separator in range(2)
+            aimd_separator_epoch_id(route.id, shape, stage, separator)
+            for stage in range(confirmation_max_stages)
+            for separator in range(2)
         )
         downstream.append(f"aimd-{route.id}-{shape}-recovery")
         _censor_unstarted_load_cells(engine, downstream, reason)
@@ -869,201 +1153,263 @@ async def run_aimd(
         )
         return results
 
-    # Three separated confirmations are explicit; they are not silently inferred from ramp epochs.
-    if best_healthy <= 0:
-        reason = "no_healthy_capacity_candidate_observed"
-        downstream = [
-            f"aimd-{route.id}-{shape}-confirm-{confirmation}" for confirmation in range(3)
-        ]
-        downstream.extend(
-            f"aimd-{route.id}-{shape}-separator-{separator}" for separator in range(2)
-        )
-        downstream.append(f"aimd-{route.id}-{shape}-recovery")
-        _censor_unstarted_load_cells(engine, downstream, reason)
-        engine.ledger.record_event_once(
-            f"aimd_complete:{route.id}:{shape}",
-            "aimd_complete",
-            {
-                "route_id": route.id,
-                "shape": shape,
-                "highest_observed_healthy_rps": None,
-                "healthy_lower_bound_rps": None,
-                "unhealthy_upper_bound_rps": unhealthy_upper_bound_rps,
-                "overload_observed": overload_observed,
-                "nonmonotonic_overload_observed": nonmonotonic_overload_observed,
-                "capacity_bound_state": "left_censored_no_healthy_candidate",
-                "controller_completion_state": "left_censored_no_healthy_candidate",
-                "censor_reason": None,
-                "confirmations_required": 3,
-                "confirmation_healthy": [],
-                "confirmation_eligible": [],
-                "confirmation_censor_reasons": [],
-                "confirmation_execution_complete": False,
-                "confirmation_complete": False,
-                "confirmation_all_healthy": None,
-                "recovery_run": False,
-                "recovery_healthy": None,
-                "recovery_eligible": None,
-                "recovery_censor_reason": None,
-            },
-        )
-        return results
-    if best_healthy > 0:
+    # Confirm the best ramp observation.  If it does not reproduce, step down and repeat the
+    # entire three-epoch separated confirmation.  A ramp with no healthy point is not abandoned:
+    # the configured floor is tested so the result becomes a measured negative rather than blank.
+    candidate_rate = max(minimum_rps, best_healthy or minimum_rps)
+    confirmation_history: list[dict[str, Any]] = []
+    selected_confirmations: list[EpochSummary] = []
+    selected_confirmation_stage: int | None = None
+    accepted_rate: float | None = None
+    guarded: EpochSummary | None = None
+    reached_unhealthy_floor = False
+    for stage in range(confirmation_max_stages):
+        stage_confirmations: list[EpochSummary] = []
         for confirmation in range(3):
-            results.append(
-                await run_open_loop_epoch(
-                    engine,
-                    route,
-                    shape=shape,
-                    epoch_id=f"aimd-{route.id}-{shape}-confirm-{confirmation}",
-                    phase="confirmation",
-                    offered_rps=best_healthy,
-                    duration_seconds=duration,
-                    concurrency=ceiling,
-                    seed=seed + confirmation + 1,
-                    shape_config=config,
-                    max_p95_ttft_seconds=ttft_limit,
-                    max_p95_total_seconds=total_limit,
-                )
+            confirmation_id = aimd_confirmation_epoch_id(
+                route.id, shape, stage, confirmation
             )
-            if results[-1].launch_guard_triggered:
+            if not _phase_fits_before(
+                engine,
+                route,
+                epoch_id=confirmation_id,
+                arrival_window_seconds=duration,
+                not_after_monotonic=not_after_monotonic,
+            ):
+                return _paused_result(results)
+            summary = await run_open_loop_epoch(
+                engine,
+                route,
+                shape=shape,
+                epoch_id=confirmation_id,
+                phase="confirmation",
+                offered_rps=candidate_rate,
+                duration_seconds=duration,
+                concurrency=ceiling,
+                seed=seed + stage * 1000 + confirmation + 1,
+                shape_config=config,
+                max_p95_ttft_seconds=ttft_limit,
+                max_p95_total_seconds=total_limit,
+            )
+            results.append(summary)
+            stage_confirmations.append(summary)
+            if summary.launch_guard_triggered:
+                guarded = summary
                 break
-            if confirmation < 2 and not results[-1].launch_guard_triggered:
-                # A low-load separator makes confirmations distinct observations rather than one
-                # contiguous long epoch cut into three labels.
-                results.append(
-                    await run_open_loop_epoch(
-                        engine,
-                        route,
-                        shape=shape,
-                        epoch_id=f"aimd-{route.id}-{shape}-separator-{confirmation}",
-                        phase="confirmation_separator",
-                        offered_rps=baseline_rate,
-                        duration_seconds=baseline_duration,
-                        concurrency=ceiling,
-                        seed=seed + 50 + confirmation,
-                        shape_config=config,
-                        deterministic_scheduled_count=baseline_samples,
-                        max_p95_ttft_seconds=ttft_limit,
-                        max_p95_total_seconds=total_limit,
-                    )
+            if confirmation < 2:
+                separator_id = aimd_separator_epoch_id(
+                    route.id, shape, stage, confirmation
                 )
-        if overload_observed and not results[-1].launch_guard_triggered:
-            recovery_rate = max(0.01, best_healthy * 0.5)
-            results.append(
-                await run_open_loop_epoch(
+                if not _phase_fits_before(
+                    engine,
+                    route,
+                    epoch_id=separator_id,
+                    arrival_window_seconds=separator_duration,
+                    not_after_monotonic=not_after_monotonic,
+                ):
+                    return _paused_result(results)
+                separator = await run_open_loop_epoch(
                     engine,
                     route,
                     shape=shape,
-                    epoch_id=f"aimd-{route.id}-{shape}-recovery",
-                    phase="recovery_after_observed_overload",
-                    offered_rps=recovery_rate,
-                    duration_seconds=duration,
+                    epoch_id=separator_id,
+                    phase="confirmation_separator",
+                    offered_rps=separator_samples / separator_duration,
+                    duration_seconds=separator_duration,
                     concurrency=ceiling,
-                    seed=seed + 100,
+                    seed=seed + stage * 1000 + 50 + confirmation,
                     shape_config=config,
+                    deterministic_scheduled_count=separator_samples,
                     max_p95_ttft_seconds=ttft_limit,
                     max_p95_total_seconds=total_limit,
                 )
-            )
-        elif not overload_observed:
-            with suppress(KeyError):
-                engine.ledger.mark_plan_cell(
-                    f"load_epoch:aimd-{route.id}-{shape}-recovery",
-                    "not_applicable",
-                    "no_two_epoch_overload_observed",
-                )
-        confirmations = [epoch for epoch in results if epoch.phase == "confirmation"]
-        recovery_epochs = [
-            epoch for epoch in results if epoch.phase == "recovery_after_observed_overload"
-        ]
-        guarded = next((epoch for epoch in results if epoch.launch_guard_triggered), None)
-        confirmation_eligible = [
+                results.append(separator)
+                if separator.launch_guard_triggered:
+                    guarded = separator
+                    break
+        eligible = [
             epoch.controller_eligible and not epoch.launch_guard_triggered
-            for epoch in confirmations
+            for epoch in stage_confirmations
         ]
-        confirmation_execution_complete = len(confirmations) == 3
-        confirmation_complete = confirmation_execution_complete and all(confirmation_eligible)
-        confirmation_all_healthy = (
-            all(epoch.healthy for epoch in confirmations) if confirmation_complete else None
-        )
-        controller_completion_state = (
-            "campaign_guard_censored"
-            if guarded is not None
-            else "confirmations_inconclusive"
-            if not confirmation_complete
-            else "completed_confirmations_healthy"
-            if confirmation_all_healthy
-            else "completed_confirmations_unhealthy"
-        )
-        if nonmonotonic_overload_observed:
-            capacity_bound_state = "nonmonotonic_overload_no_current_bracket"
-            unhealthy_upper_bound_rps = None
-        elif unhealthy_upper_bound_rps is not None and unhealthy_upper_bound_rps > best_healthy:
-            capacity_bound_state = "bracketed_healthy_lower_unhealthy_upper"
-        elif overload_observed:
-            capacity_bound_state = "nonmonotonic_overload_no_current_bracket"
-        else:
-            capacity_bound_state = "right_censored_highest_tested_healthy_no_overload"
-        recovery = recovery_epochs[-1] if recovery_epochs else None
-        engine.ledger.record_event_once(
-            f"aimd_complete:{route.id}:{shape}",
-            "aimd_complete",
+        complete = len(stage_confirmations) == 3 and all(eligible)
+        all_healthy = all(epoch.healthy for epoch in stage_confirmations) if complete else None
+        confirmation_history.append(
             {
-                "route_id": route.id,
-                "shape": shape,
-                "highest_observed_healthy_rps": best_healthy,
-                "healthy_lower_bound_rps": best_healthy,
-                "unhealthy_upper_bound_rps": unhealthy_upper_bound_rps,
-                "overload_observed": overload_observed,
-                "nonmonotonic_overload_observed": nonmonotonic_overload_observed,
-                "capacity_bound_state": capacity_bound_state,
-                "controller_completion_state": controller_completion_state,
-                "censor_reason": (
-                    guarded.launch_guard_reason or "launch_guard" if guarded is not None else None
-                ),
-                "confirmations_required": 3,
-                "confirmation_healthy": [
-                    epoch.healthy if eligible else None
-                    for epoch, eligible in zip(confirmations, confirmation_eligible, strict=True)
-                ],
-                "confirmation_eligible": confirmation_eligible,
-                "confirmation_censor_reasons": [
-                    (
-                        epoch.launch_guard_reason
-                        or epoch.scientific_censor_reason
-                        or "launch_guard"
-                        if not eligible
-                        else None
-                    )
-                    for epoch, eligible in zip(confirmations, confirmation_eligible, strict=True)
-                ],
-                "confirmation_execution_complete": confirmation_execution_complete,
-                "confirmation_complete": confirmation_complete,
-                "confirmation_all_healthy": confirmation_all_healthy,
-                "recovery_run": bool(recovery_epochs),
-                "recovery_healthy": (
-                    recovery.healthy
-                    if recovery is not None
-                    and recovery.controller_eligible
-                    and not recovery.launch_guard_triggered
-                    else None
-                ),
-                "recovery_eligible": (
-                    recovery.controller_eligible and not recovery.launch_guard_triggered
-                    if recovery is not None
-                    else None
-                ),
-                "recovery_censor_reason": (
-                    recovery.launch_guard_reason
-                    or recovery.scientific_censor_reason
-                    or "launch_guard"
-                    if recovery is not None
-                    and (not recovery.controller_eligible or recovery.launch_guard_triggered)
-                    else None
-                ),
-            },
+                "stage": stage,
+                "rate_rps": candidate_rate,
+                "execution_complete": len(stage_confirmations) == 3,
+                "scientifically_complete": complete,
+                "healthy": all_healthy,
+            }
         )
+        selected_confirmations = stage_confirmations
+        selected_confirmation_stage = stage
+        if guarded is not None:
+            break
+        if complete and all_healthy:
+            accepted_rate = candidate_rate
+            best_healthy = max(best_healthy, candidate_rate)
+            break
+        if complete and all_healthy is False:
+            overload_observed = True
+            if unhealthy_upper_bound_rps is None or candidate_rate < unhealthy_upper_bound_rps:
+                unhealthy_upper_bound_rps = candidate_rate
+            next_rate = max(minimum_rps, candidate_rate * confirmation_decrease)
+            if next_rate >= candidate_rate:
+                reached_unhealthy_floor = True
+                break
+            candidate_rate = next_rate
+        # An interrupted/ineligible stage is retried at exactly the same rate with fresh IDs.
+
+    for stage in range((selected_confirmation_stage or 0) + 1, confirmation_max_stages):
+        for confirmation in range(3):
+            with suppress(KeyError):
+                confirmation_id = aimd_confirmation_epoch_id(route.id, shape, stage, confirmation)
+                engine.ledger.mark_plan_cell(
+                    f"load_epoch:{confirmation_id}",
+                    "not_applicable",
+                    "lower_rate_confirmation_not_needed",
+                )
+            if confirmation < 2:
+                with suppress(KeyError):
+                    separator_id = aimd_separator_epoch_id(route.id, shape, stage, confirmation)
+                    engine.ledger.mark_plan_cell(
+                        f"load_epoch:{separator_id}",
+                        "not_applicable",
+                        "lower_rate_confirmation_not_needed",
+                    )
+
+    recovery_epochs: list[EpochSummary] = []
+    if overload_observed and accepted_rate is not None and guarded is None:
+        recovery_rate = max(minimum_rps, accepted_rate * 0.5)
+        recovery_id = f"aimd-{route.id}-{shape}-recovery"
+        if not _phase_fits_before(
+            engine,
+            route,
+            epoch_id=recovery_id,
+            arrival_window_seconds=duration,
+            not_after_monotonic=not_after_monotonic,
+        ):
+            return _paused_result(results)
+        recovery = await run_open_loop_epoch(
+            engine,
+            route,
+            shape=shape,
+            epoch_id=recovery_id,
+            phase="recovery_after_observed_overload",
+            offered_rps=recovery_rate,
+            duration_seconds=duration,
+            concurrency=ceiling,
+            seed=seed + 100,
+            shape_config=config,
+            max_p95_ttft_seconds=ttft_limit,
+            max_p95_total_seconds=total_limit,
+        )
+        results.append(recovery)
+        recovery_epochs.append(recovery)
+        if recovery.launch_guard_triggered:
+            guarded = recovery
+    else:
+        with suppress(KeyError):
+            engine.ledger.mark_plan_cell(
+                f"load_epoch:aimd-{route.id}-{shape}-recovery",
+                "not_applicable",
+                "no_confirmed_rate_after_overload"
+                if overload_observed
+                else "no_two_epoch_overload_observed",
+            )
+
+    confirmation_eligible = [
+        epoch.controller_eligible and not epoch.launch_guard_triggered
+        for epoch in selected_confirmations
+    ]
+    confirmation_execution_complete = len(selected_confirmations) == 3
+    confirmation_complete = confirmation_execution_complete and all(confirmation_eligible)
+    confirmation_all_healthy = (
+        all(epoch.healthy for epoch in selected_confirmations) if confirmation_complete else None
+    )
+    if guarded is not None:
+        controller_completion_state = "campaign_guard_censored"
+    elif accepted_rate is not None:
+        controller_completion_state = "completed_confirmations_healthy"
+    elif reached_unhealthy_floor:
+        controller_completion_state = "completed_no_healthy_rate_at_floor"
+    else:
+        controller_completion_state = "confirmations_inconclusive_after_retries"
+
+    if accepted_rate is None:
+        capacity_bound_state = (
+            "left_censored_no_healthy_rate_at_floor"
+            if reached_unhealthy_floor
+            else "confirmation_attempts_inconclusive"
+        )
+    elif unhealthy_upper_bound_rps is not None and unhealthy_upper_bound_rps > accepted_rate:
+        capacity_bound_state = "bracketed_confirmed_healthy_lower_unhealthy_upper"
+    elif overload_observed:
+        capacity_bound_state = "confirmed_healthy_after_nonmonotonic_overload"
+    else:
+        capacity_bound_state = "right_censored_highest_tested_confirmed_healthy_no_overload"
+    recovery = recovery_epochs[-1] if recovery_epochs else None
+    engine.ledger.record_event_once(
+        f"aimd_complete:{route.id}:{shape}",
+        "aimd_complete",
+        {
+            "route_id": route.id,
+            "shape": shape,
+            "highest_observed_healthy_rps": best_healthy or None,
+            "healthy_lower_bound_rps": accepted_rate,
+            "unhealthy_upper_bound_rps": unhealthy_upper_bound_rps,
+            "overload_observed": overload_observed,
+            "nonmonotonic_overload_observed": nonmonotonic_overload_observed,
+            "capacity_bound_state": capacity_bound_state,
+            "controller_completion_state": controller_completion_state,
+            "censor_reason": (
+                guarded.launch_guard_reason or "launch_guard" if guarded is not None else None
+            ),
+            "confirmations_required": 3,
+            "confirmation_stage": selected_confirmation_stage,
+            "confirmation_stage_history": confirmation_history,
+            "confirmation_healthy": [
+                epoch.healthy if eligible else None
+                for epoch, eligible in zip(
+                    selected_confirmations, confirmation_eligible, strict=True
+                )
+            ],
+            "confirmation_eligible": confirmation_eligible,
+            "confirmation_censor_reasons": [
+                (
+                    epoch.launch_guard_reason or epoch.scientific_censor_reason or "launch_guard"
+                    if not eligible
+                    else None
+                )
+                for epoch, eligible in zip(
+                    selected_confirmations, confirmation_eligible, strict=True
+                )
+            ],
+            "confirmation_execution_complete": confirmation_execution_complete,
+            "confirmation_complete": confirmation_complete,
+            "confirmation_all_healthy": confirmation_all_healthy,
+            "recovery_run": bool(recovery_epochs),
+            "recovery_healthy": (
+                recovery.healthy
+                if recovery is not None
+                and recovery.controller_eligible
+                and not recovery.launch_guard_triggered
+                else None
+            ),
+            "recovery_eligible": (
+                recovery.controller_eligible and not recovery.launch_guard_triggered
+                if recovery is not None
+                else None
+            ),
+            "recovery_censor_reason": (
+                recovery.launch_guard_reason or recovery.scientific_censor_reason or "launch_guard"
+                if recovery is not None
+                and (not recovery.controller_eligible or recovery.launch_guard_triggered)
+                else None
+            ),
+        },
+    )
     return results
 
 
@@ -1074,7 +1420,8 @@ async def run_soak(
     config: dict[str, Any],
     *,
     seed: int,
-) -> list[EpochSummary]:
+    not_after_monotonic: float | None = None,
+) -> LoadRunResult:
     validate_soak_config(config, engine.config.concurrency)
     rate = soak_rate_rps(config, route.id, shape)
     if rate <= 0:
@@ -1082,25 +1429,28 @@ async def run_soak(
     blocks = int(config.get("blocks", 4))
     block_seconds = float(config.get("block_seconds", 30))
     ceiling = int(config.get("concurrency", engine.config.concurrency))
-    baseline_samples, baseline_duration, baseline_rate = baseline_design(
-        config, block_seconds, default_rps=min(rate, 0.1)
-    )
-    baseline = await run_open_loop_epoch(
+    baseline_attempts, baseline, paused = await _run_adaptive_baselines(
         engine,
         route,
-        shape=shape,
-        epoch_id=f"soak-{route.id}-{shape}-baseline",
+        controller="soak",
         phase="soak_baseline",
-        offered_rps=baseline_rate,
-        duration_seconds=baseline_duration,
+        shape=shape,
+        config=config,
+        nominal_duration=block_seconds,
+        default_rps=min(rate, 0.5),
         concurrency=ceiling,
-        seed=seed - 1,
-        shape_config=config,
-        deterministic_scheduled_count=baseline_samples,
+        seed=seed,
+        not_after_monotonic=not_after_monotonic,
     )
-    soak_blocks: list[EpochSummary] = []
-    if baseline.launch_guard_triggered:
-        reason = baseline.launch_guard_reason or "launch_guard"
+    results = LoadRunResult(list(baseline_attempts))
+    if paused:
+        return _paused_result(results)
+    baseline_guard = next(
+        (summary for summary in baseline_attempts if summary.launch_guard_triggered), None
+    )
+    max_rate_stages = int(config.get("max_rate_stages", 4))
+    if baseline_guard is not None:
+        reason = baseline_guard.launch_guard_reason or "launch_guard"
         engine.ledger.record_event_once(
             f"soak_controller_censored:{route.id}:{shape}",
             "soak_controller_censored",
@@ -1108,20 +1458,29 @@ async def run_soak(
                 "route_id": route.id,
                 "shape": shape,
                 "reason": reason,
-                "source_epoch_id": baseline.epoch_id,
+                "source_epoch_id": baseline_guard.epoch_id,
             },
         )
         _censor_unstarted_load_cells(
             engine,
-            [f"soak-{route.id}-{shape}-block-{block}" for block in range(blocks)],
+            [
+                soak_block_epoch_id(route.id, shape, stage, block)
+                for stage in range(max_rate_stages)
+                for block in range(blocks)
+            ],
             reason,
         )
-        return [baseline]
-    if not baseline.controller_eligible or not baseline.healthy:
+        return results
+    if baseline is None:
+        last_baseline = baseline_attempts[-1]
+        all_measured_unhealthy = all(
+            item.controller_eligible and not item.launch_guard_triggered and not item.healthy
+            for item in baseline_attempts
+        )
         reason = (
-            baseline.scientific_censor_reason
-            if not baseline.controller_eligible
-            else "unhealthy_low_load_baseline"
+            "measured_unhealthy_at_all_baseline_rates"
+            if all_measured_unhealthy
+            else last_baseline.scientific_censor_reason or "baseline_attempts_inconclusive"
         )
         engine.ledger.record_event_once(
             f"soak_controller_censored:{route.id}:{shape}",
@@ -1130,96 +1489,174 @@ async def run_soak(
                 "route_id": route.id,
                 "shape": shape,
                 "reason": reason,
-                "source_epoch_id": baseline.epoch_id,
+                "source_epoch_id": last_baseline.epoch_id,
             },
         )
-        _censor_unstarted_load_cells(
-            engine,
-            [f"soak-{route.id}-{shape}-block-{block}" for block in range(blocks)],
-            reason,
+        for stage in range(max_rate_stages):
+            for block in range(blocks):
+                with suppress(KeyError):
+                    engine.ledger.mark_plan_cell(
+                        f"load_epoch:{soak_block_epoch_id(route.id, shape, stage, block)}",
+                        "not_applicable" if all_measured_unhealthy else "inconclusive",
+                        reason,
+                    )
+        engine.ledger.record_event_once(
+            f"soak_complete:{route.id}:{shape}",
+            "soak_complete",
+            {
+                "route_id": route.id,
+                "shape": shape,
+                "requested_rate_rps": rate,
+                "rate_rps": None,
+                "blocks": blocks,
+                "completed_blocks": 0,
+                "block_eligible": [],
+                "block_healthy": [],
+                "block_censor_reasons": [],
+                "execution_complete": all_measured_unhealthy,
+                "scientifically_complete": all_measured_unhealthy,
+                "all_blocks_healthy": False if all_measured_unhealthy else None,
+                "rate_stage_history": [],
+                "controller_completion_state": (
+                    "completed_no_healthy_at_lowest_tested_rate"
+                    if all_measured_unhealthy
+                    else "baseline_attempts_inconclusive"
+                ),
+                "censor_reason": None if all_measured_unhealthy else reason,
+            },
         )
-        return [baseline]
+        return results
     ttft_limit = None if baseline.p95_ttft_seconds is None else 2 * baseline.p95_ttft_seconds
     total_limit = None if baseline.p95_total_seconds is None else 2 * baseline.p95_total_seconds
-    for block in range(blocks):
-        soak_blocks.append(
-            await run_open_loop_epoch(
+    rate_decrease = float(config.get("rate_multiplicative_decrease", 0.5))
+    minimum_rps = float(config.get("minimum_rps", 0.01))
+    candidate_rate = max(minimum_rps, rate)
+    selected_blocks: list[EpochSummary] = []
+    selected_stage: int | None = None
+    accepted_rate: float | None = None
+    guarded: EpochSummary | None = None
+    reached_unhealthy_floor = False
+    rate_stage_history: list[dict[str, Any]] = []
+    for stage in range(max_rate_stages):
+        stage_blocks: list[EpochSummary] = []
+        for block in range(blocks):
+            block_id = soak_block_epoch_id(route.id, shape, stage, block)
+            if not _phase_fits_before(
+                engine,
+                route,
+                epoch_id=block_id,
+                arrival_window_seconds=block_seconds,
+                not_after_monotonic=not_after_monotonic,
+            ):
+                return _paused_result(results)
+            summary = await run_open_loop_epoch(
                 engine,
                 route,
                 shape=shape,
-                epoch_id=f"soak-{route.id}-{shape}-block-{block}",
+                epoch_id=block_id,
                 phase="soak_block",
-                offered_rps=rate,
+                offered_rps=candidate_rate,
                 duration_seconds=block_seconds,
                 concurrency=ceiling,
-                seed=seed + block,
+                seed=seed + stage * 1000 + block,
                 shape_config=config,
                 max_p95_ttft_seconds=ttft_limit,
                 max_p95_total_seconds=total_limit,
             )
+            results.append(summary)
+            stage_blocks.append(summary)
+            if summary.launch_guard_triggered:
+                guarded = summary
+                break
+        eligible = [
+            block.controller_eligible and not block.launch_guard_triggered for block in stage_blocks
+        ]
+        scientifically_complete = len(stage_blocks) == blocks and all(eligible)
+        all_healthy = (
+            all(block.healthy for block in stage_blocks) if scientifically_complete else None
         )
-        if soak_blocks[-1].launch_guard_triggered:
+        rate_stage_history.append(
+            {
+                "stage": stage,
+                "rate_rps": candidate_rate,
+                "execution_complete": len(stage_blocks) == blocks,
+                "scientifically_complete": scientifically_complete,
+                "healthy": all_healthy,
+            }
+        )
+        selected_blocks = stage_blocks
+        selected_stage = stage
+        if guarded is not None:
             break
+        if scientifically_complete and all_healthy:
+            accepted_rate = candidate_rate
+            break
+        if scientifically_complete and all_healthy is False:
+            next_rate = max(minimum_rps, candidate_rate * rate_decrease)
+            if next_rate >= candidate_rate:
+                reached_unhealthy_floor = True
+                break
+            candidate_rate = next_rate
+        # Ineligible transport evidence is repeated at the same offered rate with fresh IDs.
+
+    for stage in range((selected_stage or 0) + 1, max_rate_stages):
+        for block in range(blocks):
+            with suppress(KeyError):
+                engine.ledger.mark_plan_cell(
+                    f"load_epoch:{soak_block_epoch_id(route.id, shape, stage, block)}",
+                    "not_applicable",
+                    "lower_rate_soak_not_needed",
+                )
+
+    block_eligible = [
+        block.controller_eligible and not block.launch_guard_triggered for block in selected_blocks
+    ]
+    execution_complete = len(selected_blocks) == blocks
+    scientifically_complete = execution_complete and all(block_eligible)
+    all_blocks_healthy = (
+        all(block.healthy for block in selected_blocks) if scientifically_complete else None
+    )
+    if guarded is not None:
+        controller_completion_state = "campaign_guard_censored"
+    elif accepted_rate is not None:
+        controller_completion_state = "completed_healthy"
+    elif reached_unhealthy_floor:
+        controller_completion_state = "completed_unhealthy_at_floor"
+    else:
+        controller_completion_state = "rate_stages_inconclusive_after_retries"
     engine.ledger.record_event_once(
         f"soak_complete:{route.id}:{shape}",
         "soak_complete",
         {
             "route_id": route.id,
             "shape": shape,
-            "rate_rps": rate,
+            "requested_rate_rps": rate,
+            "rate_rps": accepted_rate if accepted_rate is not None else candidate_rate,
+            "accepted_rate_rps": accepted_rate,
+            "rate_stage": selected_stage,
+            "rate_stage_history": rate_stage_history,
             "blocks": blocks,
-            "completed_blocks": len(soak_blocks),
-            "block_eligible": [
-                block.controller_eligible and not block.launch_guard_triggered
-                for block in soak_blocks
-            ],
+            "completed_blocks": len(selected_blocks),
+            "block_eligible": block_eligible,
             "block_healthy": [
                 block.healthy
                 if block.controller_eligible and not block.launch_guard_triggered
                 else None
-                for block in soak_blocks
+                for block in selected_blocks
             ],
             "block_censor_reasons": [
                 block.launch_guard_reason or block.scientific_censor_reason or "launch_guard"
                 if not block.controller_eligible or block.launch_guard_triggered
                 else None
-                for block in soak_blocks
+                for block in selected_blocks
             ],
-            "execution_complete": len(soak_blocks) == blocks,
-            "scientifically_complete": len(soak_blocks) == blocks
-            and all(
-                block.controller_eligible and not block.launch_guard_triggered
-                for block in soak_blocks
-            ),
-            "all_blocks_healthy": (
-                all(block.healthy for block in soak_blocks)
-                if len(soak_blocks) == blocks
-                and all(
-                    block.controller_eligible and not block.launch_guard_triggered
-                    for block in soak_blocks
-                )
-                else None
-            ),
-            "controller_completion_state": (
-                "campaign_guard_censored"
-                if soak_blocks and soak_blocks[-1].launch_guard_triggered
-                else "execution_complete_inconclusive"
-                if len(soak_blocks) == blocks
-                and not all(
-                    block.controller_eligible and not block.launch_guard_triggered
-                    for block in soak_blocks
-                )
-                else "completed_healthy"
-                if len(soak_blocks) == blocks and all(block.healthy for block in soak_blocks)
-                else "completed_unhealthy"
-                if len(soak_blocks) == blocks
-                else "partial_incomplete"
-            ),
+            "execution_complete": execution_complete,
+            "scientifically_complete": scientifically_complete,
+            "all_blocks_healthy": all_blocks_healthy,
+            "controller_completion_state": controller_completion_state,
             "censor_reason": (
-                soak_blocks[-1].launch_guard_reason or "launch_guard"
-                if soak_blocks and soak_blocks[-1].launch_guard_triggered
-                else None
+                guarded.launch_guard_reason or "launch_guard" if guarded is not None else None
             ),
         },
     )
-    return [baseline, *soak_blocks]
+    return results

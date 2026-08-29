@@ -97,6 +97,7 @@ def test_retained_headers_are_restricted_to_fixed_safe_names(route: RouteConfig)
         "temperature",
         "tools",
         "response_format",
+        "parallel_tool_calls",
     ],
 )
 def test_request_defaults_cannot_override_identity_or_cost_fields(

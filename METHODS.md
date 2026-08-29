@@ -138,7 +138,8 @@ All clocks are client-side monotonic clocks. Units are stored and printed explic
 - **Decode proxy:** provider-reported completion tokens divided by `(end-to-end seconds − TTFT)`.
   This includes client transport/drain overhead and is not direct server decode compute. The
   primary proxy requires at least eight billed completion tokens, two content-bearing events, and
-  10 ms after TTFT; observations failing the gate remain recorded but are not headline decode data.
+  one second after TTFT; shorter bursts are preserved in the audit but censored from tokens/second
+  summaries because buffering and denominator instability dominate them.
 - **Offered RPM:** scheduled arrivals divided by the scheduled arrival-window minutes.
 - **Completed/effective RPM:** completed or successful requests divided by full block wall minutes,
   including response drain after the arrival window.
@@ -224,8 +225,11 @@ depth, or routing unless the provider exposes trustworthy server timings. Contex
 429/timeout/5xx is inconclusive, not a hard context boundary. A route-specific capability rejection
 does not describe other checkpoints or providers. Fixed anchors do not locate an exact context
 boundary, and this harness does not isolate tool-schema or image contributions to a combined context
-limit. The current report is an evidence package, not a PDF, production recommendation, publication
-gate, or completeness certificate.
+limit. A single-provider report is an evidence package, not a production recommendation,
+publication gate, or completeness certificate. The matrix atlas is a reading layer over terminal
+provider reports: it adds provider and run identity, combines only matched tables, and keeps the
+request as the low-load sampling unit and the epoch/block as the capacity sampling unit. Its PDF
+never substitutes for the row-level ledger or turns missing evidence into a zero.
 
 ## Cost, resume, and terminal-state contract
 

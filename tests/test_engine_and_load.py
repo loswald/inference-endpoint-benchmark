@@ -11,6 +11,7 @@ from inference_bench.engine import BenchmarkEngine, PaymentRequiredLatched
 from inference_bench.ledger import Ledger
 from inference_bench.load import (
     EpochSummary,
+    aimd_max_rps,
     baseline_design,
     fixed_count_offsets,
     run_aimd,
@@ -49,6 +50,17 @@ def test_baseline_design_has_exact_nonzero_sample_count_and_truthful_rate() -> N
 
     with pytest.raises(ValueError, match="at least 20"):
         baseline_design({"baseline_samples": 19}, 20)
+
+
+def test_aimd_shape_ceiling_prefers_shape_specific_value() -> None:
+    config = {
+        "max_rps": 64,
+        "max_rps_by_shape": {"long_short": 0.5, "short_long": 1.0},
+    }
+    assert aimd_max_rps(config, "long_short") == pytest.approx(0.5)
+    assert aimd_max_rps(config, "short_long") == pytest.approx(1.0)
+    assert aimd_max_rps(config, "short_short") == pytest.approx(64)
+    assert aimd_max_rps({}, "short_short") is None
 
 
 def _result(logical_id: str, *, status: str = "success", http_status: int = 200):
@@ -248,6 +260,38 @@ def test_load_epoch_counts_every_physical_retry_and_includes_drain(
     )
 
 
+def test_normal_response_drain_is_not_misclassified_as_queue_growth(
+    tmp_path, campaign, route
+) -> None:
+    class SlowServiceAdapter(SequenceAdapter):
+        async def infer(self, route, request):
+            self.calls[request.logical_id] += 1
+            await asyncio.sleep(1.1)
+            return _result(request.logical_id)
+
+    async def run() -> EpochSummary:
+        engine, ledger = _engine(tmp_path, campaign, SlowServiceAdapter())
+        summary = await run_open_loop_epoch(
+            engine,
+            route,
+            shape="short_short",
+            epoch_id="slow-service-without-queue",
+            phase="baseline",
+            offered_rps=20,
+            duration_seconds=0.05,
+            concurrency=1,
+            seed=11,
+            deterministic_scheduled_count=1,
+        )
+        await engine.close()
+        ledger.close()
+        return summary
+
+    summary = asyncio.run(run())
+    assert summary.queue_end_seconds > 1.0
+    assert summary.healthy
+
+
 def test_zero_arrival_epoch_is_scientifically_censored(tmp_path, campaign, route) -> None:
     kwargs = {
         "shape": "short_short",
@@ -423,6 +467,164 @@ def test_aimd_and_soak_forward_identity_bound_long_shape_targets(
     )
 
 
+def test_aimd_pauses_at_panel_boundaries_and_resumes_without_duplicate_epochs(
+    tmp_path, campaign, route, monkeypatch
+) -> None:
+    clock = [0.0]
+    provider_epoch_calls: dict[str, int] = defaultdict(int)
+    summaries: dict[str, EpochSummary] = {}
+    guarded_route = replace(route, request_timeout_seconds=1.0)
+
+    monkeypatch.setattr("inference_bench.load._monotonic_time", lambda: clock[0])
+
+    async def healthy_epoch(engine, route, **kwargs):
+        epoch_id = kwargs["epoch_id"]
+        if epoch_id in summaries:
+            return summaries[epoch_id]
+        provider_epoch_calls[epoch_id] += 1
+        summary = _epoch_summary(
+            epoch_id=epoch_id,
+            phase=kwargs["phase"],
+            offered_rps=kwargs["offered_rps"],
+            healthy=True,
+        )
+        summaries[epoch_id] = summary
+        engine.ledger.record_event_once(
+            f"load_epoch:{epoch_id}", "load_epoch", summary.to_dict()
+        )
+        # Simulate the conservative arrival-window-plus-timeout drain in a deterministic clock.
+        clock[0] += 2.1
+        return summary
+
+    monkeypatch.setattr("inference_bench.load.run_open_loop_epoch", healthy_epoch)
+
+    async def run() -> tuple[bool, bool, bool, list[dict[str, object]]]:
+        engine, ledger = _engine(
+            tmp_path, replace(campaign, routes=(guarded_route,)), SequenceAdapter()
+        )
+        config = {
+            "epochs": 1,
+            "epoch_seconds": 1,
+            "initial_rps": 1,
+            "additive_rps": 1,
+            "baseline_samples": 20,
+            "baseline_rps": 20,
+        }
+        first = await run_aimd(
+            engine,
+            guarded_route,
+            "short_short",
+            config,
+            seed=7,
+            not_after_monotonic=3.0,
+        )
+        assert ledger.event_by_key("aimd_complete:route-a:short_short") is None
+        second = await run_aimd(
+            engine,
+            guarded_route,
+            "short_short",
+            config,
+            seed=7,
+            not_after_monotonic=5.0,
+        )
+        assert ledger.event_by_key("aimd_complete:route-a:short_short") is None
+        final = await run_aimd(
+            engine,
+            guarded_route,
+            "short_short",
+            config,
+            seed=7,
+            not_after_monotonic=100.0,
+        )
+        events = ledger.event_rows()
+        await engine.close()
+        ledger.close()
+        return (
+            first.paused_for_window,
+            second.paused_for_window,
+            final.paused_for_window,
+            events,
+        )
+
+    first_paused, second_paused, final_paused, events = asyncio.run(run())
+    assert first_paused is True
+    assert second_paused is True
+    assert final_paused is False
+    assert provider_epoch_calls
+    assert set(provider_epoch_calls.values()) == {1}
+    assert sum(event["kind"] == "aimd_complete" for event in events) == 1
+
+
+def test_soak_pause_does_not_mark_unstarted_blocks_or_complete_the_cell(
+    tmp_path, campaign, route, monkeypatch
+) -> None:
+    clock = [0.0]
+    provider_epoch_calls: dict[str, int] = defaultdict(int)
+    summaries: dict[str, EpochSummary] = {}
+    guarded_route = replace(route, request_timeout_seconds=1.0)
+
+    monkeypatch.setattr("inference_bench.load._monotonic_time", lambda: clock[0])
+
+    async def healthy_epoch(engine, route, **kwargs):
+        epoch_id = kwargs["epoch_id"]
+        if epoch_id in summaries:
+            return summaries[epoch_id]
+        provider_epoch_calls[epoch_id] += 1
+        summary = _epoch_summary(
+            epoch_id=epoch_id,
+            phase=kwargs["phase"],
+            offered_rps=kwargs["offered_rps"],
+            healthy=True,
+        )
+        summaries[epoch_id] = summary
+        engine.ledger.record_event_once(
+            f"load_epoch:{epoch_id}", "load_epoch", summary.to_dict()
+        )
+        clock[0] += 2.1
+        return summary
+
+    monkeypatch.setattr("inference_bench.load.run_open_loop_epoch", healthy_epoch)
+
+    async def run() -> tuple[bool, bool, list[dict[str, object]]]:
+        engine, ledger = _engine(
+            tmp_path, replace(campaign, routes=(guarded_route,)), SequenceAdapter()
+        )
+        config = {
+            "blocks": 2,
+            "block_seconds": 1,
+            "rate_rps": 1,
+            "baseline_samples": 20,
+            "baseline_rps": 20,
+        }
+        first = await run_soak(
+            engine,
+            guarded_route,
+            "short_short",
+            config,
+            seed=7,
+            not_after_monotonic=3.0,
+        )
+        assert ledger.event_by_key("soak_complete:route-a:short_short") is None
+        final = await run_soak(
+            engine,
+            guarded_route,
+            "short_short",
+            config,
+            seed=7,
+            not_after_monotonic=100.0,
+        )
+        events = ledger.event_rows()
+        await engine.close()
+        ledger.close()
+        return first.paused_for_window, final.paused_for_window, events
+
+    first_paused, final_paused, events = asyncio.run(run())
+    assert first_paused is True
+    assert final_paused is False
+    assert set(provider_epoch_calls.values()) == {1}
+    assert sum(event["kind"] == "soak_complete" for event in events) == 1
+
+
 @pytest.mark.parametrize(
     "censor_reason",
     ["interrupted_epoch_incomplete_no_replay", "zero_scheduled_poisson_arrivals"],
@@ -473,13 +675,22 @@ def test_interrupted_baseline_censors_controllers_without_thresholds(
         return aimd, soak, event_kinds
 
     aimd, soak, event_kinds = asyncio.run(run())
-    assert len(aimd) == len(soak) == 1
-    assert calls == [("baseline", 0.1), ("soak_baseline", 0.1)]
+    assert len(aimd) == len(soak) == 3
+    assert [phase for phase, _rate in calls] == [
+        "baseline",
+        "baseline",
+        "baseline",
+        "soak_baseline",
+        "soak_baseline",
+        "soak_baseline",
+    ]
+    assert calls[2][1] == pytest.approx(0.125)
+    assert calls[5][1] == pytest.approx(0.125)
     assert "aimd_controller_censored" in event_kinds
     assert "soak_controller_censored" in event_kinds
 
 
-def test_unhealthy_low_load_baseline_stops_aimd_and_soak(
+def test_unhealthy_low_load_baseline_closes_as_measured_negative(
     tmp_path, campaign, route, monkeypatch
 ) -> None:
     calls: list[str] = []
@@ -518,11 +729,24 @@ def test_unhealthy_low_load_baseline_stops_aimd_and_soak(
         return aimd, soak, events
 
     aimd, soak, events = asyncio.run(run())
-    assert len(aimd) == len(soak) == 1
-    assert calls == ["baseline", "soak_baseline"]
+    assert len(aimd) == len(soak) == 3
+    assert calls == ["baseline"] * 3 + ["soak_baseline"] * 3
     censored = [event for event in events if event["kind"].endswith("controller_censored")]
     assert len(censored) == 2
-    assert all("unhealthy_low_load_baseline" in event["payload_json"] for event in censored)
+    assert all(
+        "measured_unhealthy_at_all_baseline_rates" in event["payload_json"] for event in censored
+    )
+    completes = {
+        event["kind"]: json.loads(event["payload_json"])
+        for event in events
+        if event["kind"] in {"aimd_complete", "soak_complete"}
+    }
+    assert completes["aimd_complete"]["controller_completion_state"] == (
+        "completed_no_healthy_at_lowest_tested_rate"
+    )
+    assert completes["soak_complete"]["controller_completion_state"] == (
+        "completed_no_healthy_at_lowest_tested_rate"
+    )
 
 
 @pytest.mark.parametrize(
@@ -631,7 +855,9 @@ def test_aimd_geometric_bracket_is_bounded_and_no_overload_is_right_censored(
     assert ramp_rates == [1, 2, 4, 4, 4]
     assert payload["highest_observed_healthy_rps"] == 4
     assert payload["overload_observed"] is False
-    assert payload["capacity_bound_state"] == "right_censored_highest_tested_healthy_no_overload"
+    assert payload["capacity_bound_state"] == (
+        "right_censored_highest_tested_confirmed_healthy_no_overload"
+    )
 
 
 def test_censored_epoch_breaks_unhealthy_consecutiveness(
@@ -693,7 +919,9 @@ def test_censored_epoch_breaks_unhealthy_consecutiveness(
     assert ramp_rates == [1, 1, 1, 1]
     assert payload["overload_observed"] is False
     assert payload["recovery_run"] is False
-    assert payload["capacity_bound_state"] == "right_censored_highest_tested_healthy_no_overload"
+    assert payload["capacity_bound_state"] == (
+        "right_censored_highest_tested_confirmed_healthy_no_overload"
+    )
 
 
 def test_no_healthy_ramp_candidate_is_explicitly_left_censored(
@@ -734,10 +962,19 @@ def test_no_healthy_ramp_candidate_is_explicitly_left_censored(
         return payload
 
     payload = asyncio.run(run())
-    assert calls == ["baseline", "aimd", "aimd"]
+    assert calls == [
+        "baseline",
+        "aimd",
+        "aimd",
+        "confirmation",
+        "confirmation_separator",
+        "confirmation",
+        "confirmation_separator",
+        "confirmation",
+    ]
     assert payload["highest_observed_healthy_rps"] is None
-    assert payload["capacity_bound_state"] == "left_censored_no_healthy_candidate"
-    assert payload["confirmation_healthy"] == []
+    assert payload["capacity_bound_state"] == "left_censored_no_healthy_rate_at_floor"
+    assert payload["confirmation_healthy"] == [False, False, False]
     assert payload["recovery_run"] is False
 
 
@@ -782,8 +1019,8 @@ def test_aimd_nonmonotonic_evidence_permanently_invalidates_knee_bracket(
     payload = asyncio.run(run())
     assert payload["overload_observed"] is True
     assert payload["nonmonotonic_overload_observed"] is True
-    assert payload["capacity_bound_state"] == "nonmonotonic_overload_no_current_bracket"
-    assert payload["unhealthy_upper_bound_rps"] is None
+    assert payload["capacity_bound_state"] == ("bracketed_confirmed_healthy_lower_unhealthy_upper")
+    assert payload["unhealthy_upper_bound_rps"] is not None
 
 
 def test_censored_confirmation_is_not_mislabeled_unhealthy(
@@ -828,12 +1065,117 @@ def test_censored_confirmation_is_not_mislabeled_unhealthy(
         return payload
 
     payload = asyncio.run(run())
-    assert payload["controller_completion_state"] == "confirmations_inconclusive"
+    assert payload["controller_completion_state"] == "completed_confirmations_healthy"
     assert payload["confirmation_execution_complete"] is True
-    assert payload["confirmation_complete"] is False
-    assert payload["confirmation_healthy"] == [True, None, True]
-    assert payload["confirmation_eligible"] == [True, False, True]
-    assert payload["confirmation_all_healthy"] is None
+    assert payload["confirmation_complete"] is True
+    assert payload["confirmation_healthy"] == [True, True, True]
+    assert payload["confirmation_eligible"] == [True, True, True]
+    assert payload["confirmation_all_healthy"] is True
+    assert payload["confirmation_stage"] == 1
+    assert [
+        stage["scientifically_complete"] for stage in payload["confirmation_stage_history"]
+    ] == [
+        False,
+        True,
+    ]
+
+
+def test_unhealthy_aimd_confirmation_steps_down_and_reconfirms(
+    tmp_path, campaign, route, monkeypatch
+) -> None:
+    confirmation_rates: list[float] = []
+
+    async def staged_epoch(engine, route, **kwargs):
+        phase = kwargs["phase"]
+        rate = kwargs["offered_rps"]
+        if phase == "confirmation":
+            confirmation_rates.append(rate)
+        return _epoch_summary(
+            epoch_id=kwargs["epoch_id"],
+            phase=phase,
+            offered_rps=rate,
+            healthy=phase != "confirmation" or rate <= 2,
+        )
+
+    monkeypatch.setattr("inference_bench.load.run_open_loop_epoch", staged_epoch)
+
+    async def run() -> dict[str, object]:
+        engine, ledger = _engine(tmp_path, campaign, SequenceAdapter())
+        await run_aimd(
+            engine,
+            route,
+            "short_short",
+            {
+                "epochs": 1,
+                "epoch_seconds": 1,
+                "initial_rps": 4,
+                "additive_rps": 1,
+                "confirmation_max_stages": 3,
+                "confirmation_multiplicative_decrease": 0.5,
+            },
+            seed=9,
+        )
+        event = next(item for item in ledger.event_rows() if item["kind"] == "aimd_complete")
+        payload = json.loads(event["payload_json"])
+        await engine.close()
+        ledger.close()
+        return payload
+
+    payload = asyncio.run(run())
+    assert confirmation_rates == [4, 4, 4, 2, 2, 2]
+    assert payload["healthy_lower_bound_rps"] == 2
+    assert payload["unhealthy_upper_bound_rps"] == 4
+    assert payload["confirmation_all_healthy"] is True
+    assert payload["capacity_bound_state"] == ("bracketed_confirmed_healthy_lower_unhealthy_upper")
+
+
+def test_unhealthy_soak_steps_down_until_all_blocks_are_healthy(
+    tmp_path, campaign, route, monkeypatch
+) -> None:
+    observed_rates: list[float] = []
+
+    async def staged_epoch(engine, route, **kwargs):
+        phase = kwargs["phase"]
+        rate = kwargs["offered_rps"]
+        if phase == "soak_block":
+            observed_rates.append(rate)
+        return _epoch_summary(
+            epoch_id=kwargs["epoch_id"],
+            phase=phase,
+            offered_rps=rate,
+            healthy=phase != "soak_block" or rate <= 2,
+        )
+
+    monkeypatch.setattr("inference_bench.load.run_open_loop_epoch", staged_epoch)
+
+    async def run() -> dict[str, object]:
+        engine, ledger = _engine(tmp_path, campaign, SequenceAdapter())
+        await run_soak(
+            engine,
+            route,
+            "short_short",
+            {
+                "blocks": 2,
+                "block_seconds": 1,
+                "rate_rps": 4,
+                "max_rate_stages": 3,
+                "rate_multiplicative_decrease": 0.5,
+            },
+            seed=9,
+        )
+        event = next(item for item in ledger.event_rows() if item["kind"] == "soak_complete")
+        payload = json.loads(event["payload_json"])
+        await engine.close()
+        ledger.close()
+        return payload
+
+    payload = asyncio.run(run())
+    assert observed_rates == [4, 4, 2, 2]
+    assert payload["requested_rate_rps"] == 4
+    assert payload["accepted_rate_rps"] == 2
+    assert payload["all_blocks_healthy"] is True
+    assert payload["controller_completion_state"] == "completed_healthy"
+    assert [stage["healthy"] for stage in payload["rate_stage_history"]] == [False, True]
 
 
 def test_final_guarded_soak_block_is_execution_complete_but_scientifically_censored(

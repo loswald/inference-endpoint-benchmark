@@ -1,0 +1,45 @@
+{
+  "across_panel_rows": 110,
+  "cache_stratum_reconstruction": "validated hash-bound four-repeat plan plus registered logical repeat suffix; repeats 0-1 stable exact prompt, repeats 2-3 panel-unique cold",
+  "output_sha256": {
+    "across_panel_csv": "af6a3a095e5008092e46a987827b3afe5767f5c9558c5e97998cd63aa5894307",
+    "paired_cache_csv": "242650328cd336087784720cd5296c32547362b100e324df502554f8322927ee",
+    "panel_csv": "1abb0dfe11ed013e5e6418c510968d1a2a26887ae2e7830705a8e35f10b633c6",
+    "summary_json": "d65de27038b5e0e5d1c32c8b260fe030bcce3247cf80536693bc631fdb78c9c4"
+  },
+  "paired_cache_rows": 55,
+  "panel_summary_rows": 770,
+  "panels": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6
+  ],
+  "requests_attempted": 1232,
+  "requests_successful": 1135,
+  "route_shape_panel_stratum_cells": 616,
+  "routes": [
+    "deepseek-v4-flash-0731",
+    "gemma-4-31B-it",
+    "glm-5.2",
+    "kimi-k3",
+    "mimo-v2.5-pro",
+    "minimax-m2.5",
+    "nemotron-3-ultra-550b",
+    "nvidia-nemotron-3-super-120b",
+    "openai-gpt-oss-120b",
+    "qwen3.5-397b-a17b",
+    "qwen3.8-max"
+  ],
+  "schema_version": "digitalocean-variation-provenance/v1",
+  "source_file_sha256": {
+    "SHA256SUMS": "9d3ea8a161ce4fee8cd37902f3d699018c18b9be82fbef00eb4a98f3f29d762d",
+    "campaign.public.json": "998843fae88f7ac145bfa6edaba01bd76f8b0227f675ac739de1c6dc34afa83d",
+    "events.jsonl": "f285d4825115b11bbc6bba6c9e6cdac6ee081a368f8d31b69701e35058858603",
+    "ledger.sqlite3": "b78194ef68ba9dbdbec9f6000917a266231b6b915722da4f4429722e894669dc"
+  },
+  "source_run_id": "do-six-hour-variation-20260828-r1"
+}

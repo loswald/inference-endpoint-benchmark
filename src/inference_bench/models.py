@@ -30,6 +30,7 @@ PROTECTED_REQUEST_DEFAULT_KEYS = frozenset(
         "stop",
         "tools",
         "tool_choice",
+        "parallel_tool_calls",
         "response_format",
         "logprobs",
         "stream_options",
@@ -139,7 +140,17 @@ PUBLIC_USAGE_PARSE_ERRORS = frozenset(
     }
 )
 HTTP_ADAPTER_NAMES = frozenset(
-    {"openai_compatible", "digitalocean", "azure_openai", "vertex_openai"}
+    {
+        "openai_compatible",
+        "digitalocean",
+        "bedrock_mantle",
+        "bedrock_mantle_responses",
+        "azure_openai",
+        "azure_model_inference",
+        "azure_responses",
+        "vertex_openai",
+        "openrouter",
+    }
 )
 HTTP_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 ROUTE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -216,6 +227,7 @@ _PUBLIC_VALIDITY_REASONS = frozenset(
         "decode_proxy_missing_ttft",
         "decode_proxy_insufficient_content_events",
         "decode_proxy_near_zero_with_multiple_tokens",
+        "decode_proxy_observation_window_below_one_second",
         "decode_proxy_reasoning_token_state_unknown",
         "decode_proxy_hidden_reasoning_tokens_present",
         "decode_proxy_extreme_tokens_per_second",
@@ -407,10 +419,23 @@ class RouteConfig:
                 raise ValueError(
                     "base_url must be an absolute HTTPS URL without credentials or a fragment"
                 )
-            if self.api_family != "chat_completions":
-                raise ValueError(
+            expected_api_family = (
+                "responses"
+                if self.adapter in {"bedrock_mantle_responses", "azure_responses"}
+                else "chat_completions"
+            )
+            if self.api_family != expected_api_family:
+                message = (
                     f"adapter {self.adapter} currently supports only api_family=chat_completions"
+                    if expected_api_family == "chat_completions"
+                    else f"adapter {self.adapter} requires api_family=responses"
                 )
+                raise ValueError(message)
+            if (
+                expected_api_family == "responses"
+                and self.output_limit_field != "max_output_tokens"
+            ):
+                raise ValueError("Responses adapters require output_limit_field=max_output_tokens")
         if self.adapter == "openrouter" and not self.upstream_provider:
             raise ValueError("OpenRouter routes must pin upstream_provider")
         if self.upstream_provider is not None and not isinstance(self.upstream_provider, str):
@@ -660,12 +685,16 @@ class RequestSpec:
     max_output_tokens: int
     stream: bool = True
     timeout_seconds: float = 180.0
-    temperature: float | None = 0.0
+    # Optional sampling controls are omitted from common baselines. Capability
+    # and interaction suites add them explicitly, so a model that does not
+    # implement temperature is not excluded from otherwise comparable tests.
+    temperature: float | None = None
     top_p: float | None = None
     seed: int | None = None
     stop: tuple[str, ...] = ()
     tools: tuple[dict[str, Any], ...] = ()
     tool_choice: str | dict[str, Any] | None = None
+    parallel_tool_calls: bool | None = None
     response_format: dict[str, Any] | None = None
     logprobs: bool | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -696,6 +725,7 @@ class RequestSpec:
             "stop": list(self.stop),
             "tools": list(self.tools),
             "tool_choice": self.tool_choice,
+            "parallel_tool_calls": self.parallel_tool_calls,
             "response_format": self.response_format,
             "logprobs": self.logprobs,
             "synthetic_payload_descriptor": {

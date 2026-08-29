@@ -1,0 +1,26 @@
+{
+  "campaign_id": "do-complete-20260827-r1",
+  "capacity_evidence_contributed": false,
+  "capacity_exclusion_reason": "AIMD cells were campaign-censored before start",
+  "coverage_states": {
+    "completed": 564,
+    "inconclusive": 2,
+    "time_censored": 2325
+  },
+  "endpoint_count_with_completed_cells": 11,
+  "excluded_capacity_closure_bundle_sha256": "e2db2505937b7915b167b7f3a880288c7c6be3af0e9379c3295f79d427badd39",
+  "excluded_capacity_closure_reason": "live CLI overrides were accepted but not applied; static suites repeated and all AIMD cells remained campaign-censored before start",
+  "matched_cells": 217,
+  "outlier_audit_counts": {
+    "censored": 592,
+    "invalid": 10,
+    "valid_extreme": 3
+  },
+  "schema_version": "digitalocean-static-verification/v1",
+  "source_bundle_sha256": "0b2a4772c5c444d25d66be7f851488456d09551c4ce5fd6575c4017d793796ac",
+  "source_files": {
+    "coverage-ledger.csv": "42590ad5fa05ff7dd97245546459c69c2bd6d210b25db267d31f090b98d62717",
+    "matched-cell-summary.csv": "89f076b2e0c80befbe73db4d6504ed60d4ba4a0f52ed51afd266a8c81fe5ad74",
+    "outlier-audit-summary.csv": "fdf4b7169cabb6de3effe944fbb4de626594f5f80ee0e8fcbe43da7a7ab41ed1"
+  }
+}

@@ -12,8 +12,14 @@ SUPPORTED_SCORERS = frozenset(
         "json_fields",
         "json_answer_7",
         "tool_city_reykjavik",
+        "tool_cities_reykjavik_tokyo",
+        "tool_nested_trip",
+        "tool_named_target",
         "exact_blue",
+        "exact_red_blue",
         "context_markers",
+        "json_keys",
+        "longform_completion",
     }
 )
 
@@ -102,8 +108,60 @@ def score_result(spec: RequestSpec, result: InferenceResult) -> tuple[float | No
             "matching_tool_calls": len(matches),
             "malformed_matching_calls": malformed,
         }
+    elif scorer == "tool_cities_reykjavik_tokyo":
+        cities: list[str] = []
+        malformed = 0
+        for call in result.tool_calls:
+            function = call.get("function") if isinstance(call, dict) else None
+            arguments = function.get("arguments") if isinstance(function, dict) else None
+            parsed_arguments = (
+                _strict_json_object(arguments) if isinstance(arguments, str) else None
+            )
+            if (
+                not isinstance(function, dict)
+                or function.get("name") != "lookup_weather"
+                or parsed_arguments is None
+                or set(parsed_arguments) != {"city"}
+                or not isinstance(parsed_arguments.get("city"), str)
+            ):
+                malformed += 1
+                continue
+            cities.append(parsed_arguments["city"].strip().casefold())
+        score = float(
+            sorted(cities) == sorted(["reykjavík".casefold(), "tokyo"]) and malformed == 0
+        )
+        return score, {
+            "scorer": str(scorer),
+            "deterministic": True,
+            "matching_tool_calls": len(cities),
+            "malformed_matching_calls": malformed,
+        }
+    elif scorer == "tool_nested_trip":
+        expected_trip = {
+            "destination": "Lisbon",
+            "passenger": {"name": "Ada", "contact": {"email": "ada@example.com"}},
+        }
+        matches = []
+        for call in result.tool_calls:
+            function = call.get("function") if isinstance(call, dict) else None
+            arguments = function.get("arguments") if isinstance(function, dict) else None
+            parsed_arguments = (
+                _strict_json_object(arguments) if isinstance(arguments, str) else None
+            )
+            if isinstance(function, dict) and function.get("name") == "book_trip":
+                matches.append(parsed_arguments)
+        score = float(len(matches) == 1 and _type_exact_equal(matches[0], expected_trip))
+    elif scorer == "tool_named_target":
+        names = [
+            call.get("function", {}).get("name")
+            for call in result.tool_calls
+            if isinstance(call, dict) and isinstance(call.get("function"), dict)
+        ]
+        score = float(names == [str(expected)])
     elif scorer == "exact_blue":
         score = float(text.casefold().rstrip(".") == "blue")
+    elif scorer == "exact_red_blue":
+        score = float(text.casefold().replace(" ", "").rstrip(".") == "red|blue")
     elif scorer == "context_markers":
         markers = spec.metadata.get("context_markers")
         score = float(
@@ -111,6 +169,24 @@ def score_result(spec: RequestSpec, result: InferenceResult) -> tuple[float | No
             and len(markers) == 3
             and all(isinstance(marker, str) for marker in markers)
             and text == "|".join(markers)
+        )
+    elif scorer == "json_keys":
+        parsed = _strict_json_object(text)
+        expected_keys = spec.metadata.get("expected_keys")
+        score = float(
+            parsed is not None
+            and isinstance(expected_keys, list)
+            and all(isinstance(key, str) for key in expected_keys)
+            and set(parsed) == set(expected_keys)
+        )
+    elif scorer == "longform_completion":
+        minimum_output_tokens = spec.metadata.get("minimum_output_tokens")
+        score = float(
+            isinstance(minimum_output_tokens, int)
+            and minimum_output_tokens > 0
+            and isinstance(result.output_tokens, int)
+            and result.output_tokens >= minimum_output_tokens
+            and bool(text)
         )
     else:
         return None, {"scorer": "none"}

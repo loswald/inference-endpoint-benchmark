@@ -25,7 +25,7 @@ Before displaying an extreme tokens/second or latency value, bind it to one requ
 1. usage is provider-reported, positive, and belongs to one choice rather than an aggregate;
 2. TTFT is a streamed content event, not buffered headers or the final response;
 3. timestamps are monotonic and use one clock and one unit;
-4. the post-TTFT denominator is positive and sufficiently long to be stable;
+4. the post-TTFT denominator spans at least one second; shorter bursts are audited but censored;
 5. hidden reasoning is zero or explicitly stratified for visible decode comparisons;
 6. retries, queue delay, and drain are included in the correct end-to-end estimand;
 7. no token count was estimated from bytes and then labelled provider usage;
@@ -41,7 +41,7 @@ For each campaign, prefer a compact set:
 
 1. coverage by endpoint and dimension;
 2. highest confirmed AIMD lower bound by matched workload;
-3. achieved two-minute or longer-soak RPM with block-level intervals;
+3. achieved fixed-rate stability RPM with pass/fail/gated status and block-level intervals;
 4. effective input TPM and output TPM in separate figures;
 5. TTFT and end-to-end latency by matched workload;
 6. documented versus observed context/output boundaries;
@@ -50,3 +50,8 @@ For each campaign, prefer a compact set:
 
 Tables remain better than charts for exact capability states, validation reasons, documented limits,
 and per-endpoint production instructions.
+
+Never color a fixed-rate test as successful merely because execution completed. Success requires the
+registered acceptance predicate. Measured failures and tests that could not start reliably need their
+own explicit states. Contiguous time blocks are not independent repeats and their intervals must be
+labelled exploratory.

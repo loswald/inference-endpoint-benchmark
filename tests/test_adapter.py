@@ -203,8 +203,18 @@ def test_stream_requires_explicit_terminal_signal_and_rejects_conflicting_finish
             'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
         )
     )
-    assert repeated.status == "server_error"
-    assert "multiple_terminal_finish_reasons" in str(repeated.error_kind)
+    assert repeated.status == "success"
+    assert repeated.finish_reason == "stop"
+
+    repeated_with_content = asyncio.run(
+        infer(
+            'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
+            'data: {"choices":[{"index":0,"delta":{"content":"late"},'
+            '"finish_reason":"stop"}]}\n\n'
+        )
+    )
+    assert repeated_with_content.status == "server_error"
+    assert "conflicting_terminal_finish_reasons" in str(repeated_with_content.error_kind)
 
 
 def test_stream_refusal_and_reasoning_only_are_not_provider_failures(monkeypatch, route) -> None:
@@ -731,7 +741,7 @@ def test_malformed_nonstream_tool_calls_and_nonfinite_json_are_protocol_errors(
     assert nonfinite.error_kind == "invalid_json_success_body"
 
 
-def test_present_falsy_tool_calls_are_not_silently_treated_as_absent(monkeypatch, route) -> None:
+def test_null_tool_calls_are_absent_but_other_falsy_shapes_are_rejected(monkeypatch, route) -> None:
     monkeypatch.setenv("TEST_API_KEY", "not-written")
 
     async def run(value):
@@ -750,10 +760,38 @@ def test_present_falsy_tool_calls_are_not_silently_treated_as_absent(monkeypatch
         await client.aclose()
         return result
 
-    for value in ({}, "", 0, None):
+    null_result = asyncio.run(run(None))
+    assert null_result.status == "success"
+
+    for value in ({}, "", 0):
         result = asyncio.run(run(value))
         assert result.status == "server_error"
         assert result.error_kind == "invalid_tool_calls"
+
+
+def test_stream_allows_explicit_null_tool_calls(monkeypatch, route) -> None:
+    monkeypatch.setenv("TEST_API_KEY", "not-written")
+    body = (
+        'data: {"choices":[{"index":0,"delta":{"content":"ok",'
+        '"tool_calls":null},"finish_reason":null}]}\n\n'
+        'data: {"choices":[{"index":0,"delta":{"tool_calls":null},'
+        '"finish_reason":"stop"}],"usage":{"prompt_tokens":2,'
+        '"completion_tokens":1}}\n\n'
+        "data: [DONE]\n\n"
+    )
+
+    async def run():
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, text=body)
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        result = await OpenAICompatibleAdapter(client).infer(route, _spec(stream=True))
+        await client.aclose()
+        return result
+
+    result = asyncio.run(run())
+    assert result.status == "success"
+    assert result.finish_reason == "stop"
 
 
 def test_stream_tool_delta_rejects_explicit_bad_index_but_allows_absent_index(

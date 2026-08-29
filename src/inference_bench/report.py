@@ -53,6 +53,45 @@ def _json(value: str | None, fallback: Any) -> Any:
         return fallback
 
 
+def _post_ttft_seconds(row: dict[str, Any]) -> float | None:
+    try:
+        total = float(row["total_seconds"])
+        ttft = float(row["ttft_seconds"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    duration = total - ttft
+    return duration if math.isfinite(duration) and duration > 0 else None
+
+
+def _decode_proxy_report_eligible(row: dict[str, Any]) -> bool:
+    """Apply the current public decode contract to current and historical ledgers."""
+
+    duration = _post_ttft_seconds(row)
+    return bool(
+        row.get("decode_eligible")
+        and row.get("validity_class") == "valid"
+        and duration is not None
+        and duration >= MIN_DECODE_PROXY_SECONDS
+    )
+
+
+def _decode_proxy_short_window_reason(row: dict[str, Any]) -> str | None:
+    duration = _post_ttft_seconds(row)
+    if (
+        row.get("state") == "terminal"
+        and row.get("status") == "success"
+        and isinstance(row.get("output_tokens"), int)
+        and not isinstance(row.get("output_tokens"), bool)
+        and int(row["output_tokens"]) >= MIN_DECODE_PROXY_TOKENS
+        and int(row.get("content_event_count") or 0) >= MIN_DECODE_PROXY_CONTENT_EVENTS
+        and row.get("reasoning_tokens") == 0
+        and duration is not None
+        and 1e-2 <= duration < MIN_DECODE_PROXY_SECONDS
+    ):
+        return "decode_proxy_observation_window_below_one_second"
+    return None
+
+
 def _estimate_columns(prefix: str, value: Estimate) -> dict[str, Any]:
     return {
         prefix: value.estimate,
@@ -161,8 +200,7 @@ def summarize_rows(rows: list[dict[str, Any]], *, seed: int = 1) -> list[dict[st
         decode_proxy = [
             float(row["output_tokens"]) / (float(row["total_seconds"]) - float(row["ttft_seconds"]))
             for row in items
-            if row["decode_eligible"]
-            and row["validity_class"] == "valid"
+            if _decode_proxy_report_eligible(row)
             and row["output_tokens"] is not None
             and row["ttft_seconds"] is not None
             and float(row["total_seconds"]) - float(row["ttft_seconds"]) > 0
@@ -262,6 +300,9 @@ def summarize_rows(rows: list[dict[str, Any]], *, seed: int = 1) -> list[dict[st
                 and "decode_proxy_extreme_tokens_per_second"
                 in _json(row.get("validity_reasons_json"), [])
                 for row in items
+            ),
+            "decode_short_window_excluded_n": sum(
+                _decode_proxy_short_window_reason(row) is not None for row in items
             ),
             "reasoning_tokens_sum": sum(
                 int(row["reasoning_tokens"])
@@ -441,12 +482,12 @@ def summarize_rows(rows: list[dict[str, Any]], *, seed: int = 1) -> list[dict[st
     return output
 
 
-def _load_epoch_usage(
+def _load_epoch_final_rows(
     epoch: dict[str, Any], rows: list[dict[str, Any]] | None
-) -> tuple[bool, int | None, int | None, str]:
-    """Join an epoch to final per-logical-request rows to verify successful usage totals."""
+) -> tuple[list[dict[str, Any]] | None, str]:
+    """Join an epoch to its final logical-request rows once, without trusting event totals."""
     if rows is None:
-        return False, None, None, "request_ledger_not_supplied"
+        return None, "request_ledger_not_supplied"
     prefix = f"load:{epoch['route_id']}:{epoch['shape']}:{epoch['epoch_id']}:"
     attempts: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -459,10 +500,21 @@ def _load_epoch_usage(
         if terminal:
             final_rows.append(max(terminal, key=lambda row: int(row.get("attempt_index") or 0)))
     if len(final_rows) != int(epoch["completed"]):
-        return False, None, None, "ledger_join_completed_count_mismatch"
+        return None, "ledger_join_completed_count_mismatch"
     successes = [row for row in final_rows if row.get("status") == "success"]
     if len(successes) != int(epoch["successful"]):
-        return False, None, None, "ledger_join_success_count_mismatch"
+        return None, "ledger_join_success_count_mismatch"
+    return final_rows, "request_ledger_join"
+
+
+def _load_epoch_usage(
+    epoch: dict[str, Any], rows: list[dict[str, Any]] | None
+) -> tuple[bool, int | None, int | None, str]:
+    """Join an epoch to final per-logical-request rows to verify successful usage totals."""
+    final_rows, source = _load_epoch_final_rows(epoch, rows)
+    if final_rows is None:
+        return False, None, None, source
+    successes = [row for row in final_rows if row.get("status") == "success"]
     if any(
         not row.get("usage_eligible")
         or row.get("input_tokens") is None
@@ -474,6 +526,28 @@ def _load_epoch_usage(
         True,
         sum(int(row["input_tokens"]) for row in successes),
         sum(int(row["output_tokens"]) for row in successes),
+        "request_ledger_join",
+    )
+
+
+def _load_epoch_quality(
+    epoch: dict[str, Any], rows: list[dict[str, Any]] | None
+) -> tuple[bool, float | None, int | None, str]:
+    """Return scored-task successes and trials for one inferential load block."""
+    final_rows, source = _load_epoch_final_rows(epoch, rows)
+    if final_rows is None:
+        return False, None, None, source
+    if any(
+        row.get("quality_eligible") != 1
+        or isinstance(row.get("quality_score"), bool)
+        or not isinstance(row.get("quality_score"), (int, float))
+        for row in final_rows
+    ):
+        return False, None, None, "predeclared_quality_score_incomplete"
+    return (
+        True,
+        sum(float(row["quality_score"]) for row in final_rows),
+        len(final_rows),
         "request_ledger_join",
     )
 
@@ -591,6 +665,12 @@ def summarize_load_events(
         output_tokens = [float(usage[index][2] or 0) for index in usage_complete_indexes]
         usage_elapsed = [elapsed_wall[index] for index in usage_complete_indexes]
         usage_sources = Counter(item[3] for item in usage)
+        quality = [_load_epoch_quality(block, rows) for block in blocks]
+        quality_complete_indexes = [index for index, item in enumerate(quality) if item[0]]
+        quality_successes = [float(quality[index][1] or 0) for index in quality_complete_indexes]
+        quality_trials = [float(quality[index][2] or 0) for index in quality_complete_indexes]
+        quality_elapsed = [elapsed_wall[index] for index in quality_complete_indexes]
+        quality_sources = Counter(item[3] for item in quality)
         if not blocks:
             tpm_state = "censored_no_capacity_eligible_block"
         elif len(usage_complete_indexes) == len(blocks):
@@ -659,6 +739,16 @@ def summarize_load_events(
             "tpm_censored_blocks_n": len(blocks) - len(usage_complete_indexes),
             "tpm_reporting_state": tpm_state,
             "usage_verification_counts_json": canonical_json(dict(usage_sources)),
+            "quality_complete_blocks_n": len(quality_complete_indexes),
+            "quality_censored_blocks_n": len(blocks) - len(quality_complete_indexes),
+            "quality_reporting_state": (
+                "complete"
+                if blocks and len(quality_complete_indexes) == len(blocks)
+                else "partial_complete_blocks_only"
+                if quality_complete_indexes
+                else "censored_no_complete_quality_block"
+            ),
+            "quality_verification_counts_json": canonical_json(dict(quality_sources)),
             "offered_rate_denominator": "scheduled-arrival window",
             "achieved_rate_denominator": (
                 "at least the full registered arrival window, extended through response drain"
@@ -745,6 +835,23 @@ def summarize_load_events(
         )
         record.update(
             _estimate_columns(
+                "quality_mean",
+                block_proportion_interval(quality_successes, quality_trials, seed=seed),
+            )
+        )
+        record.update(
+            _estimate_columns(
+                "quality_adjusted_rpm",
+                block_rate_interval(
+                    quality_successes,
+                    quality_elapsed,
+                    unit_name="quality-weighted successful tasks",
+                    seed=seed,
+                ),
+            )
+        )
+        record.update(
+            _estimate_columns(
                 "ttft_p95_across_blocks",
                 block_median_interval(block_ttft_p95, unit="seconds", seed=seed),
             )
@@ -806,6 +913,9 @@ _AIMD_COMPLETION_STATES = frozenset(
         "completed_confirmations_healthy",
         "completed_confirmations_unhealthy",
         "left_censored_no_healthy_candidate",
+        "completed_no_healthy_at_lowest_tested_rate",
+        "completed_no_healthy_rate_at_floor",
+        "confirmations_inconclusive_after_retries",
     }
 )
 _AIMD_BOUND_STATES = frozenset(
@@ -815,6 +925,12 @@ _AIMD_BOUND_STATES = frozenset(
         "right_censored_highest_tested_healthy_no_overload",
         "left_censored_no_healthy_candidate",
         "campaign_guard_censored_before_confirmation",
+        "bracketed_confirmed_healthy_lower_unhealthy_upper",
+        "confirmed_healthy_after_nonmonotonic_overload",
+        "right_censored_highest_tested_confirmed_healthy_no_overload",
+        "left_censored_no_healthy_at_lowest_tested_rate",
+        "left_censored_no_healthy_rate_at_floor",
+        "confirmation_attempts_inconclusive",
     }
 )
 _SOAK_COMPLETION_STATES = frozenset(
@@ -824,6 +940,9 @@ _SOAK_COMPLETION_STATES = frozenset(
         "completed_healthy",
         "completed_unhealthy",
         "partial_incomplete",
+        "completed_no_healthy_at_lowest_tested_rate",
+        "completed_unhealthy_at_floor",
+        "rate_stages_inconclusive_after_retries",
     }
 )
 
@@ -901,6 +1020,8 @@ def summarize_controller_events(
                     "confirmation_execution_complete": None,
                     "confirmation_complete": None,
                     "confirmation_all_healthy": None,
+                    "confirmation_stage": None,
+                    "confirmation_stage_history_json": "[]",
                     "confirmation_healthy_json": "[]",
                     "confirmation_eligible_json": "[]",
                     "confirmation_censor_reasons_json": "[]",
@@ -909,6 +1030,10 @@ def summarize_controller_events(
                     "recovery_eligible": None,
                     "recovery_censor_reason": None,
                     "tested_rate_rps": None,
+                    "requested_rate_rps": None,
+                    "accepted_rate_rps": None,
+                    "rate_stage": None,
+                    "rate_stage_history_json": "[]",
                     "planned_blocks": None,
                     "completed_blocks": None,
                     "block_eligible_json": "[]",
@@ -919,7 +1044,7 @@ def summarize_controller_events(
                     "all_blocks_healthy": None,
                 }
     terminal_reason: str | None = None
-    seen: set[tuple[str, str, str]] = set()
+    seen: dict[tuple[str, str, str], str] = {}
     for event in events:
         kind = str(event.get("kind"))
         if kind not in {
@@ -940,9 +1065,23 @@ def summarize_controller_events(
         key = (suite_name, str(payload.get("route_id")), str(payload.get("shape")))
         if key not in expected:
             raise ValueError("controller event does not match configured route/suite/shape")
-        if key in seen:
-            raise ValueError("duplicate terminal controller event")
-        seen.add(key)
+        previous_kind = seen.get(key)
+        if previous_kind is not None:
+            complete_kind = "aimd_complete" if suite_name == "aimd" else "soak_complete"
+            censored_kind = (
+                "aimd_controller_censored"
+                if suite_name == "aimd"
+                else "soak_controller_censored"
+            )
+            if {previous_kind, kind} != {complete_kind, censored_kind}:
+                raise ValueError("duplicate terminal controller event")
+            # The runner emits a coarse censored marker immediately before the canonical
+            # completion event for measured baseline-unhealthy controllers.  Retain the
+            # detailed completion payload regardless of event order; two events of the same
+            # kind remain an integrity error.
+            if kind == censored_kind:
+                continue
+        seen[key] = kind
         row = expected[key]
         if kind.endswith("controller_censored"):
             row.update(
@@ -993,8 +1132,13 @@ def summarize_controller_events(
             confirmations_required = _strict_nonnegative_int(
                 payload.get("confirmations_required", 3), "confirmations_required"
             )
-            if confirmations_required != 3:
-                raise ValueError("AIMD contract requires exactly three confirmation epochs")
+            baseline_negative = completion_state == "completed_no_healthy_at_lowest_tested_rate"
+            adaptive_confirmation = "confirmation_stage_history" in payload
+            if confirmations_required != (0 if baseline_negative else 3):
+                raise ValueError(
+                    "AIMD contract requires exactly three confirmation epochs unless every "
+                    "floor baseline was measured unhealthy"
+                )
             confirmation_execution_complete = _strict_optional_bool(
                 payload.get("confirmation_execution_complete"),
                 "confirmation_execution_complete",
@@ -1011,17 +1155,28 @@ def summarize_controller_events(
                 raise ValueError("AIMD confirmation execution completeness is inconsistent")
             if confirmation_complete is not expected_scientific_complete:
                 raise ValueError("AIMD scientific confirmation completeness is inconsistent")
-            if expected_scientific_complete:
+            if baseline_negative:
+                if confirmations or confirmation_all_healthy is not False:
+                    raise ValueError("negative floor baseline cannot contain confirmation epochs")
+            elif expected_scientific_complete:
                 if confirmation_all_healthy is not all(bool(value) for value in confirmations):
                     raise ValueError("AIMD aggregate confirmation health is inconsistent")
             elif confirmation_all_healthy is not None:
                 raise ValueError("censored AIMD confirmations cannot have aggregate health")
             if row["censor_reason"] is not None:
                 expected_completion_state = "campaign_guard_censored"
+            elif baseline_negative:
+                expected_completion_state = "completed_no_healthy_at_lowest_tested_rate"
+            elif bound_state == "left_censored_no_healthy_rate_at_floor":
+                expected_completion_state = "completed_no_healthy_rate_at_floor"
             elif bound_state == "left_censored_no_healthy_candidate":
                 expected_completion_state = "left_censored_no_healthy_candidate"
             elif not expected_scientific_complete:
-                expected_completion_state = "confirmations_inconclusive"
+                expected_completion_state = (
+                    "confirmations_inconclusive_after_retries"
+                    if adaptive_confirmation
+                    else "confirmations_inconclusive"
+                )
             elif confirmation_all_healthy:
                 expected_completion_state = "completed_confirmations_healthy"
             else:
@@ -1067,11 +1222,19 @@ def summarize_controller_events(
                 payload.get("nonmonotonic_overload_observed"),
                 "nonmonotonic_overload_observed",
             )
-            if (highest_healthy is None) != (healthy_lower is None) or (
-                highest_healthy is not None
-                and (highest_healthy <= 0 or highest_healthy != healthy_lower)
+            if highest_healthy is not None and highest_healthy <= 0:
+                raise ValueError("AIMD highest observed healthy rate must be positive")
+            if (
+                not adaptive_confirmation
+                and highest_healthy is not None
+                and healthy_lower is not None
+                and highest_healthy != healthy_lower
             ):
                 raise ValueError("AIMD highest healthy rate and healthy lower bound disagree")
+            if healthy_lower is not None and (
+                healthy_lower <= 0 or highest_healthy is None or healthy_lower > highest_healthy
+            ):
+                raise ValueError("confirmed AIMD lower bound exceeds observed healthy evidence")
             if nonmonotonic_overload is True and overload_observed is not True:
                 raise ValueError("nonmonotonic overload evidence requires observed overload")
             if bound_state == "bracketed_healthy_lower_unhealthy_upper" and not (
@@ -1110,6 +1273,36 @@ def summarize_controller_events(
                 or highest_healthy is not None
             ):
                 raise ValueError("left-censored AIMD completion state is inconsistent")
+            if bound_state == "bracketed_confirmed_healthy_lower_unhealthy_upper" and not (
+                healthy_lower is not None
+                and unhealthy_upper is not None
+                and unhealthy_upper > healthy_lower
+                and overload_observed is True
+            ):
+                raise ValueError("adaptive AIMD confirmation bracket is inconsistent")
+            if bound_state == "confirmed_healthy_after_nonmonotonic_overload" and not (
+                healthy_lower is not None and overload_observed is True
+            ):
+                raise ValueError("adaptive nonmonotonic AIMD state is inconsistent")
+            if (
+                bound_state == "right_censored_highest_tested_confirmed_healthy_no_overload"
+                and not (
+                    healthy_lower is not None
+                    and overload_observed is False
+                    and unhealthy_upper is None
+                )
+            ):
+                raise ValueError("adaptive right-censored AIMD state is inconsistent")
+            if (
+                bound_state
+                in {
+                    "left_censored_no_healthy_at_lowest_tested_rate",
+                    "left_censored_no_healthy_rate_at_floor",
+                    "confirmation_attempts_inconclusive",
+                }
+                and healthy_lower is not None
+            ):
+                raise ValueError("unconfirmed adaptive AIMD state cannot contain a healthy bound")
             configured_aimd = suites.get("aimd")
             if not isinstance(configured_aimd, dict):
                 raise ValueError("AIMD controller lacks immutable suite configuration")
@@ -1138,6 +1331,10 @@ def summarize_controller_events(
                     "confirmation_execution_complete": confirmation_execution_complete,
                     "confirmation_complete": confirmation_complete,
                     "confirmation_all_healthy": confirmation_all_healthy,
+                    "confirmation_stage": payload.get("confirmation_stage"),
+                    "confirmation_stage_history_json": canonical_json(
+                        payload.get("confirmation_stage_history", [])
+                    ),
                     "confirmation_healthy_json": canonical_json(confirmations),
                     "confirmation_eligible_json": canonical_json(eligible),
                     "confirmation_censor_reasons_json": canonical_json(reasons),
@@ -1203,41 +1400,80 @@ def summarize_controller_events(
             tested_rate_rps = _strict_optional_nonnegative_number(
                 payload.get("rate_rps"), "rate_rps"
             )
+            adaptive_soak = "rate_stage_history" in payload
+            requested_rate_rps = _strict_optional_nonnegative_number(
+                payload.get("requested_rate_rps", payload.get("rate_rps")),
+                "requested_rate_rps",
+            )
+            accepted_rate_rps = _strict_optional_nonnegative_number(
+                payload.get("accepted_rate_rps"), "accepted_rate_rps"
+            )
             try:
                 configured_rate_rps = soak_rate_rps(
                     configured_soak, str(payload.get("route_id")), str(payload.get("shape"))
                 )
             except (AttributeError, TypeError, ValueError) as exc:
                 raise ValueError("configured soak rate cannot be resolved") from exc
+            baseline_negative = completion_state == "completed_no_healthy_at_lowest_tested_rate"
             if (
-                tested_rate_rps is None
-                or tested_rate_rps <= 0
+                requested_rate_rps is None
+                or requested_rate_rps <= 0
                 or not math.isfinite(configured_rate_rps)
                 or configured_rate_rps <= 0
-                or tested_rate_rps != configured_rate_rps
+                or requested_rate_rps != configured_rate_rps
             ):
-                raise ValueError("soak tested rate contradicts immutable suite configuration")
-            expected_execution_complete = completed_blocks == planned_blocks
-            expected_scientific_complete = expected_execution_complete and all(eligible)
+                message = (
+                    "soak requested rate contradicts immutable suite configuration"
+                    if adaptive_soak
+                    else "soak tested rate contradicts immutable suite configuration"
+                )
+                raise ValueError(message)
+            if not baseline_negative and (
+                tested_rate_rps is None
+                or tested_rate_rps <= 0
+                or tested_rate_rps > requested_rate_rps
+            ):
+                raise ValueError("adaptive soak tested rate is invalid")
+            expected_execution_complete = (
+                True if baseline_negative else completed_blocks == planned_blocks
+            )
+            expected_scientific_complete = (
+                True if baseline_negative else expected_execution_complete and all(eligible)
+            )
             if execution_complete is not expected_execution_complete:
                 raise ValueError("soak execution completeness is inconsistent")
             if scientifically_complete is not expected_scientific_complete:
                 raise ValueError("soak scientific completeness is inconsistent")
-            if expected_scientific_complete:
+            if baseline_negative:
+                if completed_blocks != 0 or health or all_blocks_healthy is not False:
+                    raise ValueError("negative floor baseline cannot contain soak blocks")
+            elif expected_scientific_complete:
                 if all_blocks_healthy is not all(bool(value) for value in health):
                     raise ValueError("soak aggregate health is inconsistent")
             elif all_blocks_healthy is not None:
                 raise ValueError("censored soak blocks cannot have aggregate health")
             if row["censor_reason"] is not None:
                 expected_completion_state = "campaign_guard_censored"
+            elif baseline_negative:
+                expected_completion_state = "completed_no_healthy_at_lowest_tested_rate"
             elif not expected_execution_complete:
-                expected_completion_state = "partial_incomplete"
+                expected_completion_state = (
+                    "rate_stages_inconclusive_after_retries"
+                    if adaptive_soak
+                    else "partial_incomplete"
+                )
             elif not expected_scientific_complete:
-                expected_completion_state = "execution_complete_inconclusive"
+                expected_completion_state = (
+                    "rate_stages_inconclusive_after_retries"
+                    if adaptive_soak
+                    else "execution_complete_inconclusive"
+                )
             elif all_blocks_healthy:
                 expected_completion_state = "completed_healthy"
             else:
-                expected_completion_state = "completed_unhealthy"
+                expected_completion_state = (
+                    "completed_unhealthy_at_floor" if adaptive_soak else "completed_unhealthy"
+                )
             if completion_state != expected_completion_state:
                 raise ValueError("soak controller completion state contradicts its evidence")
             if completion_state == "campaign_guard_censored" and not any(
@@ -1249,6 +1485,12 @@ def summarize_controller_events(
                 {
                     "tested_rate_rps": _strict_optional_nonnegative_number(
                         tested_rate_rps, "rate_rps"
+                    ),
+                    "requested_rate_rps": requested_rate_rps,
+                    "accepted_rate_rps": accepted_rate_rps,
+                    "rate_stage": payload.get("rate_stage"),
+                    "rate_stage_history_json": canonical_json(
+                        payload.get("rate_stage_history", [])
                     ),
                     "planned_blocks": planned_blocks,
                     "completed_blocks": completed_blocks,
@@ -1290,7 +1532,7 @@ def _metric_values(row: dict[str, Any]) -> dict[str, float | None]:
         return number if math.isfinite(number) else None
 
     decode = None
-    if (
+    if _decode_proxy_report_eligible(row) and (
         finite(row.get("output_tokens")) is not None
         and finite(row.get("ttft_seconds")) is not None
         and finite(row.get("total_seconds")) is not None
@@ -1326,7 +1568,8 @@ def build_outlier_audit(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             if row.get("state") == "unknown" or incomplete_retry
             else row.get("validity_class")
         )
-        if classification in {"invalid", "censored", "anomalous"}:
+        short_window_reason = _decode_proxy_short_window_reason(row)
+        if classification in {"invalid", "censored", "anomalous"} or short_window_reason:
             excluded: list[str] = []
             if incomplete_retry:
                 excluded.extend(
@@ -1347,7 +1590,7 @@ def build_outlier_audit(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 excluded.append("latency")
             if not row["usage_eligible"]:
                 excluded.extend(["input_tpm", "output_tpm", "cost_per_token"])
-            if not row["decode_eligible"]:
+            if not _decode_proxy_report_eligible(row):
                 excluded.append("decode_proxy_tokens_per_second")
             if not row["quality_eligible"]:
                 excluded.append("quality")
@@ -1358,12 +1601,14 @@ def build_outlier_audit(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "cell_id": row["cell_id"],
                 "cache_state": row["cache_state"],
                 "warm_state": _warm_state(str(row["suite"])),
-                "audit_class": classification,
+                "audit_class": classification if classification != "valid" else "censored",
                 "reasons": (
                     ["incomplete_retry_sequence_guarded_before_final_outcome"]
                     if incomplete_retry
                     else ["unknown_provider_outcome_final_attempt"]
                     if row.get("state") == "unknown"
+                    else [short_window_reason]
+                    if short_window_reason
                     else _json(row.get("validity_reasons_json"), ["unspecified"])
                 ),
                 "excluded_estimands": sorted(set(excluded)),
@@ -1670,6 +1915,112 @@ def _slug(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")[:100]
 
 
+_TIME_PANEL_RE = re.compile(r":panel=(\d{3,})$")
+
+
+def summarize_time_variation(summary: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Project matched-cell estimates onto an explicit route × shape × time panel table."""
+
+    result: list[dict[str, Any]] = []
+    for row in summary:
+        if row.get("suite") != "time_variation":
+            continue
+        cell = str(row.get("cell_id") or "")
+        match = _TIME_PANEL_RE.search(cell)
+        if match is None:
+            raise ValueError(f"time-variation cell lacks a panel identity: {cell}")
+        shape = cell.split(":", 1)[0]
+        projected = dict(row)
+        projected["shape"] = shape
+        projected["panel_index"] = int(match.group(1))
+        result.append(projected)
+    return sorted(result, key=lambda row: (row["route_id"], row["shape"], row["panel_index"]))
+
+
+def _plot_time_variation(summary: list[dict[str, Any]], output: Path) -> list[str]:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    projected = summarize_time_variation(summary)
+    by_route: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in projected:
+        by_route[str(row["route_id"])].append(row)
+    created: list[str] = []
+    metrics = (
+        ("latency_p50", "End-to-end latency p50", "seconds"),
+        ("ttft_p50", "Time to first token p50", "seconds"),
+        ("success_rate", "Request success rate", "proportion"),
+    )
+    for route_id, route_rows in sorted(by_route.items()):
+        shapes = sorted({str(row["shape"]) for row in route_rows})
+        if not shapes:
+            continue
+        fig, axes = plt.subplots(
+            len(shapes),
+            len(metrics),
+            figsize=(4.4 * len(metrics), 3.2 * len(shapes)),
+            squeeze=False,
+        )
+        for shape_index, shape in enumerate(shapes):
+            rows = sorted(
+                (row for row in route_rows if row["shape"] == shape),
+                key=lambda row: int(row["panel_index"]),
+            )
+            for metric_index, (metric, title, unit) in enumerate(metrics):
+                axis = axes[shape_index][metric_index]
+                eligible = [row for row in rows if row.get(metric) is not None]
+                x = [int(row["panel_index"]) for row in eligible]
+                y = [float(row[metric]) for row in eligible]
+                lower = [float(row.get(f"{metric}_ci95_low") or row[metric]) for row in eligible]
+                upper = [float(row.get(f"{metric}_ci95_high") or row[metric]) for row in eligible]
+                if eligible:
+                    yerr = [
+                        [value - low for value, low in zip(y, lower, strict=True)],
+                        [high - value for value, high in zip(y, upper, strict=True)],
+                    ]
+                    axis.errorbar(
+                        x,
+                        y,
+                        yerr=yerr,
+                        fmt="o-",
+                        linewidth=1.4,
+                        markersize=4,
+                        capsize=2.5,
+                        color="#176B87",
+                    )
+                axis.set_title(title)
+                axis.set_xlabel("Fixed time panel (equal spacing)")
+                axis.set_ylabel(unit)
+                axis.grid(axis="y", alpha=0.2)
+                if metric == "success_rate":
+                    axis.set_ylim(-0.03, 1.03)
+                if metric_index == 0:
+                    axis.text(
+                        -0.23,
+                        0.5,
+                        shape.replace("_", " / "),
+                        transform=axis.transAxes,
+                        rotation=90,
+                        ha="center",
+                        va="center",
+                        fontsize=10,
+                        fontweight="bold",
+                    )
+        fig.suptitle(
+            f"{route_id}: matched low-load measurements across time\n"
+            "Same tasks and offered load in every panel; whiskers are request-level 95% intervals"
+        )
+        fig.tight_layout()
+        suffix = hashlib.sha256(route_id.encode()).hexdigest()[:10]
+        filename = f"time-variation-{_slug(route_id)}-{suffix}.png"
+        fig.savefig(output / filename, dpi=200, bbox_inches="tight", facecolor="white")
+        plt.close(fig)
+        created.append(filename)
+    return created
+
+
 def _plot_matched_cells(summary: list[dict[str, Any]], output: Path) -> list[str]:
     import matplotlib
 
@@ -1897,6 +2248,7 @@ def _generate_report_locked(run_dir: Path, ledger: Ledger, source_snapshot: dict
     coverage_rows = ledger.coverage_rows()
     _assert_terminal_snapshot(ledger, events)
     summary = summarize_rows(rows)
+    time_variation_summary = summarize_time_variation(summary)
     load_summary = summarize_load_events(events, rows=rows)
     config_value = strict_json_loads(ledger.meta("config_json") or "null")
     if not isinstance(config_value, dict):
@@ -1915,6 +2267,7 @@ def _generate_report_locked(run_dir: Path, ledger: Ledger, source_snapshot: dict
     figures = report_dir / "figures"
     figures.mkdir(parents=True, exist_ok=True)
     write_csv(report_dir / "matched-cell-summary.csv", summary)
+    write_csv(report_dir / "time-variation-summary.csv", time_variation_summary)
     write_csv(report_dir / "load-block-summary.csv", load_summary)
     write_csv(report_dir / "controller-summary.csv", controller_summary)
     (report_dir / "controller-summary.json").write_text(
@@ -2043,8 +2396,10 @@ def _generate_report_locked(run_dir: Path, ledger: Ledger, source_snapshot: dict
     (report_dir / "metric-contract.json").write_text(
         canonical_json(metric_contract) + "\n", encoding="utf-8"
     )
-    plot_names = _plot_matched_cells(summary, figures) + _plot_load_small_multiples(
-        events, figures, rows=rows
+    plot_names = (
+        _plot_matched_cells(summary, figures)
+        + _plot_load_small_multiples(events, figures, rows=rows)
+        + _plot_time_variation(summary, figures)
     )
     exposure = ledger.exposure()
     unknown = sum(row["state"] == "unknown" for row in rows)
@@ -2100,6 +2455,8 @@ def _generate_report_locked(run_dir: Path, ledger: Ledger, source_snapshot: dict
         "",
         "- `matched-cell-summary.csv`: estimates, units, n, CI bounds, and methods.",
         "- `load-block-summary.csv`: epoch/block RPM and effective TPM with 95% intervals.",
+        "- `time-variation-summary.csv`: matched low-load panels across the day with 95% "
+        "request-level intervals.",
         "- `controller-summary.csv` / `.json`: AIMD bound/censor semantics, confirmations, "
         "recovery, and soak completion state for every configured endpoint × shape controller.",
         "- `coverage-ledger.csv`: every registered completed, untested, conditional, or "

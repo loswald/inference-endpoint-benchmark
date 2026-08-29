@@ -1,80 +1,79 @@
-# Adapter contract
+# Provider adapters
 
-An adapter implements a preflight plus two async methods:
+Adapters translate the common benchmark request into a provider transport and normalize the result.
+They do not change the workload, retry policy, AIMD controller, statistics, or report.
 
-```python
-class Adapter(Protocol):
-    def preflight(self, route: RouteConfig) -> None: ...
-    async def infer(self, route: RouteConfig, request: RequestSpec) -> InferenceResult: ...
-    async def close(self) -> None: ...
-```
+## Implemented transports
 
-The adapter owns translation and transport only. It must:
+| Adapter | API | Authentication | Provider-specific checks |
+|---|---|---|---|
+| `digitalocean` | Chat Completions | bearer token | official inference host supplied by route |
+| `bedrock_mantle` | Chat Completions | Bedrock API key | `api.aws` host and exact chat path |
+| `bedrock_mantle_responses` | Responses | Bedrock API key | `api.aws` host and exact Responses path |
+| `azure_model_inference` / `azure_openai` | Chat Completions | `api-key` or bearer | Azure Foundry/OpenAI host and exact chat path |
+| `azure_responses` | Responses | `api-key` or bearer | Azure host and exact Responses path |
+| `vertex_openai` | Chat Completions | service-account file or ADC | renewable OAuth and Google API host |
+| `openrouter` | Chat Completions | bearer token | exact upstream pin, fallbacks off, response metadata attested |
+| `openai_compatible` | Chat Completions | configurable header | generic protocol behavior only |
 
-- obtain credentials solely from the environment variable named by the route;
-- fail credential and transport checks before a durable request claim;
-- use a client monotonic clock;
-- stream the entire response or return a timeout/transport result;
-- return provider-reported input, output, and cached-input usage without fabricating missing values;
-- retain only allow-listed quota/request headers;
-- always retain `Retry-After` so reporting-header customization cannot disable provider-directed
-  retry backoff;
-- return a SHA-256 digest rather than an error response body;
-- keep response text in memory for deterministic scoring but never add it to the ledger;
-- identify fallback/upstream behavior when a router is involved.
+`bedrock_native`, `vertex_native`, and `azure_model_inference_native` are explicit placeholders.
+Live preflight refuses them. The compatible transports above are real provider implementations, not
+aliases that bypass credential refresh or provider routing checks.
 
-The OpenAI-compatible adapter additionally exposes `prepare`/`infer_prepared`: `prepare` produces
-the exact canonical UTF-8 bytes, payload/generator hashes, and headers before a claim; the send uses
-those same bytes without reserialization. Other adapters must provide an equivalent preclaim
-materialization contract before they can be admitted.
+## Transport behavior
 
-HTTP/2 is opt-in (`false` by default) and identity-bound. Connection reuse and the connection-pool
-ceiling are also explicit. HTTP transports use `trust_env=false`, so ambient proxies, netrc files,
-and CA-bundle variables cannot silently change the measured route. Requests explicitly set
-`Accept-Encoding: identity`; the profile is identity- and manifest-bound so optional Brotli/Zstd
-installations cannot change response decoding. Non-streaming requests have
-no TTFT; their header time and total completion time remain separate. A non-empty streaming result
-requires a recognized content, refusal, reasoning, or tool-delta event **and** an explicit terminal
-signal: either `[DONE]` or one terminal choice with a non-empty finish reason. A finish-only choice
-is a valid empty model response. Exactly one choice is admitted: an absent choice index is treated
-as positional zero, while a present malformed or nonzero choice index is a protocol error. Split
-tool calls are reconstructed by tool index. A missing tool index uses its list position only for
-compatibility; any present malformed tool index is a protocol error. Reasoning-only
-streams are successful transport outcomes with no visible-answer TTFT; refusals are successful
-transport outcomes that can fail the task-quality scorer. A bare `[DONE]`, clean EOF after partial
-semantic output, conflicting/repeated finish choice, or malformed event is a protocol error, not a
-success. Because `stream_options.include_usage` is not
-universal, every route chooses the identity-bound `stream_usage_mode`: `omit` maximizes transport
-compatibility and censors TPM when usage is absent, `try` requests usage but accepts it as missing,
-and `required` additionally records missing usage as a contract violation. No adapter performs a
-hidden fallback send. The route also declares an identity-bound `request_timeout_seconds`; it is a
-hard deadline for the complete response stream, not merely response headers. Raise it deliberately
-for slow long-output or very-long-context cells instead of editing adapter code.
+Before a request begins, an adapter:
 
-## Included adapters
+- loads or refreshes its credential;
+- validates the provider hostname and API path;
+- builds the final JSON body;
+- validates the connection settings.
 
-| Adapter | Status | Notes |
-|---|---|---|
-| `openai_compatible` | implemented | Generic Chat Completions transport |
-| `digitalocean` | implemented | Same transport; use DO endpoint and token env |
-| `azure_openai` | implemented | Route must contain the deployment URL/API version and API-key header |
-| `vertex_openai` | **not implemented** | Fails closed until ADC/service-account OAuth refresh and expiry tests exist |
-| `openrouter` | **request mapper only; live fail-closed** | Builds an exact pinned request, but needs generation lookup/actual-upstream verification before evidence-bearing use |
-| `bedrock_native` | **not implemented** | Fails closed; add exact Converse/native model-region mapping and tests |
-| `vertex_native` | **not implemented** | Fails closed; add Gemini-native content/tool/usage mapping and ADC refresh tests |
-| `azure_model_inference_native` | **not implemented** | Fails closed; add exact Azure Model Inference mapping and tests |
+During the request it measures with a monotonic clock, consumes the complete response stream, and
+records header time, first visible content, content-event offsets, final completion, status, usage,
+finish reason, and allow-listed request/quota headers. The error body itself is never retained; only
+its SHA-256 digest is recorded.
 
-The OpenAI-compatible path does not make native APIs equivalent. A provider/model/API/region route is
-admitted only after an adapter contract test demonstrates request mapping, stream parsing, usage,
-errors, and route identity.
+Chat streaming requires valid server-sent events and an explicit terminal signal. Split tool calls
+are reconstructed by index. Refusals are successful transport outcomes and can still receive a
+quality score of zero. Reasoning-only streams are transport successes but provide no visible-answer
+TTFT.
 
-## Adding an adapter
+Responses streaming recognizes output-text deltas and terminal `response.completed` or
+`response.incomplete` events. Non-streaming Responses output reconstructs text and function calls
+from the output-item array.
 
-1. Implement the protocol without importing it into the benchmark core.
-2. Add a registry name in `adapters/base.py`.
-3. Test success, streaming, single/batched/empty/malformed SSE events, missing/nonintegral usage,
-   hidden-reasoning and cache usage, split tools, structured output, provider errors, numeric and
-   HTTP-date `Retry-After`, timeout, authentication omission, and body/header redaction.
-4. Document which API family, model types, and regions were actually tested.
-5. Keep unsupported capability states explicit; never translate a missing feature into apparent
-   success.
+## OpenRouter attribution
+
+The request contains exactly one upstream in `only` and `order`, with `allow_fallbacks: false` and
+`require_parameters: true`. The adapter also enables OpenRouter routing metadata. It verifies that:
+
+- exactly one endpoint is marked selected;
+- the selected provider matches the configured upstream;
+- every reported attempt remains inside that same pin.
+
+Missing or mismatched metadata is a protocol failure. Performance is never attributed to an
+unverified router path.
+
+## Vertex credentials
+
+`vertex_openai` uses the service-account file named by the route's authentication environment
+variable when present. Otherwise it uses Google Application Default Credentials. Short-lived OAuth
+tokens are refreshed before the request is admitted, so a multi-hour run does not depend on a
+pasted access token.
+
+## Adding a provider-native API
+
+Add a native adapter only when it exposes a workload the compatible API cannot represent. A useful
+adapter must have contract tests for:
+
+- text and image input;
+- tools and structured output;
+- streaming and non-streaming;
+- usage and cached/reasoning-token fields;
+- throttling, retry hints, timeouts, and malformed responses;
+- exact model/API/region identity;
+- credential renewal over the intended run duration.
+
+Catalog presence alone is not an implementation. A model becomes an admitted route only after its
+exact provider/API/region call succeeds and its current limits and price are recorded.

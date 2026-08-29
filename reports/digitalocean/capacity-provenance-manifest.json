@@ -1,0 +1,14 @@
+{
+  "campaign_sha256s": "SHA256SUMS:9d3ea8a161ce4fee8cd37902f3d699018c18b9be82fbef00eb4a98f3f29d762d;campaign:50218753aa9404e0946bbbc04692f95986df6042ad57a54cf19ea467a11c19de;source:603061da297c5422a7ba1750a110d80bf26b4757",
+  "cells": 44,
+  "combined_source_id": "do-combined-capacity-20260829",
+  "controller_source_id": "do-six-hour-variation-20260828-r1",
+  "controller_summary_sha256": "5db5a490ce3c518c4ae555b04d96dc5983489b0ddf02d8534caae3d8e99e2521",
+  "fallback_source_id": "do-combined-capacity-20260828",
+  "load_block_summary_sha256": "102db128ee590f9b6575e7eb7a55dd57e83432a3bcb4d54d6c6d057bb8160f15",
+  "output_sha256": "24859c1c59a4e6854afc477caf9ba210faded8d7d2a117b1d7c7670e45131b53",
+  "provenance_counts": {
+    "do-combined-capacity-20260828": 19,
+    "do-six-hour-variation-20260828-r1": 25
+  }
+}

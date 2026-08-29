@@ -1186,6 +1186,29 @@ def test_tool_quality_requires_exact_parsed_function_and_city() -> None:
     assert score_result(context, context_result)[0] == 0
 
 
+def test_capacity_quality_scorers_cover_structure_and_realized_length() -> None:
+    structured = replace(
+        _spec("structured-load"),
+        metadata={"quality": "json_keys", "expected_keys": ["summary", "risks"]},
+    )
+    result = _success(structured.logical_id)
+    result.output_text = '{"summary":"ok","risks":[]}'
+    assert score_result(structured, result)[0] == 1
+    result.output_text = '{"summary":"ok","risks":[],"extra":true}'
+    assert score_result(structured, result)[0] == 0
+
+    longform = replace(
+        _spec("longform-load"),
+        metadata={"quality": "longform_completion", "minimum_output_tokens": 750},
+    )
+    result = _success(longform.logical_id)
+    result.output_text = "nonempty"
+    result.output_tokens = 749
+    assert score_result(longform, result)[0] == 0
+    result.output_tokens = 750
+    assert score_result(longform, result)[0] == 1
+
+
 def test_empty_sse_is_protocol_error(monkeypatch, route) -> None:
     monkeypatch.setenv("TEST_API_KEY", "fixture-only")
 
@@ -1294,10 +1317,10 @@ def test_nonintegral_usage_is_invalid_and_not_billable(monkeypatch, route) -> No
 
 
 def test_reasoning_state_stratifies_and_censors_visible_decode_proxy() -> None:
-    zero = _success("zero")
-    positive = _success("positive")
+    zero = _success("zero", total_seconds=2.0)
+    positive = _success("positive", total_seconds=2.0)
     positive.reasoning_tokens = 4
-    unknown = _success("unknown")
+    unknown = _success("unknown", total_seconds=2.0)
     unknown.reasoning_tokens = None
     assert assess_result(zero).decode_eligible
     assert not assess_result(positive).decode_eligible
@@ -1886,6 +1909,19 @@ def test_terminal_run_directory_refuses_live_reuse(tmp_path, campaign) -> None:
     with pytest.raises(ValueError, match="already terminal"):
         asyncio.run(run_campaign(campaign, tmp_path, invocation=("inference-bench", "run")))
     assert snapshot() == before
+
+
+def test_runtime_identity_failure_creates_no_run_state(tmp_path, campaign, monkeypatch) -> None:
+    output = tmp_path / "new-run"
+
+    def fail_manifest(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("live runs require clean committed source")
+
+    monkeypatch.setattr("inference_bench.cli._runtime_manifest", fail_manifest)
+    with pytest.raises(RuntimeError, match="clean committed source"):
+        asyncio.run(run_campaign(campaign, output, invocation=("inference-bench", "run")))
+
+    assert not output.exists()
 
 
 def test_sealed_terminal_run_does_not_repair_missing_projection(tmp_path, campaign) -> None:

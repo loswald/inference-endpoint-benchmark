@@ -308,6 +308,50 @@ def _valid_aimd_controller_payload() -> dict[str, object]:
     }
 
 
+def test_controller_summary_prefers_complete_event_over_censored_companion() -> None:
+    payload = _valid_aimd_controller_payload()
+    payload.update(
+        {
+            "highest_observed_healthy_rps": None,
+            "healthy_lower_bound_rps": None,
+            "unhealthy_upper_bound_rps": 0.25,
+            "overload_observed": True,
+            "capacity_bound_state": "left_censored_no_healthy_at_lowest_tested_rate",
+            "controller_completion_state": "completed_no_healthy_at_lowest_tested_rate",
+            "confirmations_required": 0,
+            "confirmation_healthy": [],
+            "confirmation_eligible": [],
+            "confirmation_censor_reasons": [],
+            "confirmation_all_healthy": False,
+        }
+    )
+    events = [
+        _controller_event(
+            "aimd_controller_censored",
+            {
+                "route_id": "r",
+                "shape": "cell",
+                "reason": "measured_unhealthy_at_all_baseline_rates",
+            },
+        ),
+        _controller_event("aimd_complete", payload),
+        _controller_event("campaign_terminal", {"reason": "plan_completed"}),
+    ]
+
+    rows = summarize_controller_events(
+        events,
+        public_config=_single_controller_config("aimd"),
+        coverage_rows=[],
+    )
+
+    assert rows[0]["controller_completion_state"] == (
+        "completed_no_healthy_at_lowest_tested_rate"
+    )
+    assert rows[0]["capacity_bound_state"] == (
+        "left_censored_no_healthy_at_lowest_tested_rate"
+    )
+
+
 @pytest.mark.parametrize(
     ("updates", "message"),
     [
@@ -486,6 +530,44 @@ def test_request_latency_summary_is_explicitly_success_conditioned(tmp_path, rou
     ledger.close()
 
 
+def test_report_reapplies_short_decode_window_guard_to_historical_rows(tmp_path, route) -> None:
+    ledger = Ledger(tmp_path)
+    ledger.initialize(campaign_hash="a" * 64, config_json="{}")
+    spec = _spec(0)
+    result = _result(0, 0.7)
+    assert ledger.claim(
+        request_id="historical-burst",
+        attempt_index=1,
+        spec=spec,
+        route=route,
+        reserved_usd=0.001,
+        max_cost_usd=10,
+        cost_reserve_usd=1,
+        scheduled_at_utc=None,
+    )
+    ledger.finish(
+        request_id="historical-burst",
+        result=result,
+        validity=assess_result(result),
+        quality_score=None,
+        final_logical=True,
+    )
+    rows = ledger.rows()
+    # Simulate a terminal row written under the earlier 10 ms public decode contract.
+    rows[0]["decode_eligible"] = 1
+    rows[0]["validity_class"] = "valid"
+    rows[0]["validity_reasons_json"] = "[]"
+    summary = summarize_rows(rows)[0]
+    assert summary["decode_proxy_tps_p50"] is None
+    assert summary["decode_short_window_excluded_n"] == 1
+    audit = build_outlier_audit(rows)
+    entry = next(item for item in audit if item["request_id"] == "historical-burst")
+    assert entry["audit_class"] == "censored"
+    assert entry["reasons"] == ["decode_proxy_observation_window_below_one_second"]
+    assert "decode_proxy_tokens_per_second" in entry["excluded_estimands"]
+    ledger.close()
+
+
 def test_audit_preserves_valid_extreme_and_report_has_contract(
     tmp_path, route, monkeypatch
 ) -> None:
@@ -501,7 +583,7 @@ def test_audit_preserves_valid_extreme_and_report_has_contract(
     ledger = Ledger(tmp_path)
     ledger.initialize(campaign_hash="a" * 64, config_json="{}")
     _attach_run_manifest(ledger)
-    for index, seconds in enumerate([1, 1, 1, 1, 100]):
+    for index, seconds in enumerate([2, 2, 2, 2, 100]):
         spec = _spec(index)
         result = _result(index, seconds)
         if index == 0:
