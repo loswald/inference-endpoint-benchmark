@@ -587,6 +587,40 @@ def test_total_tokens_must_match_components_for_nonstream_and_stream(monkeypatch
     assert "total_tokens_mismatch_input_plus_output" in split.usage_parse_errors
 
 
+def test_total_tokens_may_add_separately_reported_reasoning(monkeypatch, route) -> None:
+    monkeypatch.setenv("TEST_API_KEY", "not-written")
+
+    async def infer(body: str, *, stream: bool):
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, text=body)
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        result = await OpenAICompatibleAdapter(client).infer(route, _spec(stream=stream))
+        await client.aclose()
+        return result
+
+    usage = {
+        "prompt_tokens": 3,
+        "completion_tokens": 2,
+        "total_tokens": 8,
+        "completion_tokens_details": {"reasoning_tokens": 3},
+    }
+    response = {
+        "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+        "usage": usage,
+    }
+    nonstream = asyncio.run(infer(json.dumps(response), stream=False))
+    assert nonstream.usage_parse_errors == ()
+
+    stream_event = {
+        "choices": [{"index": 0, "delta": {"content": "ok"}, "finish_reason": "stop"}],
+        "usage": usage,
+    }
+    stream_body = f"data: {json.dumps(stream_event)}\n\ndata: [DONE]\n\n"
+    streamed = asyncio.run(infer(stream_body, stream=True))
+    assert streamed.usage_parse_errors == ()
+
+
 def test_duplicate_keys_are_protocol_errors_in_body_sse_and_tool_arguments(
     monkeypatch, route
 ) -> None:

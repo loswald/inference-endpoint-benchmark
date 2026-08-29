@@ -1017,13 +1017,6 @@ def _parse_usage(value: Any) -> UsageMetrics:
         [("total_tokens", value["total_tokens"])] if value.get("total_tokens") is not None else [],
         errors,
     )
-    if (
-        total_tokens is not None
-        and input_tokens is not None
-        and output_tokens is not None
-        and total_tokens != input_tokens + output_tokens
-    ):
-        errors.append("total_tokens_mismatch_input_plus_output")
     cache_candidates: list[tuple[str, Any]] = []
     for details_field in ("prompt_tokens_details", "input_tokens_details"):
         details = value.get(details_field)
@@ -1048,6 +1041,17 @@ def _parse_usage(value: Any) -> UsageMetrics:
     if "reasoning_tokens" in value and value["reasoning_tokens"] is not None:
         reasoning_candidates.append(("reasoning_tokens", value["reasoning_tokens"]))
     reasoning = _consistent_alias_count("reasoning_tokens", reasoning_candidates, errors)
+    if (
+        total_tokens is not None
+        and input_tokens is not None
+        and output_tokens is not None
+        and total_tokens != input_tokens + output_tokens
+        and (
+            reasoning is None
+            or total_tokens != input_tokens + output_tokens + reasoning
+        )
+    ):
+        errors.append("total_tokens_mismatch_input_plus_output")
     return UsageMetrics(
         input_tokens, output_tokens, cache_read, reasoning, total_tokens, tuple(errors)
     )
@@ -1084,6 +1088,13 @@ def _parse_stream_usage(values: list[Any]) -> UsageMetrics:
         and aggregate["input_tokens"] is not None
         and aggregate["output_tokens"] is not None
         and aggregate["total_tokens"] != aggregate["input_tokens"] + aggregate["output_tokens"]
+        and (
+            aggregate["reasoning_tokens"] is None
+            or aggregate["total_tokens"]
+            != aggregate["input_tokens"]
+            + aggregate["output_tokens"]
+            + aggregate["reasoning_tokens"]
+        )
     ):
         errors.append("total_tokens_mismatch_input_plus_output")
     return UsageMetrics(
