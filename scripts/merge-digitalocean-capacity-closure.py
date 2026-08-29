@@ -66,6 +66,11 @@ def main() -> int:
     parser.add_argument("--controllers", type=Path, required=True)
     parser.add_argument("--load-blocks", type=Path, required=True)
     parser.add_argument("--source-id", required=True)
+    parser.add_argument(
+        "--controller-source-id",
+        required=True,
+        help="Exact campaign that produced --controllers and --load-blocks.",
+    )
     parser.add_argument("--fallback-source-id", required=True)
     parser.add_argument("--campaign-sha256s", required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -85,6 +90,35 @@ def main() -> int:
         for row in base_rows
         if row.get("source_id") == args.fallback_source_id
     }
+
+    def fallback_row(endpoint: str, runner_shape: str) -> dict[str, str]:
+        """Return prior evidence without silently changing its registered recipe.
+
+        The current closure calls its long-input recipe ``long_short`` and registers a 100K
+        prompt (50K for Minimax).  Older evidence used a 32K prompt.  A fallback row may be
+        relabelled as 100K only when its own provenance is the 2026-08-28 100K closure; a row
+        sourced from the historical 32K campaign keeps its 32K identity.
+        """
+
+        public_shape = SHAPE_MAP[runner_shape]
+        exact = fallback.get((endpoint, public_shape))
+        if exact is not None:
+            return dict(exact)
+        if runner_shape != "long_short":
+            return dict(fallback[(endpoint, public_shape)])
+        historical = dict(fallback[(endpoint, "input32k_short")])
+        if historical.get("provenance_source_id") == "do-capacity-20260828-r2":
+            historical["shape"] = "input100k_short"
+            historical["workload_input_target_tokens"] = str(
+                args.minimax_long_input_tokens
+                if endpoint == "minimax-m2.5"
+                else args.long_input_tokens
+            )
+            historical["workload_recipe_identity"] = (
+                "input50k_short" if endpoint == "minimax-m2.5" else "input100k_short"
+            )
+        return historical
+
     combined: list[dict[str, str]] = []
     provenance_counts: dict[str, int] = defaultdict(int)
     for controller in controllers:
@@ -93,9 +127,8 @@ def main() -> int:
         public_shape = SHAPE_MAP[runner_shape]
         state = controller["controller_completion_state"]
         bound_state = controller["capacity_bound_state"]
-        key = (endpoint, public_shape)
         if not bound_state or state == "campaign_censored_before_start":
-            row = dict(fallback[key])
+            row = fallback_row(endpoint, runner_shape)
             row["source_id"] = args.source_id
             row["provenance_source_id"] = args.fallback_source_id
             row["provenance_controller_state"] = state
@@ -152,7 +185,7 @@ def main() -> int:
                     "registered open-loop AIMD bound with three separated confirmations when "
                     "a numeric healthy lower bound is present"
                 ),
-                "provenance_source_id": "do-capacity-20260828-r2",
+                "provenance_source_id": args.controller_source_id,
                 "provenance_controller_state": state,
                 "provenance_capacity_bound_state": bound_state,
                 "provenance_campaign_sha256s": args.campaign_sha256s,
@@ -199,16 +232,14 @@ def main() -> int:
                     "effective_input_tpm_ci95": interval(candidate, "successful_input_tpm"),
                     "effective_output_tpm": candidate.get("successful_output_tpm", ""),
                     "effective_output_tpm_ci95": interval(candidate, "successful_output_tpm"),
-                    "latency_p95_seconds": candidate.get(
-                        "service_latency_p95_across_blocks", ""
-                    ),
+                    "latency_p95_seconds": candidate.get("service_latency_p95_across_blocks", ""),
                     "latency_p95_seconds_ci95": interval(
                         candidate, "service_latency_p95_across_blocks"
                     ),
                 }
             )
         combined.append(row)
-        provenance_counts["do-capacity-20260828-r2"] += 1
+        provenance_counts[args.controller_source_id] += 1
 
     retained = [row for row in base_rows if row.get("source_id") != args.source_id]
     fields = sorted(
@@ -230,6 +261,7 @@ def main() -> int:
         writer.writerows(retained + combined)
     manifest = {
         "combined_source_id": args.source_id,
+        "controller_source_id": args.controller_source_id,
         "fallback_source_id": args.fallback_source_id,
         "campaign_sha256s": args.campaign_sha256s,
         "cells": len(combined),

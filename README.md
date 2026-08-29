@@ -11,13 +11,12 @@ workload; the software does not manufacture a single global score.
 
 ## Evidence status
 
-- [DigitalOcean hosted inference status](reports/digitalocean/README.md) — 11 exact hosted open-model
-  endpoints. This is an auditable partial dataset, not a complete production-qualification report.
-  The former PDF decision aid is withdrawn while its pass/fail and 32K-versus-100K comparison defects
-  are corrected. Current headline evidence: 19/44 confirmed adaptive-load bounds and 3/44 passing
-  120-second fixed-rate stability tests. The corrected, plain-language
-  [interim evidence atlas](published/digitalocean-atlas/digitalocean-hosted-inference-evidence-atlas.pdf)
-  shows every measured, failed, unsupported, and unresolved cell without treating blanks as results.
+- [DigitalOcean hosted inference report](published/digitalocean-final-report/digitalocean-inference-endpoints-technical-benchmark-2026-08-29.pdf)
+  — the complete dated package for the 11 exact hosted open-model endpoints frozen on 28-29 August
+  2026. It combines 44/44 adaptive-load cells, 44/44 two-minute fixed-rate cells, a 1,232-request
+  matched six-hour study, capabilities, caching, context/output limits, uncertainty intervals, and
+  one plain-language production decision page per endpoint. See the
+  [method and data guide](reports/digitalocean/README.md).
 - Azure AI Foundry, Amazon Bedrock, and Google Vertex AI — corrected load, sustained-soak, and
   matched time-panel measurements are in progress. Their atlas will be published only after the
   final evidence and every rendered page pass the same integrity and visual checks.
@@ -210,11 +209,13 @@ inference-bench report-matrix .private/providers.yaml \
 inference-bench derive-soak provider.yaml runs/provider/report/controller-summary.csv \
   --output .private/provider-soak.yaml
 
-# Re-render a sanitized DigitalOcean direct-run summary package with the clean atlas style.
-inference-bench report-digitalocean-summary private/do-summary \
-  --capacity-source do-sixhour-aimd-20260824-r1 \
-  --soak-source do-direct-soak-20260823-r1 \
-  --output published/digitalocean-atlas
+# Rebuild and verify the final DigitalOcean package from a verified aggregate run directory.
+PYTHONPATH=src python scripts/build-digitalocean-final-report.py \
+  --run-dir private/do-six-hour-variation-20260828-r1 \
+  --summary-dir reports/digitalocean \
+  --output published/digitalocean-final-report
+PYTHONPATH=src python scripts/verify-digitalocean-final-publication.py \
+  published/digitalocean-final-report
 ```
 
 Every provider gets its own configuration, wall-clock cap, output directory, and durable ledger.

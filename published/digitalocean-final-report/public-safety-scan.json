@@ -1,0 +1,7 @@
+{
+  "files_scanned": 35,
+  "findings": [],
+  "passed": true,
+  "root_name": "digitalocean-final-report",
+  "schema_version": "public-artifact-safety-scan/v1"
+}

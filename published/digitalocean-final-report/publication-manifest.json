@@ -1,0 +1,177 @@
+{
+  "files": [
+    {
+      "bytes": 5458,
+      "path": "README.md",
+      "sha256": "e606b9cfb0167cb0aba5241c5bd36ef37222044a93ec48e3af6bf9ef71f3f142"
+    },
+    {
+      "bytes": 139351,
+      "path": "data/cache-state-metrics.csv",
+      "sha256": "26c61c60d0d42ef61a6b0a78f82e557de1ebcaef0759810b2db07a3aaca19779"
+    },
+    {
+      "bytes": 1322,
+      "path": "data/cache-verification-pairs.csv",
+      "sha256": "bac0a92542f6b50062f9e11c92787f15daa53e507d531c6a262af91e08a6cb9e"
+    },
+    {
+      "bytes": 60006,
+      "path": "data/capability-evidence.csv",
+      "sha256": "ac28bd0d03ef5fd0cf30a01d4b44b44fb9c8322ba4c518f54e89423a99270d4c"
+    },
+    {
+      "bytes": 10915,
+      "path": "data/capacity-controller-summary-20260828.csv",
+      "sha256": "1d2fde190afc63be66aaa5ca2e9102ae2bce514577fe2603f49e1de30f535db8"
+    },
+    {
+      "bytes": 234680,
+      "path": "data/capacity-coverage-ledger-20260828.csv",
+      "sha256": "5c0af4859eeb6acbc65988b2f644567f5143a1d094c9cb12f6a918816026bf1f"
+    },
+    {
+      "bytes": 230695,
+      "path": "data/capacity-load-block-summary-20260828.csv",
+      "sha256": "bd27ea60bde7ddbe39df2575b61eebbf76fb0634ca4ec309b533a449e320b211"
+    },
+    {
+      "bytes": 818,
+      "path": "data/capacity-provenance-manifest.json",
+      "sha256": "0854eccf57e810539b097200eaa8acb3f1cb752efe8cdec0853216327cdf9583"
+    },
+    {
+      "bytes": 271148,
+      "path": "data/capacity-summary.csv",
+      "sha256": "3529d4f9d09163155a01a9b99adc5554c244d37a8da223d2a33a8b89a8c7c733"
+    },
+    {
+      "bytes": 10440,
+      "path": "data/coverage-matrix.csv",
+      "sha256": "af3480191c711d1de3fe3675835bd26f325e060e9a5251a3cf2d821018968d4b"
+    },
+    {
+      "bytes": 3027,
+      "path": "data/endpoint-inventory.csv",
+      "sha256": "53789adc55ad15b5ac44a8f705848c8f144ae6ea8d621c7c718825e7f902a405"
+    },
+    {
+      "bytes": 2207,
+      "path": "data/endpoint-summary.csv",
+      "sha256": "d52dbdd6f236bfa87ec2d58371b3ce75f5d51669a8ff57c2f65018dcbf4b3de0"
+    },
+    {
+      "bytes": 10350,
+      "path": "data/observed-limits.csv",
+      "sha256": "5a02bd2815536a824f201a84a6d8cba1fceea6c8b2edba6b0e10e0ddca89563e"
+    },
+    {
+      "bytes": 91246,
+      "path": "data/quality-pair-summary.csv",
+      "sha256": "98ab05b64bd9a18102353f5c63aecf8a798129a0d5d4e753cb22dc83a4f064a3"
+    },
+    {
+      "bytes": 41145,
+      "path": "data/recovery-summary.csv",
+      "sha256": "d0c73aa859491edfd8a636018a009b3d4ee0cea91910c3f98b4796803b9aab22"
+    },
+    {
+      "bytes": 151194,
+      "path": "data/soak-block-summary.csv",
+      "sha256": "8c2f5e73b3f9783ec54d58ffaa468c8dd1da323dffe14f9b57a26c4d663579c5"
+    },
+    {
+      "bytes": 52713,
+      "path": "data/soak-cell-summary.csv",
+      "sha256": "61fb9194910e14be469f7c69a149bc1e272823823d646a9d3f21490bf5323607"
+    },
+    {
+      "bytes": 1193,
+      "path": "data/static-verification-manifest.json",
+      "sha256": "821bf16fcad0fe3003c88fd60b0afd64e923fe7de925a8d2643096585fb93286"
+    },
+    {
+      "bytes": 5650,
+      "path": "data/static-verification-summary.csv",
+      "sha256": "075cac1833a1058e1842238ae5eadeb2dec14c8a43f28bc5bdf543e47f6fb636"
+    },
+    {
+      "bytes": 77603,
+      "path": "data/variation-across-panel-summary.csv",
+      "sha256": "e828b4c4460e062c543a20622a4d09d537ec3fe4f6e3e154c66ea9c11c5fcdfd"
+    },
+    {
+      "bytes": 147513,
+      "path": "data/variation-paired-cache-effects.csv",
+      "sha256": "535bc3c37d7a325c26c16990d400aff7d32a63c71a8c1b1774c8af0f741d1d82"
+    },
+    {
+      "bytes": 615821,
+      "path": "data/variation-panel-summary.csv",
+      "sha256": "c1a8dfa463758b2da75d835189a95e0dabe881ab4b1e9172bfc46362f1997767"
+    },
+    {
+      "bytes": 1599,
+      "path": "data/variation-provenance-manifest.json",
+      "sha256": "fcf420b5fc2b606694d0ddaf0dc0e17eeb149f2e7595290ffa8ca89d7c288fe2"
+    },
+    {
+      "bytes": 2694900,
+      "path": "data/variation-summary.json",
+      "sha256": "222f17ecd8baf41598a52d35b025a980b2362f0e64fa037f16da2456f2b0b206"
+    },
+    {
+      "bytes": 1402598,
+      "path": "digitalocean-inference-endpoints-technical-benchmark-2026-08-29.pdf",
+      "sha256": "f7ec2a24b03dce1f6c88818ac9c21a38e4f6aa4703c9d840eaa6bfad2dff80d0"
+    },
+    {
+      "bytes": 150274,
+      "path": "figures/adaptive-load-input100k_short.png",
+      "sha256": "9d0ccc774540d1354093d53f5e30c58e532c941acd15efdd051368c76f80f99d"
+    },
+    {
+      "bytes": 135958,
+      "path": "figures/adaptive-load-mixed.png",
+      "sha256": "57dba3b966b45e28c4c99a45ebfe9667318d51f0d61410902b6fa100f6690206"
+    },
+    {
+      "bytes": 144688,
+      "path": "figures/adaptive-load-short_long.png",
+      "sha256": "5b36bc2328271a9891166e49b6e7730ea7eda116c231412efcc36219bd1bdd0a"
+    },
+    {
+      "bytes": 137492,
+      "path": "figures/adaptive-load-short_short.png",
+      "sha256": "d4c0d6ab1edcd46cd38580619fbca1bfdba31731cc8b65d47d097119ae442455"
+    },
+    {
+      "bytes": 135126,
+      "path": "figures/fixed-rate-stability-matrix.png",
+      "sha256": "6d4cab077f9b47a57aaef39076e3813e699cc68138037adabbb6032e651ef896"
+    },
+    {
+      "bytes": 180285,
+      "path": "figures/prompt-reuse-effect.png",
+      "sha256": "5205a017244f7c4dd125a48406b447336bdfb4d976c449da62e89ffff26bb4cc"
+    },
+    {
+      "bytes": 80426,
+      "path": "figures/six-hour-panel-outcomes.png",
+      "sha256": "f9af5b84199a5d9e84fcf428422704d41669aede4e10e05d0eac38bab518f15c"
+    },
+    {
+      "bytes": 145506,
+      "path": "figures/six-hour-reliability-forest.png",
+      "sha256": "779f316ba7dc0d994df1af3e7458fa369f0d6cabc7b47e3b1c300e0a9108d3e8"
+    },
+    {
+      "bytes": 160,
+      "path": "public-safety-scan.json",
+      "sha256": "46c278f09c8ea6457e4a5793fdf39d215097dd09b2b5337629c14a2610839c0e"
+    }
+  ],
+  "hash_algorithm": "sha256",
+  "path_format": "relative-posix",
+  "schema_version": "publication-manifest/v1"
+}
