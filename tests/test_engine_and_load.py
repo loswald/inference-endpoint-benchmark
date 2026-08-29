@@ -1521,6 +1521,55 @@ def test_impossible_provider_usage_settles_conservative_reservation(tmp_path, ca
     assert row["validity_class"] == "invalid"
 
 
+def test_provider_output_within_route_limit_tolerance_is_usage_eligible(
+    tmp_path, campaign
+) -> None:
+    class ToleratedUsageAdapter(SequenceAdapter):
+        async def infer(self, route, request):
+            result = _result(request.logical_id)
+            result.output_tokens = request.max_output_tokens + 10
+            return result
+
+    async def run():
+        tolerant_route = replace(campaign.routes[0], output_limit_tolerance_tokens=10)
+        tolerant_campaign = replace(campaign, routes=(tolerant_route,))
+        engine, ledger = _engine(tmp_path, tolerant_campaign, ToleratedUsageAdapter())
+        result = await engine.execute(_spec("within-output-tolerance"))
+        row = ledger.rows()[0]
+        await engine.close()
+        ledger.close()
+        return result, row
+
+    result, row = asyncio.run(run())
+    assert result is not None
+    assert "provider_output_tokens_exceed_request_limit" not in result.usage_parse_errors
+    assert row["usage_eligible"] == 1
+
+
+def test_provider_output_beyond_route_limit_tolerance_is_rejected(tmp_path, campaign) -> None:
+    class ExcessUsageAdapter(SequenceAdapter):
+        async def infer(self, route, request):
+            result = _result(request.logical_id)
+            result.output_tokens = request.max_output_tokens + 11
+            return result
+
+    async def run():
+        tolerant_route = replace(campaign.routes[0], output_limit_tolerance_tokens=10)
+        tolerant_campaign = replace(campaign, routes=(tolerant_route,))
+        engine, ledger = _engine(tmp_path, tolerant_campaign, ExcessUsageAdapter())
+        result = await engine.execute(_spec("beyond-output-tolerance"))
+        row = ledger.rows()[0]
+        await engine.close()
+        ledger.close()
+        return result, row
+
+    result, row = asyncio.run(run())
+    assert result is not None
+    assert "provider_output_tokens_exceed_request_limit" in result.usage_parse_errors
+    assert row["usage_eligible"] == 0
+    assert row["validity_class"] == "invalid"
+
+
 def test_reasoning_tokens_cannot_exceed_billed_output_tokens(tmp_path, campaign) -> None:
     class ImpossibleReasoningUsageAdapter(SequenceAdapter):
         async def infer(self, route, request):

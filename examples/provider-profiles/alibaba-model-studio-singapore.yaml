@@ -17,6 +17,7 @@ route_defaults:
   context_tokens: 1000000
   max_output_tokens: null
   output_limit_field: max_completion_tokens
+  output_limit_tolerance_tokens: 10
   stream_usage_mode: required
   request_timeout_seconds: 3600
   http2: false
@@ -26,7 +27,7 @@ route_defaults:
   documentation_source_url: https://www.alibabacloud.com/help/en/model-studio/qwen-api-reference
   pricing_source_url: https://www.alibabacloud.com/help/en/model-studio/model-pricing
   evidence_retrieved_at_utc: "2026-08-29T00:00:00Z"
-  evidence_bundle_sha256: f4935e66219f4ecfdf30a637e4a695dbf453298e55253799cda8c5af7c8647f5
+  evidence_bundle_sha256: 053ee97b43d8082ffcdb15915312d2c86469ad321fc77110a3d3d29cfde2d8f3
   capabilities:
     documentation_checked_utc: "2026-08-29T00:00:00Z"
     streaming: true

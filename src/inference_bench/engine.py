@@ -305,7 +305,10 @@ class BenchmarkEngine:
             max(spec.planned_input_tokens, materialized.input_token_upper_bound)
             * self.config.input_token_reservation_factor
         )
-        reservation = route.worst_case_cost(reserved_input_tokens, spec.max_output_tokens)
+        reservation = route.worst_case_cost(
+            reserved_input_tokens,
+            spec.max_output_tokens + route.output_limit_tolerance_tokens,
+        )
         last: InferenceResult | None = None
         for attempt in range(start_attempt, self.config.retries + 2):
             if self.payment_required_latched:
@@ -457,7 +460,9 @@ class BenchmarkEngine:
                     usage_bound_errors = list(result.usage_parse_errors)
                     if int(result.input_tokens or 0) > reserved_input_tokens:
                         usage_bound_errors.append("provider_input_tokens_exceed_reservation")
-                    if int(result.output_tokens or 0) > spec.max_output_tokens:
+                    if int(result.output_tokens or 0) > (
+                        spec.max_output_tokens + route.output_limit_tolerance_tokens
+                    ):
                         usage_bound_errors.append("provider_output_tokens_exceed_request_limit")
                     result.usage_parse_errors = tuple(usage_bound_errors)
                 else:

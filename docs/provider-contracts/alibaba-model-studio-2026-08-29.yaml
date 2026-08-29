@@ -103,6 +103,13 @@ provider_contracts:
   stream_usage:
     include_usage_request_field: stream_options.include_usage
     terminal_usage_chunk: true
+  output_limit:
+    request_field: max_completion_tokens
+    reported_output_count_tolerance_tokens: 10
+    contract: >-
+      Alibaba documents that the actual output-token count can differ from the requested
+      max_completion_tokens value by up to 10 tokens. Counts above request plus 10 remain an
+      invalid usage-bound violation.
   caching:
     implicit: automatic_best_effort_exact_prefix
     implicit_minimum_prefix_tokens: 256
@@ -198,6 +205,8 @@ source_bindings:
     - https://www.alibabacloud.com/help/en/model-studio/qwen-api-reference
     - https://www.alibabacloud.com/help/en/model-studio/qwen-api-via-openai-chat-completions
     - https://www.alibabacloud.com/help/en/model-studio/qwen-api-via-openai-responses
+  output_limit_tolerance:
+    - https://www.alibabacloud.com/help/en/model-studio/qwen-api-via-openai-chat-completions
   price_and_quota:
     - https://www.alibabacloud.com/help/en/model-studio/model-pricing
     - https://www.alibabacloud.com/help/en/model-studio/rate-limit

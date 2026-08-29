@@ -286,7 +286,8 @@ def build_digitalocean_closure_package(
                     spec,
                     validated.input_token_reservation_factor,
                 ),
-                spec.max_output_tokens,
+                spec.max_output_tokens
+                + route_by_id[spec.route_id].output_limit_tolerance_tokens,
             )
             for spec in panel_specs
         ),

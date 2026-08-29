@@ -88,6 +88,20 @@ def test_route_identity_binds_stream_usage_mode(route: RouteConfig) -> None:
         replace(route, stream_usage_mode="automatic")
 
 
+def test_output_limit_tolerance_is_nonnegative_identity_bound_and_public(
+    route: RouteConfig, campaign: CampaignConfig
+) -> None:
+    assert route.output_limit_tolerance_tokens == 0
+    tolerant = replace(route, output_limit_tolerance_tokens=10)
+    assert tolerant.identity_hash != route.identity_hash
+    public = replace(campaign, routes=(tolerant,)).public_dict()["routes"][0]
+    assert public["output_limit_tolerance_tokens"] == 10
+
+    for invalid in (-1, True, 1.5):
+        with pytest.raises(ValueError, match="nonnegative integer"):
+            replace(route, output_limit_tolerance_tokens=invalid)
+
+
 def test_route_identity_binds_timeout_and_documentation_evidence(route: RouteConfig) -> None:
     assert replace(route, request_timeout_seconds=900).identity_hash != route.identity_hash
     assert replace(route, evidence_bundle_sha256="b" * 64).identity_hash != route.identity_hash

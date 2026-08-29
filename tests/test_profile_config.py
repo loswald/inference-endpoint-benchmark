@@ -231,6 +231,15 @@ def test_public_alibaba_profile_compiles_without_resolving_credentials(tmp_path:
     assert all(route.adapter == "alibaba_model_studio" for route in routes.values())
     assert all(route.billing_channel == "pay_as_you_go" for route in routes.values())
     assert all(route.auth.env == "DASHSCOPE_API_KEY" for route in routes.values())
+    assert all(route.output_limit_tolerance_tokens == 10 for route in routes.values())
+
+    contract_path = (
+        ROOT / "docs" / "provider-contracts" / "alibaba-model-studio-2026-08-29.yaml"
+    )
+    assert all(
+        route.evidence_bundle_sha256 == hashlib.sha256(contract_path.read_bytes()).hexdigest()
+        for route in routes.values()
+    )
 
 
 def test_public_azure_foundry_profile_is_exactly_the_five_live_proved_text_routes(

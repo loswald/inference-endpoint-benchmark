@@ -351,6 +351,7 @@ class RouteConfig:
     context_tokens: int | None = None
     max_output_tokens: int | None = None
     output_limit_field: str = "max_tokens"
+    output_limit_tolerance_tokens: int = 0
     stream_usage_mode: Literal["required", "try", "omit"] = "omit"
     request_timeout_seconds: float = 180.0
     http2: bool = False
@@ -475,6 +476,12 @@ class RouteConfig:
             raise ValueError(
                 "output_limit_field must be max_tokens, max_completion_tokens, or max_output_tokens"
             )
+        if (
+            isinstance(self.output_limit_tolerance_tokens, bool)
+            or not isinstance(self.output_limit_tolerance_tokens, int)
+            or self.output_limit_tolerance_tokens < 0
+        ):
+            raise ValueError("output_limit_tolerance_tokens must be a nonnegative integer")
         if self.stream_usage_mode not in {"required", "try", "omit"}:
             raise ValueError("stream_usage_mode must be required, try, or omit")
         if (
@@ -674,6 +681,7 @@ class RouteConfig:
                 "context_tokens": self.context_tokens,
                 "max_output_tokens": self.max_output_tokens,
                 "output_limit_field": self.output_limit_field,
+                "output_limit_tolerance_tokens": self.output_limit_tolerance_tokens,
                 "stream_usage_mode": self.stream_usage_mode,
                 "request_timeout_seconds": self.request_timeout_seconds,
                 "http2": self.http2,
