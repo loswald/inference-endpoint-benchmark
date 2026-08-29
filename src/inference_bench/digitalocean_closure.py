@@ -286,7 +286,7 @@ def build_digitalocean_closure_package(
             )
             for spec in panel_specs
         ),
-        12,
+        9,
     )
     panel_count = 7
     panel_samples_per_route_shape = 4
