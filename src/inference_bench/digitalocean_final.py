@@ -152,7 +152,7 @@ def _state_text(value: str) -> str:
     mapping = {
         "confirmed_right_censored_lower_bound": "Repeatedly passed through tested ceiling",
         "confirmed_bracketed_interval": "Repeatedly passed lower rate; failed higher rate",
-        "censored_no_valid_healthy_epoch": "Failed at lowest tested rate",
+        "censored_no_valid_healthy_epoch": "No healthy baseline established within tested range",
         "unconfirmed_healthy_observation_only": "Healthy observation; not repeat-confirmed",
         "measured_capacity_state_without_numeric_bound": "Measured; no numeric bound",
         "censored_nonmonotonic_overload": "Non-monotonic response; no numeric bound",
@@ -169,7 +169,10 @@ def _capacity_result(row: dict[str, str]) -> str:
     if claim == "confirmed_right_censored_lower_bound" and low is not None:
         return f"at least {_format_rate(low)} req/s (tested lower bound)"
     if claim == "censored_no_valid_healthy_epoch" and high is not None:
-        return f"below {_format_rate(high)} req/s (failed lowest test)"
+        return (
+            f"no healthy baseline at tested rates; lowest {_format_rate(high)} req/s "
+            "(lower rates untested)"
+        )
     return _state_text(claim)
 
 
@@ -188,10 +191,15 @@ def _fixed_rate_state(row: dict[str, str]) -> str:
         return "not measured"
     if _bool(row.get("soak_acceptance_pass")) is True:
         return "passed"
+    status = str(row.get("status") or "")
+    if "transport_gate" in status or "baseline" in status and "gate" in status:
+        return "transport-gated"
     if _bool(row.get("execution_complete")) is not True:
         return "could not establish baseline"
-    if _bool(row.get("scientifically_complete")) is True or str(row.get("status")):
-        return "measured failure"
+    if _bool(row.get("scientifically_complete")) is True:
+        return "tested-rate non-pass"
+    if status:
+        return "measured unresolved"
     return "could not establish baseline"
 
 
@@ -812,11 +820,11 @@ def _plot_capacity_shape(
                 fontsize=8.4,
             )
         elif claim == "censored_no_valid_healthy_epoch" and high is not None:
-            ax.scatter([high], [position], marker="x", color=RED, s=58, zorder=3)
+            ax.scatter([high], [position], marker="|", color=ORANGE, s=80, zorder=3)
             ax.text(
                 high * 1.08,
                 position,
-                f"failed at {_format_rate(high)} req/s",
+                f"search stopped at {_format_rate(high)} req/s; lower untested",
                 va="center",
                 fontsize=8.4,
             )
@@ -845,8 +853,10 @@ def _plot_fixed_rate(fixed_rows: list[dict[str, str]], destination: Path) -> Pat
     index = {(row.get("endpoint_id"), row.get("shape")): row for row in usable}
     shapes = ("short_short", "input32k_short", "short_long", "mixed")
     values = {
-        "passed": 2,
-        "measured failure": 1,
+        "passed": 3,
+        "tested-rate non-pass": 2,
+        "transport-gated": 1,
+        "measured unresolved": 0,
         "could not establish baseline": 0,
         "not measured": -1,
     }
@@ -857,8 +867,8 @@ def _plot_fixed_rate(fixed_rows: list[dict[str, str]], destination: Path) -> Pat
         )
     from matplotlib.colors import BoundaryNorm, ListedColormap
 
-    cmap = ListedColormap(["#E2E8F0", "#94A3B8", "#FCA5A5", "#5EEAD4"])
-    norm = BoundaryNorm([-1.5, -0.5, 0.5, 1.5, 2.5], cmap.N)
+    cmap = ListedColormap(["#E2E8F0", "#94A3B8", "#FBBF24", "#FCA5A5", "#5EEAD4"])
+    norm = BoundaryNorm([-1.5, -0.5, 0.5, 1.5, 2.5, 3.5], cmap.N)
     fig, ax = plt.subplots(figsize=(10.3, 5.7))
     ax.imshow(matrix, aspect="auto", cmap=cmap, norm=norm)
     ax.set_xticks(range(len(shapes)), [SHAPE_LABELS[shape] for shape in shapes])
@@ -866,25 +876,42 @@ def _plot_fixed_rate(fixed_rows: list[dict[str, str]], destination: Path) -> Pat
     for y, endpoint in enumerate(ENDPOINTS):
         for x, shape in enumerate(shapes):
             state = _fixed_rate_state(index.get((endpoint, shape), {}))
-            label = {
+            headline = {
                 "passed": "PASS",
-                "measured failure": "FAIL",
-                "could not establish baseline": "GATED",
+                "tested-rate non-pass": "NON-PASS",
+                "transport-gated": "NO VALID TEST",
+                "measured unresolved": "UNRESOLVED",
+                "could not establish baseline": "NO VALID TEST",
                 "not measured": "NOT RUN",
             }[state]
+            row = index.get((endpoint, shape), {})
+            tested_rate = _number(row.get("candidate_rate_rps"))
+            label = (
+                f"{headline}\n{_format_rate(tested_rate)} req/s"
+                if tested_rate is not None
+                else headline
+            )
             ax.text(
                 x, y, label, ha="center", va="center", fontsize=8.0, color=INK, fontweight="bold"
             )
     ax.tick_params(axis="x", rotation=0, length=0, pad=9)
     ax.tick_params(axis="y", length=0)
     ax.set_title(
-        "Two-minute fixed-rate stability: registered acceptance result",
+        "Two-minute fixed-rate test: did the registered rules pass?",
         loc="left",
         fontweight="bold",
     )
     ax.spines[:].set_visible(False)
     ax.grid(False)
-    fig.tight_layout()
+    fig.text(
+        0.01,
+        0.01,
+        "NON-PASS means the tested rate did not meet every registered condition; it is not an "
+        "endpoint failure. Exact condition reasons are retained in the block table.",
+        fontsize=8.5,
+        color=SLATE,
+    )
+    fig.tight_layout(rect=(0, 0.05, 1, 1))
     return _save_figure(fig, destination)
 
 
@@ -1590,7 +1617,7 @@ def _build_pdf(
                 _caption(
                     styles,
                     "Open-loop offered traffic for this exact endpoint and recipe; a numeric result requires three separated healthy confirmations.",
-                    "A teal point is a repeatedly passing tested rate; an orange/red marker is a measured limit, failure, or non-confirmed state.",
+                    "A teal point is a repeatedly passing tested rate. An orange marker means the search did not establish a bound; read its direct label for the tested floor.",
                     "Theoretical maximum, recommended production rate, or performance for a different prompt/output recipe.",
                 ),
             ]
@@ -1605,7 +1632,7 @@ def _build_pdf(
             _caption(
                 styles,
                 "One candidate rate for four adjacent 30-second analysis blocks, with registered reliability, latency, queueing, usage, quality, and recovery checks.",
-                f"{fixed_passes} of 44 endpoint-by-workload cells passed every acceptance condition; measured failures are evidence, not missing data.",
+                f"{fixed_passes} of 44 endpoint-by-workload cells passed every acceptance condition. Non-passes mean the tested rate missed at least one condition; transport-gated cells have no scientific pass/fail result.",
                 "Six-hour stability or safe operation above the tested rate. Adjacent-block intervals do not model serial correlation.",
             ),
             PageBreak(),
@@ -1856,7 +1883,7 @@ def _build_pdf(
                 styles["table"],
             ),
             Paragraph(
-                "Endpoint-by-workload confirmed bounds, brackets, and measured lowest-rate failures",
+                "Endpoint-by-workload confirmed bounds and brackets; unresolved searches remain explicitly labelled",
                 styles["table"],
             ),
         ],

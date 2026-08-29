@@ -1,0 +1,38 @@
+{
+  "schema": "sanitized-provider-canary/v1",
+  "provider": "google-vertex-ai",
+  "model": "google/gemini-3.6-flash",
+  "location": "global",
+  "api_family": "openai_compatible_chat_completions_v1",
+  "endpoint_template": "https://aiplatform.googleapis.com/v1/projects/{PROJECT_ID}/locations/global/endpoints/openapi/chat/completions",
+  "observed_on_utc": "2026-08-30",
+  "evidence_scope": "transport_only_pre_final_build",
+  "nonstreaming": {
+    "http_status": 200,
+    "choice_count": 1,
+    "prompt_usage_present": true,
+    "completion_usage_present": true,
+    "total_usage_present": true,
+    "response_body_sha256": "e0835fe4fc9942fb2f2fa471a55e20a80056b5273d5f3611c4d3d552e61569c4"
+  },
+  "streaming": {
+    "http_status": 200,
+    "parsed_data_event_count": 2,
+    "done_marker_seen": true,
+    "parse_error_count": 0,
+    "prompt_usage_present": true,
+    "completion_usage_present": true,
+    "total_usage_present": true,
+    "completion_details_present": true,
+    "response_stream_sha256": "15c8d07b9c6c8f3e7bf613069c30d711743e58505c51a1bf594cde3adbbb6fa7"
+  },
+  "retained_sensitive_fields": [],
+  "retained_prompt_or_output": false,
+  "retained_response_body_or_headers": false,
+  "claims_not_supported": [
+    "throughput",
+    "latency_distribution",
+    "quality",
+    "production_sustainability"
+  ]
+}

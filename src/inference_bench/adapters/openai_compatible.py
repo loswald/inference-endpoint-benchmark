@@ -22,11 +22,8 @@ from ..models import (
     canonical_json,
     normalize_finish_reason,
 )
-from ..payload import (
-    MaterializedPayload,
-    build_openai_compatible_payload,
-    materialize_openai_compatible,
-)
+from ..payload import build_openai_compatible_payload, materialize_openai_compatible
+from .base import PreparedRequest
 
 
 def _utc_now() -> str:
@@ -84,12 +81,6 @@ def build_payload(route: RouteConfig, request: RequestSpec) -> dict[str, Any]:
     """Compatibility wrapper around the single canonical payload materializer."""
 
     return build_openai_compatible_payload(route, request)
-
-
-@dataclass(frozen=True, slots=True)
-class PreparedTransport:
-    payload: MaterializedPayload
-    headers: dict[str, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,9 +159,9 @@ class OpenAICompatibleAdapter:
             raise RuntimeError("adapter connection pool does not match route identity")
         self.headers(route)
 
-    def prepare(self, route: RouteConfig, request: RequestSpec) -> PreparedTransport:
+    def prepare(self, route: RouteConfig, request: RequestSpec) -> PreparedRequest:
         self.preflight(route)
-        return PreparedTransport(
+        return PreparedRequest(
             payload=materialize_openai_compatible(route, request), headers=self.headers(route)
         )
 
@@ -183,10 +174,12 @@ class OpenAICompatibleAdapter:
             yield transient
 
     async def infer(self, route: RouteConfig, request: RequestSpec) -> InferenceResult:
-        return await self.infer_prepared(route, request, self.prepare(route, request))
+        """Convenience API for direct callers; the engine always uses the prepared boundary."""
 
-    async def infer_prepared(
-        self, route: RouteConfig, request: RequestSpec, prepared: PreparedTransport
+        return await self.send_prepared(route, request, self.prepare(route, request))
+
+    async def send_prepared(
+        self, route: RouteConfig, request: RequestSpec, prepared: PreparedRequest
     ) -> InferenceResult:
         started_utc = _utc_now()
         started = time.perf_counter()
@@ -228,7 +221,7 @@ class OpenAICompatibleAdapter:
         client: httpx.AsyncClient,
         route: RouteConfig,
         request: RequestSpec,
-        prepared: PreparedTransport,
+        prepared: PreparedRequest,
         started_utc: str,
         started: float,
     ) -> InferenceResult:
@@ -486,7 +479,7 @@ class OpenAICompatibleAdapter:
         client: httpx.AsyncClient,
         route: RouteConfig,
         request: RequestSpec,
-        prepared: PreparedTransport,
+        prepared: PreparedRequest,
         started_utc: str,
         started: float,
     ) -> InferenceResult:
@@ -785,8 +778,21 @@ class OpenAICompatibleAdapter:
             retained_headers=retained,
         )
 
-    @staticmethod
+    def _classify_http_error(
+        self, response: httpx.Response, raw: bytes
+    ) -> tuple[str, str]:
+        """Return a retry/controller status and a sanitized diagnostic category.
+
+        Provider adapters may override this hook when one HTTP status has multiple documented
+        meanings. The raw body is available only for local classification and remains represented
+        in the ledger by its SHA-256 digest.
+        """
+
+        del raw
+        return _status(response.status_code), f"http_{response.status_code}"
+
     def _error(
+        self,
         route: RouteConfig,
         request: RequestSpec,
         response: httpx.Response,
@@ -797,9 +803,10 @@ class OpenAICompatibleAdapter:
         ended: float,
     ) -> InferenceResult:
         retained = _retained(response.headers, route)
+        status, error_kind = self._classify_http_error(response, raw)
         return InferenceResult(
             logical_id=request.logical_id,
-            status=_status(response.status_code),  # type: ignore[arg-type]
+            status=status,  # type: ignore[arg-type]
             http_status=response.status_code,
             started_at_utc=started_utc,
             ended_at_utc=_utc_now(),
@@ -807,7 +814,7 @@ class OpenAICompatibleAdapter:
             time_to_headers_seconds=headers_at - started,
             provider_request_id=retained.get("x-request-id") or retained.get("request-id"),
             retained_headers=retained,
-            error_kind=f"http_{response.status_code}",
+            error_kind=error_kind,
             error_body_sha256=hashlib.sha256(raw).hexdigest(),
         )
 
@@ -1018,28 +1025,26 @@ def _parse_usage(value: Any) -> UsageMetrics:
     ):
         errors.append("total_tokens_mismatch_input_plus_output")
     cache_candidates: list[tuple[str, Any]] = []
-    details = value.get("prompt_tokens_details")
-    if details is not None and not isinstance(details, dict):
-        errors.append("prompt_tokens_details_wrong_json_type")
-    elif isinstance(details, dict) and details.get("cached_tokens") is not None:
-        cache_candidates.append(("prompt_tokens_details.cached_tokens", details["cached_tokens"]))
+    for details_field in ("prompt_tokens_details", "input_tokens_details"):
+        details = value.get(details_field)
+        if details is not None and not isinstance(details, dict):
+            errors.append(f"{details_field}_wrong_json_type")
+        elif isinstance(details, dict) and details.get("cached_tokens") is not None:
+            cache_candidates.append(
+                (f"{details_field}.cached_tokens", details["cached_tokens"])
+            )
     if "cache_read_input_tokens" in value and value["cache_read_input_tokens"] is not None:
         cache_candidates.append(("cache_read_input_tokens", value["cache_read_input_tokens"]))
     cache_read = _consistent_alias_count("cache_read_input_tokens", cache_candidates, errors)
     reasoning_candidates: list[tuple[str, Any]] = []
-    completion_details = value.get("completion_tokens_details")
-    if completion_details is not None and not isinstance(completion_details, dict):
-        errors.append("completion_tokens_details_wrong_json_type")
-    elif (
-        isinstance(completion_details, dict)
-        and completion_details.get("reasoning_tokens") is not None
-    ):
-        reasoning_candidates.append(
-            (
-                "completion_tokens_details.reasoning_tokens",
-                completion_details["reasoning_tokens"],
+    for details_field in ("completion_tokens_details", "output_tokens_details"):
+        details = value.get(details_field)
+        if details is not None and not isinstance(details, dict):
+            errors.append(f"{details_field}_wrong_json_type")
+        elif isinstance(details, dict) and details.get("reasoning_tokens") is not None:
+            reasoning_candidates.append(
+                (f"{details_field}.reasoning_tokens", details["reasoning_tokens"])
             )
-        )
     if "reasoning_tokens" in value and value["reasoning_tokens"] is not None:
         reasoning_candidates.append(("reasoning_tokens", value["reasoning_tokens"]))
     reasoning = _consistent_alias_count("reasoning_tokens", reasoning_candidates, errors)

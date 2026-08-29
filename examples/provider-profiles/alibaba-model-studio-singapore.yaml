@@ -1,0 +1,129 @@
+schema: provider-profile/v1
+provider: alibaba-model-studio
+
+# This profile contains no credential value. Replace only the workspace ID; supply the key through
+# DASHSCOPE_API_KEY at runtime. Alibaba route identity is region- and billing-channel-specific.
+route_defaults:
+  adapter: alibaba_model_studio
+  auth:
+    env: DASHSCOPE_API_KEY
+    header: Authorization
+    prefix: "Bearer "
+  region: ap-southeast-1
+  billing_channel: pay_as_you_go
+  api_family: chat_completions
+  api_version: compatible-mode-v1
+  quota_scope: root-account-plus-model-across-workspaces-users-and-keys
+  context_tokens: 1000000
+  max_output_tokens: null
+  output_limit_field: max_completion_tokens
+  stream_usage_mode: required
+  request_timeout_seconds: 3600
+  http2: false
+  connection_reuse: true
+  transport_max_connections: 128
+  input_token_reservation_overhead: 1024
+  documentation_source_url: https://www.alibabacloud.com/help/en/model-studio/qwen-api-reference
+  pricing_source_url: https://www.alibabacloud.com/help/en/model-studio/model-pricing
+  evidence_retrieved_at_utc: "2026-08-29T00:00:00Z"
+  evidence_bundle_sha256: f4935e66219f4ecfdf30a637e4a695dbf453298e55253799cda8c5af7c8647f5
+  capabilities:
+    documentation_checked_utc: "2026-08-29T00:00:00Z"
+    streaming: true
+    thinking: documented_supported_runner_not_implemented
+    function_calling: true
+    json_object: true
+    json_schema: singapore_live_test_required
+    vision: exact_api_family_live_test_required
+    implicit_exact_prefix_cache: automatic_best_effort
+    explicit_ephemeral_cache: documented_supported_runner_not_implemented
+    batch_chat: documented_unsupported_for_exact_route
+    batch_embeddings: documented_unsupported_for_exact_route
+    embeddings: model_specific
+    rerank: exact_path_and_region_live_test_required
+
+routes:
+  - id: alibaba-sg-qwen3.8-flash
+    model: qwen3.8-flash
+    model_version: floating-catalog-id-observed-2026-08-29
+    base_url: https://replace-with-workspace-id.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions
+    input_usd_per_million: 0.15
+    output_usd_per_million: 0.47
+    cached_input_usd_per_million: null
+
+  - id: alibaba-sg-qwen3.8-max
+    model: qwen3.8-max
+    model_version: floating-catalog-id-observed-2026-08-29
+    base_url: https://replace-with-workspace-id.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions
+    input_usd_per_million: 2.00
+    output_usd_per_million: 6.00
+    cached_input_usd_per_million: null
+    capabilities:
+      vision: true
+
+  - id: alibaba-sg-qwen3.8-27b
+    model: qwen3.8-27b
+    model_version: floating-catalog-id-observed-2026-08-29
+    base_url: https://replace-with-workspace-id.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions
+    context_tokens: 1000000
+    max_output_tokens: 131072
+    input_usd_per_million: 0.50
+    output_usd_per_million: 3.00
+    cached_input_usd_per_million: 0.10
+    capabilities:
+      vision: true
+
+  - id: alibaba-sg-deepseek-v4-flash
+    model: deepseek-v4-flash
+    model_version: floating-catalog-id-observed-2026-08-29
+    base_url: https://replace-with-workspace-id.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions
+    context_tokens: 1000000
+    input_usd_per_million: 0.20
+    output_usd_per_million: 0.40
+    cached_input_usd_per_million: null
+    capabilities:
+      vision: false
+
+  - id: alibaba-sg-deepseek-v4-pro
+    model: deepseek-v4-pro
+    model_version: floating-catalog-id-observed-2026-08-29
+    base_url: https://replace-with-workspace-id.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions
+    context_tokens: 1000000
+    input_usd_per_million: 2.40
+    output_usd_per_million: 4.80
+    cached_input_usd_per_million: null
+    capabilities:
+      vision: false
+
+  - id: alibaba-sg-kimi-k2.7-code
+    model: kimi-k2.7-code
+    model_version: floating-catalog-id-observed-2026-08-29
+    base_url: https://replace-with-workspace-id.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions
+    context_tokens: null
+    input_usd_per_million: 0.95
+    output_usd_per_million: 4.00
+    cached_input_usd_per_million: null
+    capabilities:
+      vision: false
+
+  - id: alibaba-sg-kimi-k3
+    model: kimi-k3
+    model_version: floating-catalog-id-observed-2026-08-29
+    base_url: https://replace-with-workspace-id.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions
+    context_tokens: 1000000
+    input_usd_per_million: 3.00
+    output_usd_per_million: 15.00
+    cached_input_usd_per_million: null
+    capabilities:
+      vision: true
+
+  - id: alibaba-sg-glm-5.2
+    model: glm-5.2
+    model_version: floating-catalog-id-observed-2026-08-29
+    base_url: https://replace-with-workspace-id.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions
+    context_tokens: 198000
+    input_usd_per_million: 1.40
+    output_usd_per_million: 4.40
+    cached_input_usd_per_million: null
+    capabilities:
+      vision: false

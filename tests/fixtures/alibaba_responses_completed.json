@@ -1,0 +1,27 @@
+{
+  "id": "resp_fixture",
+  "object": "response",
+  "status": "completed",
+  "output": [
+    {
+      "type": "message",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "fixture"
+        }
+      ]
+    }
+  ],
+  "usage": {
+    "input_tokens": 4096,
+    "input_tokens_details": {
+      "cached_tokens": 3072
+    },
+    "output_tokens": 128,
+    "output_tokens_details": {
+      "reasoning_tokens": 64
+    },
+    "total_tokens": 4224
+  }
+}

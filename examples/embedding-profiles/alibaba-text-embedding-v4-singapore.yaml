@@ -1,0 +1,43 @@
+schema: embedding-benchmark/v1
+campaign:
+  name: alibaba-text-embedding-v4-singapore-contract-suite
+  max_cost_usd: 10
+  concurrency: 8
+  retries: 1
+route:
+  id: alibaba-sg-text-embedding-v4
+  provider: alibaba-model-studio
+  adapter: openai_compatible_embeddings
+  model: text-embedding-v4
+  # Replace the workspace label only. The key remains in DASHSCOPE_API_KEY at runtime.
+  base_url: https://replace-with-workspace-id.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/embeddings
+  auth:
+    env: DASHSCOPE_API_KEY
+    header: Authorization
+    prefix: "Bearer "
+  region: ap-southeast-1
+  api_family: embeddings
+  billing_channel: startup_credits_pay_as_you_go
+  api_version: compatible-mode-v1
+  model_version: text-embedding-v4
+  quota_scope: root-account-plus-model-across-workspaces-users-and-keys
+  capabilities:
+    max_input_tokens_per_item: 8192
+    max_batch_inputs: 10
+    max_total_tokens_per_request: 81920
+    default_dimensions: 1024
+    supported_dimensions: [64, 128, 256, 512, 768, 1024, 1536, 2048]
+    empty_input: documented_invalid
+    unicode_input: documented_supported
+    repeatability_cosine_minimum: 0.999999
+    long_input_fraction: 0.90
+  input_usd_per_million: 0.07
+  request_timeout_seconds: 180
+  input_token_reservation_overhead: 128
+  http2: true
+  connection_reuse: true
+  transport_max_connections: 64
+  documentation_source_url: https://www.alibabacloud.com/help/en/model-studio/embedding-interfaces-compatible-with-openai
+  pricing_source_url: https://www.alibabacloud.com/help/en/model-studio/model-pricing
+  evidence_retrieved_at_utc: "2026-08-30T00:00:00Z"
+  evidence_bundle_sha256: 31f4dbe05725631f392bdd32345af45bbc22b902c346576d260a1673d396de15

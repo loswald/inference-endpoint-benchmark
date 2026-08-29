@@ -1,0 +1,52 @@
+schema: provider-profile/v1
+provider: amazon-bedrock
+
+# This is the only Bedrock route in the public catalog with a current live model/API/region proof.
+# Supply the API key through BEDROCK_API_KEY; never place the value in this file.
+route_defaults:
+  adapter: bedrock_mantle
+  auth:
+    env: BEDROCK_API_KEY
+    header: Authorization
+    prefix: "Bearer "
+  region: us-east-1
+  billing_channel: standard_on_demand
+  api_family: chat_completions
+  api_version: v1
+  quota_scope: aws-account-plus-model-plus-region-plus-bedrock-mantle-shared-across-apis
+  # AWS publishes the limits as 203K and 4K. Decimal expansion is used as a conservative request
+  # guard; the evidence contract does not pretend AWS published finer-grained raw integers.
+  context_tokens: 203000
+  max_output_tokens: 4000
+  output_limit_field: max_tokens
+  stream_usage_mode: omit
+  request_timeout_seconds: 180
+  http2: false
+  connection_reuse: true
+  transport_max_connections: 128
+  input_token_reservation_overhead: 1024
+  documentation_source_url: https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-zai-glm-4-7-flash.html
+  pricing_source_url: https://aws.amazon.com/bedrock/pricing/
+  evidence_retrieved_at_utc: "2026-08-29T23:00:00Z"
+  evidence_bundle_sha256: 393ae2bd6006d6d27d01e374314ba03bb3b0839c0588c5f746df44cef6f7e0d7
+  capabilities:
+    documentation_checked_utc: "2026-08-29T23:00:00Z"
+    streaming: true
+    vision: false
+    tool_calling: true
+    function_calling: true
+    structured_output: unknown
+    json_schema: unknown
+    implicit_exact_prefix_cache: unknown
+    explicit_ephemeral_cache: unknown
+    batch_inference: documented_supported_runner_not_implemented
+    embeddings: false
+
+routes:
+  - id: aws-bedrock-us-east-1-zai-glm-4.7-flash
+    model: zai.glm-4.7-flash
+    model_version: floating-catalog-id-live-proved-2026-08-22
+    base_url: https://bedrock-mantle.us-east-1.api.aws/v1/chat/completions
+    input_usd_per_million: 0.07
+    output_usd_per_million: 0.40
+    cached_input_usd_per_million: null

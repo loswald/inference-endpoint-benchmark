@@ -7,6 +7,7 @@ from dataclasses import replace
 
 import pytest
 
+from inference_bench.adapters import PreparedRequest
 from inference_bench.engine import BenchmarkEngine, PaymentRequiredLatched
 from inference_bench.ledger import Ledger
 from inference_bench.load import (
@@ -20,6 +21,7 @@ from inference_bench.load import (
     scheduled_offsets,
 )
 from inference_bench.models import InferenceResult, RequestSpec
+from inference_bench.payload import materialize_openai_compatible
 from inference_bench.report import summarize_rows
 
 
@@ -50,6 +52,51 @@ def test_baseline_design_has_exact_nonzero_sample_count_and_truthful_rate() -> N
 
     with pytest.raises(ValueError, match="at least 20"):
         baseline_design({"baseline_samples": 19}, 20)
+
+
+def test_baseline_search_rejects_explicit_attempts_above_floor_and_derives_when_omitted(
+    tmp_path, campaign, route, monkeypatch
+) -> None:
+    observed_rates: list[float] = []
+
+    async def unhealthy_epoch(engine, route, **kwargs):
+        observed_rates.append(kwargs["offered_rps"])
+        return _epoch_summary(
+            epoch_id=kwargs["epoch_id"],
+            phase=kwargs["phase"],
+            offered_rps=kwargs["offered_rps"],
+            healthy=False,
+        )
+
+    monkeypatch.setattr("inference_bench.load.run_open_loop_epoch", unhealthy_epoch)
+    common = {
+        "epochs": 1,
+        "epoch_seconds": 1,
+        "initial_rps": 1,
+        "additive_rps": 1,
+        "baseline_rps": 1,
+        "baseline_multiplicative_decrease": 0.5,
+        "minimum_rps": 0.125,
+    }
+
+    async def run() -> None:
+        engine, ledger = _engine(tmp_path, campaign, SequenceAdapter())
+        with pytest.raises(ValueError, match="at least 4 attempts"):
+            await run_aimd(
+                engine,
+                route,
+                "short_short",
+                {**common, "baseline_attempts": 3},
+                seed=9,
+            )
+        assert observed_rates == []
+
+        await run_aimd(engine, route, "short_short", common, seed=9)
+        await engine.close()
+        ledger.close()
+
+    asyncio.run(run())
+    assert observed_rates == pytest.approx([1, 0.5, 0.25, 0.125])
 
 
 def test_aimd_shape_ceiling_prefers_shape_specific_value() -> None:
@@ -134,6 +181,12 @@ class SequenceAdapter:
         self.calls: dict[str, int] = defaultdict(int)
         self.closed = False
 
+    def preflight(self, route) -> None:  # type: ignore[no-untyped-def]
+        return None
+
+    def prepare(self, route, request):  # type: ignore[no-untyped-def]
+        return PreparedRequest(payload=materialize_openai_compatible(route, request))
+
     async def infer(self, route, request):
         self.calls[request.logical_id] += 1
         if self.payment_required:
@@ -141,6 +194,9 @@ class SequenceAdapter:
         if self.fail_first and self.calls[request.logical_id] == 1:
             return _result(request.logical_id, status="server_error", http_status=503)
         return _result(request.logical_id)
+
+    async def send_prepared(self, route, request, prepared):  # type: ignore[no-untyped-def]
+        return await self.infer(route, request)
 
     async def close(self) -> None:
         self.closed = True
@@ -290,6 +346,125 @@ def test_normal_response_drain_is_not_misclassified_as_queue_growth(
     summary = asyncio.run(run())
     assert summary.queue_end_seconds > 1.0
     assert summary.healthy
+
+
+def test_successful_epoch_without_ttft_stays_controller_healthy_and_records_missingness(
+    tmp_path, campaign, route
+) -> None:
+    class NoTtftAdapter(SequenceAdapter):
+        async def infer(self, route, request):
+            self.calls[request.logical_id] += 1
+            result = _result(request.logical_id)
+            result.ttft_seconds = None
+            result.decode_seconds = None
+            result.output_event_offsets_seconds = ()
+            return result
+
+    async def run() -> tuple[EpochSummary, list[dict[str, object]]]:
+        engine, ledger = _engine(tmp_path, campaign, NoTtftAdapter())
+        summary = await run_open_loop_epoch(
+            engine,
+            route,
+            shape="short_short",
+            epoch_id="successful-without-ttft",
+            phase="baseline",
+            offered_rps=20,
+            duration_seconds=0.05,
+            concurrency=1,
+            seed=11,
+            deterministic_scheduled_count=1,
+        )
+        rows = ledger.rows()
+        await engine.close()
+        ledger.close()
+        return summary, rows
+
+    summary, rows = asyncio.run(run())
+    assert summary.healthy
+    assert summary.successful == summary.scheduled == 1
+    assert summary.ttft_observed_n == 0
+    assert summary.p95_ttft_seconds is None
+    assert rows[0]["ttft_seconds"] is None
+    assert "first_output_event_missing" in json.loads(rows[0]["validity_reasons_json"])
+
+
+def test_unexpected_client_error_is_route_fatal_not_congestion(
+    tmp_path, campaign, route
+) -> None:
+    class PermanentRouteErrorAdapter(SequenceAdapter):
+        async def infer(self, route, request):
+            self.calls[request.logical_id] += 1
+            return _result(request.logical_id, status="client_error", http_status=403)
+
+    async def run() -> EpochSummary:
+        engine, ledger = _engine(tmp_path, campaign, PermanentRouteErrorAdapter())
+        summary = await run_open_loop_epoch(
+            engine,
+            route,
+            shape="short_short",
+            epoch_id="route-fatal-client-error",
+            phase="baseline",
+            offered_rps=20,
+            duration_seconds=0.05,
+            concurrency=1,
+            seed=11,
+            deterministic_scheduled_count=1,
+        )
+        await engine.close()
+        ledger.close()
+        return summary
+
+    summary = asyncio.run(run())
+    assert not summary.controller_eligible
+    assert summary.scientific_censor_reason == (
+        "route_fatal_provider_or_configuration_error"
+    )
+    assert not summary.healthy
+
+
+def test_aimd_stops_after_route_fatal_baseline_instead_of_lowering_load(
+    tmp_path, campaign, route, monkeypatch
+) -> None:
+    observed_rates: list[float] = []
+
+    async def route_fatal_epoch(engine, route, **kwargs):
+        observed_rates.append(kwargs["offered_rps"])
+        return _epoch_summary(
+            epoch_id=kwargs["epoch_id"],
+            phase=kwargs["phase"],
+            offered_rps=kwargs["offered_rps"],
+            healthy=False,
+            controller_eligible=False,
+            scientific_censor_reason="route_fatal_provider_or_configuration_error",
+        )
+
+    monkeypatch.setattr("inference_bench.load.run_open_loop_epoch", route_fatal_epoch)
+
+    async def run() -> list[str]:
+        engine, ledger = _engine(tmp_path, campaign, SequenceAdapter())
+        await run_aimd(
+            engine,
+            route,
+            "short_short",
+            {
+                "epochs": 4,
+                "epoch_seconds": 1,
+                "initial_rps": 1,
+                "additive_rps": 1,
+                "baseline_rps": 1,
+                "baseline_multiplicative_decrease": 0.5,
+                "minimum_rps": 0.125,
+            },
+            seed=9,
+        )
+        kinds = [event["kind"] for event in ledger.event_rows()]
+        await engine.close()
+        ledger.close()
+        return kinds
+
+    event_kinds = asyncio.run(run())
+    assert observed_rates == [1]
+    assert "aimd_controller_censored" in event_kinds
 
 
 def test_zero_arrival_epoch_is_scientifically_censored(tmp_path, campaign, route) -> None:
@@ -659,6 +834,8 @@ def test_interrupted_baseline_censors_controllers_without_thresholds(
                 "initial_rps": 1,
                 "additive_rps": 1,
                 "multiplicative_decrease": 0.5,
+                "baseline_rps": 0.5,
+                "minimum_rps": 0.125,
             },
             seed=9,
         )
@@ -666,7 +843,13 @@ def test_interrupted_baseline_censors_controllers_without_thresholds(
             engine,
             route,
             "short_short",
-            {"blocks": 2, "block_seconds": 1, "rate_rps": 1},
+            {
+                "blocks": 2,
+                "block_seconds": 1,
+                "rate_rps": 1,
+                "baseline_rps": 0.5,
+                "minimum_rps": 0.125,
+            },
             seed=9,
         )
         event_kinds = [event["kind"] for event in ledger.event_rows()]
@@ -713,14 +896,27 @@ def test_unhealthy_low_load_baseline_closes_as_measured_negative(
             engine,
             route,
             "short_short",
-            {"epochs": 2, "epoch_seconds": 1, "initial_rps": 1, "additive_rps": 1},
+            {
+                "epochs": 2,
+                "epoch_seconds": 1,
+                "initial_rps": 1,
+                "additive_rps": 1,
+                "baseline_rps": 0.5,
+                "minimum_rps": 0.125,
+            },
             seed=9,
         )
         soak = await run_soak(
             engine,
             route,
             "short_short",
-            {"blocks": 2, "block_seconds": 1, "rate_rps": 1},
+            {
+                "blocks": 2,
+                "block_seconds": 1,
+                "rate_rps": 1,
+                "baseline_rps": 0.5,
+                "minimum_rps": 0.125,
+            },
             seed=9,
         )
         events = ledger.event_rows()
@@ -809,6 +1005,48 @@ def test_interrupted_ramp_epoch_does_not_change_aimd_state(
 
     asyncio.run(run())
     assert aimd_rates == [1, 1, 1]
+
+
+def test_aimd_ramp_backoff_never_descends_below_configured_minimum(
+    tmp_path, campaign, route, monkeypatch
+) -> None:
+    ramp_rates: list[float] = []
+
+    async def sequenced_epoch(engine, route, **kwargs):
+        phase = kwargs["phase"]
+        if phase == "aimd":
+            ramp_rates.append(kwargs["offered_rps"])
+        return _epoch_summary(
+            epoch_id=kwargs["epoch_id"],
+            phase=phase,
+            offered_rps=kwargs["offered_rps"],
+            healthy=phase != "aimd",
+        )
+
+    monkeypatch.setattr("inference_bench.load.run_open_loop_epoch", sequenced_epoch)
+
+    async def run() -> None:
+        engine, ledger = _engine(tmp_path, campaign, SequenceAdapter())
+        await run_aimd(
+            engine,
+            route,
+            "short_short",
+            {
+                "epochs": 5,
+                "epoch_seconds": 1,
+                "initial_rps": 0.3,
+                "additive_rps": 0.1,
+                "multiplicative_decrease": 0.1,
+                "minimum_rps": 0.2,
+            },
+            seed=9,
+        )
+        await engine.close()
+        ledger.close()
+
+    asyncio.run(run())
+    assert ramp_rates == pytest.approx([0.3, 0.3, 0.2, 0.2, 0.2])
+    assert min(ramp_rates) == pytest.approx(0.2)
 
 
 def test_aimd_geometric_bracket_is_bounded_and_no_overload_is_right_censored(
@@ -1231,7 +1469,13 @@ def test_final_guarded_soak_block_is_execution_complete_but_scientifically_censo
 def test_adapter_factory_is_not_eagerly_reinvoked(tmp_path, campaign, monkeypatch) -> None:
     created: list[SequenceAdapter] = []
 
-    def factory(name: str):
+    def factory(name: str, **transport_options: object):
+        assert name == "openai_compatible"
+        assert transport_options == {
+            "http2": False,
+            "connection_reuse": True,
+            "transport_max_connections": 256,
+        }
         adapter = SequenceAdapter()
         created.append(adapter)
         return adapter

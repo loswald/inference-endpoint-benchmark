@@ -1,0 +1,92 @@
+schema: benchmark-experiment/v1
+
+# Reusable broad text-inference experiment. Provider catalogs and credentials remain in separate
+# provider profiles, so the same measurement contract can be compiled for every admitted route.
+campaign:
+  name: comprehensive-text-endpoints
+  seed: 20260830
+  max_wall_seconds: 43200
+  max_cost_usd: 5000
+  launch_reserve_seconds: 900
+  launch_reserve_usd: 25
+  concurrency: 128
+  retries: 0
+  input_token_reservation_factor: 1.5
+  client_location: replace-with-exact-client-region
+
+suites:
+  static:
+    enabled: true
+    offered_rps: 2
+  warmup:
+    enabled: true
+    repeats: 3
+    shapes: [short_short]
+  latency:
+    enabled: true
+    repeats: 12
+    shapes: [short_short, long_short, short_long, mixed]
+    long_input_tokens: 32768
+    long_input_overflow: clip
+    long_output_tokens: 2048
+    long_output_overflow: clip
+  capability:
+    enabled: true
+    temperatures: [-0.01, 0, 0.5, 1, 1.5, 2, 2.01]
+    top_ps: [-0.01, 0, 0.25, 0.5, 0.75, 1, 1.01]
+    tool_counts: [1, 8, 32, 64]
+    probe_groups:
+      [transport_baseline, structured_output, tool_calling, vision, parameter_validation]
+  interactions:
+    enabled: true
+    temperatures: [0, 0.7, 1.5]
+    top_ps: [0.25, 0.75, 1]
+    stream: [false, true]
+    output_tokens: [64, 256, 1024]
+  context:
+    enabled: true
+    percentages: [1, 5, 10, 25, 50, 75, 90, 95, 99]
+    fixed_tokens: [1024, 8192, 32768, 65536, 100000]
+  output:
+    enabled: true
+    fallback_max_output_tokens: 4096
+    realized_generation_ceiling: 8192
+  quality:
+    enabled: true
+    repeats: 6
+  cache:
+    enabled: true
+    repeats: 10
+    prefix_tokens: 8192
+  aimd:
+    enabled: true
+    shapes: [short_short, long_short, short_long, mixed]
+    long_input_tokens: 32768
+    long_input_overflow: clip
+    long_output_tokens: 2048
+    long_output_overflow: clip
+    initial_rps: 0.5
+    additive_rps: 0.5
+    multiplicative_decrease: 0.5
+    bracket_epochs: 10
+    bracket_multiplier: 2
+    max_rps: 256
+    epochs: 16
+    epoch_seconds: 20
+    baseline_rps: 0.5
+    minimum_rps: 0.015625
+    baseline_samples: 20
+    baseline_attempts: 6
+    baseline_multiplicative_decrease: 0.5
+    confirmation_max_stages: 12
+    confirmation_multiplicative_decrease: 0.5
+    confirmation_separator_samples: 5
+    concurrency: 128
+    acceptance_policy:
+      schema_version: capacity-acceptance/v1
+      min_success_fraction: 0.99
+      max_throttled_attempt_fraction: 0.01
+      max_retryable_error_attempt_fraction: 0.01
+      queue_delay_floor_seconds: 1
+      max_p95_queue_delay_fraction_of_window: 0.10
+      max_p95_latency_multiplier_from_baseline: 2

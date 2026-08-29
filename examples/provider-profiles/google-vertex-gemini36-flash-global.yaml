@@ -1,0 +1,53 @@
+schema: provider-profile/v1
+provider: google-vertex-ai
+
+# Exact OpenAI-compatible route proved by sanitized nonstreaming and streaming canaries on
+# 2026-08-30. Replace only the project placeholder. Authentication uses Application Default
+# Credentials, or the service-account JSON path named by GOOGLE_APPLICATION_CREDENTIALS.
+route_defaults:
+  adapter: vertex_openai
+  auth:
+    env: GOOGLE_APPLICATION_CREDENTIALS
+    header: Authorization
+    prefix: "Bearer "
+  region: global
+  billing_channel: standard_paygo
+  api_family: chat_completions
+  api_version: vertex-openai-compatible-v1
+  quota_scope: google-cloud-project-plus-global-shared-multi-region-dynamic-capacity
+  context_tokens: 1048576
+  max_output_tokens: 65536
+  output_limit_field: max_tokens
+  stream_usage_mode: required
+  request_timeout_seconds: 900
+  http2: false
+  connection_reuse: true
+  transport_max_connections: 128
+  input_token_reservation_overhead: 1024
+  documentation_source_url: https://docs.cloud.google.com/vertex-ai/generative-ai/docs/samples/generativeaionvertexai-gemini-chat-completions-non-streaming
+  pricing_source_url: https://cloud.google.com/gemini-enterprise-agent-platform/generative-ai/pricing
+  evidence_retrieved_at_utc: "2026-08-30T00:00:00Z"
+  evidence_bundle_sha256: a9758559b105241e773937ef90404d2dfec4309540be7225de4af60440dd42b7
+  capabilities:
+    documentation_checked_utc: "2026-08-30T00:00:00Z"
+    streaming: true
+    complete_stream_usage: live_proved
+    thinking: documented_supported_runner_not_implemented
+    function_calling: documented_supported_suite_measurement_required
+    structured_output: documented_supported_suite_measurement_required
+    vision: documented_supported_suite_measurement_required
+    audio_input: documented_supported_runner_not_implemented
+    video_input: documented_supported_runner_not_implemented
+    implicit_context_caching: documented_supported_suite_measurement_required
+    explicit_context_caching: documented_supported_runner_not_implemented
+    batch_inference: documented_supported_separate_api_not_this_adapter
+
+routes:
+  - id: google-vertex-global-gemini-3.6-flash
+    model: google/gemini-3.6-flash
+    model_version: floating-catalog-id-live-proved-2026-08-30
+    base_url: https://aiplatform.googleapis.com/v1/projects/replace-with-project-id/locations/global/endpoints/openapi/chat/completions
+    # Promotional global Standard PayGo rates through 2026-12-31.
+    input_usd_per_million: 0.75
+    cached_input_usd_per_million: 0.075
+    output_usd_per_million: 3.75

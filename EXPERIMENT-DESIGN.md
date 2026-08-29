@@ -46,7 +46,8 @@ slows, arrivals wait and their queue delay remains part of end-to-end latency.
 
 The controller follows this sequence:
 
-1. Measure a low-rate baseline.
+1. Measure a low-rate baseline. If it is unhealthy, keep halving the offered rate through the
+   declared floor before calling the search unresolved.
 2. Increase geometrically to bracket the neighborhood quickly.
 3. Increase by a fixed additive step after a healthy epoch.
 4. Multiply the offered rate down after congestion, normally by 0.5.
@@ -57,6 +58,10 @@ The controller follows this sequence:
 An epoch is healthy only when its predeclared reliability, latency, queue-growth, and throttling
 criteria all pass. If the highest configured rate remains healthy, report “at least this rate”;
 there is no observed knee.
+
+TTFT availability is reported separately from capacity health. A successful response can lack a
+visible first-output event; that makes TTFT and decode-rate metrics unavailable, but does not by
+itself turn successful, timely service into a capacity failure.
 
 ## 5. Verify sustained behavior
 
@@ -70,9 +75,11 @@ block and the aggregate:
 - success, throttle, timeout, and server-error rates;
 - p95 TTFT and end-to-end latency;
 - queue drain after the arrival window;
-- matched deterministic quality.
+- deterministic quality under load. A low-load-vs-loaded quality-delta claim additionally requires
+  the same predeclared tasks to be paired across conditions; the current built-in fixed-rate runner
+  does not yet provide that paired estimand.
 
-Call the rate soak-verified only if every required block completes and all health gates pass. If a
+Call the tested rate a fixed-rate pass only if every required block completes and all health gates pass. If a
 budget, deadline, crash, or missing-usage condition removes a block, label the cell incomplete.
 
 ## 6. Exercise capabilities, not just request acceptance
@@ -125,7 +132,7 @@ fast execution without turning shared quota contention into a false endpoint pro
 
 - request metrics: final logical requests;
 - AIMD confirmation: epochs;
-- sustained capacity: soak blocks;
+- fixed-rate stability: analysis blocks;
 - time variation: matched requests within panels, with panels retained explicitly;
 - quality change: matched task pairs.
 
@@ -135,7 +142,7 @@ eligible observations. Publish sample size, unit, interval bounds, and method ne
 
 ## Production handoff
 
-Recommend only a workload-matched, soak-verified rate. If no such rate exists, publish the highest
+Recommend only a workload-matched rate that passed the fixed-rate stability test. If no such rate exists, publish the highest
 observed healthy screen and say what remains unverified. Production clients should retain bounded
 concurrency, exponential retry backoff with jitter, and an AIMD-style adaptive offered-rate limit.
 

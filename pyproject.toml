@@ -35,6 +35,9 @@ inference-bench = "inference_bench.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/inference_bench"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"requirements.lock" = "inference_bench/requirements.lock"
+
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]

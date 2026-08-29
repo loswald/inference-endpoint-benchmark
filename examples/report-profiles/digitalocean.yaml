@@ -1,0 +1,203 @@
+schema_version: 1
+provider_id: digitalocean
+display_name: DigitalOcean Gradient AI
+report_title: DigitalOcean hosted inference endpoint technical benchmark
+
+endpoints:
+  deepseek-v4-flash-0731: {label: DeepSeek V4 Flash}
+  gemma-4-31B-it: {label: Gemma 4 31B}
+  glm-5.2: {label: GLM 5.2}
+  kimi-k3: {label: Kimi K3}
+  minimax-m2.5: {label: MiniMax M2.5}
+  mimo-v2.5-pro: {label: MiMo V2.5 Pro}
+  nemotron-3-ultra-550b: {label: Nemotron 3 Ultra 550B}
+  nvidia-nemotron-3-super-120b: {label: Nemotron 3 Super 120B}
+  openai-gpt-oss-120b: {label: GPT-OSS 120B}
+  qwen3.5-397b-a17b: {label: Qwen3.5 397B A17B}
+  qwen3.8-max: {label: Qwen3.8 Max}
+
+workloads:
+  short_short:
+    label: Short prompt / short answer
+    description: Interactive request with a small input and small output.
+    recipe: The exact token targets are retained in each campaign provenance record.
+  input32k_short:
+    label: 32K prompt / short answer
+    description: Long-context retrieval using an approximately 32,000-token input and a short answer.
+    recipe: This is a distinct estimand from the 100K-input workload.
+  input100k_short:
+    label: 100K prompt / short answer
+    description: Very-long-context retrieval using an approximately 100,000-token input and a short answer.
+    recipe: Provider/model exceptions remain attached to the source campaign provenance.
+  short_long:
+    label: Short prompt / long answer
+    description: Generation-heavy request with a small input and a long output target.
+    recipe: The exact output target is retained in each campaign provenance record.
+  mixed:
+    label: Mixed application traffic
+    description: Seeded mixture of interactive, context-heavy, generation-heavy, structured, and tool-like requests.
+    recipe: Mixture membership and seed remain attached to each source campaign.
+
+experiments:
+  adaptive_capacity:
+    label: Adaptive load search
+    question: At what offered request rate does this exact endpoint and workload remain healthy?
+    method: Descend until a healthy baseline is found, increase load additively, decrease it after overload, and repeat separated confirmations before reporting a bound.
+    interpretation: Confirmed bounds describe the tested experiment contract; a search that stops at its floor is unresolved below that floor, not a failed endpoint.
+  fixed_rate_endurance:
+    label: Fixed-rate endurance check
+    question: Does the endpoint remain healthy for the registered fixed-duration workload at the selected rate?
+    method: Send open-loop traffic at the selected rate, summarize predeclared analysis blocks, and retain transport-gated and measured-negative outcomes explicitly.
+    interpretation: Results apply only to the tested rate and duration; they do not establish indefinite production sustainability.
+  within_run_variation:
+    label: Six-hour within-run variation
+    question: How much do matched latency, success, and output-rate measurements change across the six-hour run?
+    method: Compare matched hourly panels while keeping stable exact-prefix and panel-unique cache-cold strata separate.
+    interpretation: This estimates variation within one six-hour run, not a daily or diurnal pattern.
+
+sources:
+  do-combined-capacity-20260829:
+    label: Combined endpoint-isolated adaptive-capacity evidence
+    provenance: Hash-verified source campaigns listed in the data provenance columns.
+  do-direct-soak-20260823-r1:
+    label: Endpoint-isolated fixed-rate two-minute evidence
+    provenance: Hash-verified historical fixed-rate campaign.
+  do-six-hour-variation-20260828-r1:
+    label: Matched six-hour within-run variation evidence
+    provenance: Hash-verified seven-panel campaign.
+
+datasets:
+  adaptive_capacity:
+    filename: capacity-summary.csv
+    experiment: adaptive_capacity
+    endpoint_column: endpoint_id
+    workload_column: shape
+    state_column: capacity_claim
+    source_column: source_id
+    lowest_tested_column: tested_min_offered_rps
+    filters:
+      source_id: do-combined-capacity-20260829
+    expected_workloads: [short_short, input32k_short, input100k_short, short_long, mixed]
+    require_complete_grid: true
+    metrics:
+      confirmed_offered_rps:
+        label: Confirmed offered request rate
+        unit: requests/second
+        estimate_column: capacity_lower_bound_rps
+        low_column: capacity_lower_bound_rps
+        high_column: capacity_upper_bound_rps
+        interval_kind: evidence_bounds
+        sampling_unit: confirmation epoch
+      achieved_rpm:
+        label: Achieved request rate
+        unit: requests/minute
+        estimate_column: achieved_rpm
+        interval_json_column: achieved_rpm_ci95
+        interval_kind: confidence
+        sampling_unit: confirmation epoch
+      input_tpm:
+        label: Effective input token rate
+        unit: tokens/minute
+        estimate_column: effective_input_tpm
+        interval_json_column: effective_input_tpm_ci95
+        interval_kind: confidence
+        sampling_unit: confirmation epoch
+      output_tpm:
+        label: Effective output token rate
+        unit: tokens/minute
+        estimate_column: effective_output_tpm
+        interval_json_column: effective_output_tpm_ci95
+        interval_kind: confidence
+        sampling_unit: confirmation epoch
+      latency_p95:
+        label: Request latency p95
+        unit: seconds
+        estimate_column: latency_p95_seconds
+        interval_json_column: latency_p95_seconds_ci95
+        interval_kind: confidence
+        sampling_unit: confirmation epoch
+
+  fixed_rate_endurance:
+    filename: soak-cell-summary.csv
+    experiment: fixed_rate_endurance
+    endpoint_column: endpoint_id
+    workload_column: shape
+    state_column: capacity_claim
+    source_column: source_id
+    filters:
+      source_id: do-direct-soak-20260823-r1
+    expected_workloads: [short_short, input32k_short, short_long, mixed]
+    require_complete_grid: true
+    state_rules:
+      - state: measured
+        equals: {soak_acceptance_pass: "True"}
+      - state: measured_negative
+        equals: {scientifically_complete: "True", soak_acceptance_pass: "False"}
+      - state: transport_gated
+        equals: {status: baseline_transport_gate_failed}
+    metrics:
+      successful_rpm:
+        label: Successful requests per minute
+        unit: requests/minute
+        estimate_column: successful_rpm_block_mean
+        interval_json_column: successful_rpm_block_mean_ci95_student_t
+        interval_kind: confidence
+        sample_size_column: soak_block_count
+        sampling_unit: analysis block
+      input_tpm:
+        label: Effective input token rate
+        unit: tokens/minute
+        estimate_column: effective_input_tpm_block_mean
+        interval_json_column: effective_input_tpm_block_mean_ci95_student_t
+        interval_kind: confidence
+        sample_size_column: soak_block_count
+        sampling_unit: analysis block
+      output_tpm:
+        label: Effective output token rate
+        unit: tokens/minute
+        estimate_column: effective_output_tpm_block_mean
+        interval_json_column: effective_output_tpm_block_mean_ci95_student_t
+        interval_kind: confidence
+        sample_size_column: soak_block_count
+        sampling_unit: analysis block
+
+  within_run_variation:
+    filename: variation-across-panel-summary.csv
+    experiment: within_run_variation
+    endpoint_column: route_id
+    workload_column: shape
+    default_state: measured_with_interval
+    source_value: do-six-hour-variation-20260828-r1
+    workload_aliases:
+      long_short: input100k_short
+    dimension_columns:
+      cache_stratum: cache_stratum
+      mixed_subtype: mixed_subtype
+    metrics:
+      success_rate:
+        label: Success rate
+        unit: proportion
+        estimate_column: across_panel_success_rate_median
+        low_column: across_panel_success_rate_median_ci95_low
+        high_column: across_panel_success_rate_median_ci95_high
+        interval_kind: confidence
+        sample_size_column: across_panel_success_rate_median_n
+        sampling_unit: panel
+      ttft_median:
+        label: Median time to first token
+        unit: seconds
+        estimate_column: across_panel_ttft_median_median
+        low_column: across_panel_ttft_median_median_ci95_low
+        high_column: across_panel_ttft_median_median_ci95_high
+        interval_kind: confidence
+        sample_size_column: across_panel_ttft_median_median_n
+        sampling_unit: panel
+      output_rate:
+        label: Eligible output token rate
+        unit: tokens/second
+        estimate_column: across_panel_eligible_output_rate_median_median
+        low_column: across_panel_eligible_output_rate_median_median_ci95_low
+        high_column: across_panel_eligible_output_rate_median_median_ci95_high
+        interval_kind: confidence
+        sample_size_column: across_panel_eligible_output_rate_median_median_n
+        sampling_unit: panel

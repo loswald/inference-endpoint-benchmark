@@ -1,0 +1,121 @@
+schema: provider-evidence-bundle/v1
+provider: google-vertex-ai
+retrieved_at_utc: 2026-08-30T00:00:00Z
+source_role: provider_primary_documentation_plus_sanitized_live_canaries
+rights_posture: public_provider_documentation_for_internal_r_and_d
+runnable_in_library: true
+provider_profile_path: examples/provider-profiles/google-vertex-gemini36-flash-global.yaml
+
+route_contract:
+  exact_model_id: google/gemini-3.6-flash
+  exact_location: global
+  api_family: openai_compatible_chat_completions_v1
+  method: POST
+  url_template: https://aiplatform.googleapis.com/v1/projects/{PROJECT_ID}/locations/global/endpoints/openapi/chat/completions
+  authentication: google_application_default_credentials_or_service_account_json
+  billing_channel: standard_paygo
+  adapter: vertex_openai
+
+documented_model:
+  launch_stage: GA
+  release_date: 2026-07-21
+  context_window_tokens: 1048576
+  maximum_output_tokens: 65536
+  input_modalities: [text, image, audio, video]
+  output_modalities: [text]
+  supported_location_for_standard_paygo: global
+  thinking_levels: [MINIMAL, LOW, MEDIUM, HIGH]
+  default_thinking_level: MEDIUM
+  custom_temperature_top_p_top_k: ignored
+  frequency_and_presence_penalties: rejected
+  model_prefill_as_final_model_turn: rejected
+
+documented_capabilities:
+  openai_compatible_chat_completions: true
+  streaming: true
+  thinking: true
+  system_instructions: true
+  structured_output: true
+  implicit_context_caching: true
+  explicit_context_caching: true
+  count_tokens: true
+  function_calling: true
+  google_search_grounding: true
+  google_maps_grounding: true
+  code_execution: true
+  batch_inference: true
+  provisioned_throughput: true
+  tuning: false
+  live_api: false
+  computer_use: false
+
+runner_scope:
+  executable_adapter: vertex_openai
+  nonstreaming_transport_live_proved: true
+  streaming_transport_live_proved: true
+  complete_usage_live_proved: true
+  text_benchmark_payloads_runnable: true
+  multimodal_and_advanced_capabilities_require_suite_specific_measurement: true
+  native_generate_content_is_not_claimed_by_this_profile: true
+
+pricing:
+  currency: USD
+  location: global
+  service_tier: standard_paygo
+  unit: one_million_tokens
+  introductory_period_ending_2026_12_31:
+    input: 0.75
+    cached_input: 0.075
+    text_output_including_reasoning: 3.75
+  from_2027_01_01:
+    input: 1.50
+    cached_input: 0.15
+    text_output_including_reasoning: 7.50
+  profile_price_basis: introductory_period_ending_2026_12_31
+
+quota_contract:
+  fixed_quota_for_exact_model: unsupported
+  consumption_option: standard_paygo
+  exact_numeric_baseline_tpm_for_gemini_3_6_flash: not_published
+  global_endpoint_uses_shared_multi_region_capacity: true
+  resource_exhausted_429_meaning: temporary_shared_capacity_contention
+  operational_response: traffic_smoothing_plus_truncated_exponential_backoff
+  note: Do not transfer numeric usage-tier values from another Gemini model to this exact route.
+
+live_proof:
+  exact_route_proven: true
+  observed_on_utc: 2026-08-30
+  receipt_path: receipts/google-vertex-gemini36-flash-global-openai-canary-20260830.json
+  receipt_sha256: 751797379ff7da157b6f7c6196f16d6ff94c2a74ec4e6f15f82575602616514d
+  nonstreaming_http_status: 200
+  streaming_http_status: 200
+  response_body_sha256: e0835fe4fc9942fb2f2fa471a55e20a80056b5273d5f3611c4d3d552e61569c4
+  response_stream_sha256: 15c8d07b9c6c8f3e7bf613069c30d711743e58505c51a1bf594cde3adbbb6fa7
+  evidence_scope: transport_only_pre_final_build
+
+explicit_nonclaims:
+  - no throughput, latency-distribution, quality, or production-sustainability claim follows from the canaries
+  - documented capabilities are product contracts, not completed benchmark measurements
+  - this profile does not claim native generateContent adapter coverage
+  - no numeric per-project quota is inferred where Google publishes none for the exact model
+
+sources:
+  - https://docs.cloud.google.com/vertex-ai/generative-ai/docs/samples/generativeaionvertexai-gemini-chat-completions-non-streaming
+  - https://docs.cloud.google.com/vertex-ai/generative-ai/docs/samples/generativeaionvertexai-gemini-chat-completions-streaming
+  - https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/3-6-flash
+  - https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-3-6-flash
+  - https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/standard-paygo
+  - https://cloud.google.com/gemini-enterprise-agent-platform/generative-ai/pricing
+
+source_bindings:
+  openai_compatible_chat_completions_and_oauth:
+    - https://docs.cloud.google.com/vertex-ai/generative-ai/docs/samples/generativeaionvertexai-gemini-chat-completions-non-streaming
+    - https://docs.cloud.google.com/vertex-ai/generative-ai/docs/samples/generativeaionvertexai-gemini-chat-completions-streaming
+  model_limits_modalities_capabilities_consumption_and_location:
+    - https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/3-6-flash
+  parameter_rules:
+    - https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-3-6-flash
+  paygo_scope_and_429_semantics:
+    - https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/standard-paygo
+  dated_global_prices:
+    - https://cloud.google.com/gemini-enterprise-agent-platform/generative-ai/pricing

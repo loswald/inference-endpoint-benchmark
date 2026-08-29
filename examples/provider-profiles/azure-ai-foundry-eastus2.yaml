@@ -1,0 +1,145 @@
+schema: provider-profile/v1
+provider: azure-ai-foundry
+
+# Public template for five exact East US 2 deployments that passed sanitized nonstreaming and
+# streaming transport canaries on 2026-08-29. Replace only the resource-name placeholder and
+# provide the key through AZURE_INFERENCE_CREDENTIAL. No credential or resource name is stored.
+#
+# GPT-5.6 is intentionally bounded to the <=272k short-context pricing tier because the current
+# portable RouteConfig has one price pair. The models' full documented 1.05M window and the exact
+# tiering limitation are retained in docs/provider-contracts/azure-ai-foundry-eastus2-2026-08-29.yaml.
+route_defaults:
+  auth:
+    env: AZURE_INFERENCE_CREDENTIAL
+    header: api-key
+    prefix: ""
+  region: eastus2
+  billing_channel: azure_subscription_metered
+  quota_scope: azure-subscription-model-version-globalstandard-shared-across-regions
+  stream_usage_mode: try
+  request_timeout_seconds: 900
+  http2: false
+  connection_reuse: true
+  transport_max_connections: 128
+  input_token_reservation_overhead: 1024
+  evidence_retrieved_at_utc: "2026-08-29T23:00:00Z"
+  evidence_bundle_sha256: af8c7e1c0cf927854c167fbea819a7b8a49a3a3f1101a8213caded1f289b917a
+  capabilities:
+    documentation_checked_utc: "2026-08-29T23:00:00Z"
+    streaming: true
+    caching: unknown
+    batch_chat: unknown
+    embeddings: false
+    rerank: false
+
+routes:
+  - id: azure-gpt-5.6-sol-eastus2-responses
+    adapter: azure_responses
+    model: gpt-5.6-sol
+    model_version: "2026-07-09"
+    base_url: https://replace-with-resource-name.services.ai.azure.com/openai/v1/responses
+    api_family: responses
+    api_version: openai-compatible-v1-implicit
+    context_tokens: 272000
+    max_output_tokens: 128000
+    output_limit_field: max_output_tokens
+    input_usd_per_million: 5.00
+    cached_input_usd_per_million: 0.50
+    output_usd_per_million: 30.00
+    documentation_source_url: https://learn.microsoft.com/en-us/azure/foundry/foundry-models/concepts/models-sold-directly-by-azure
+    pricing_source_url: https://azure.microsoft.com/en-us/blog/gpt-5-6-now-available-in-microsoft-foundry/
+    capabilities:
+      thinking: supported
+      structured_output: documented_supported_runner_not_implemented
+      tool_calling: documented_supported_runner_not_implemented
+      parallel_tool_calls: documented_supported_runner_not_implemented
+      vision: documented_supported_runner_not_implemented
+
+  - id: azure-gpt-5.6-terra-eastus2-responses
+    adapter: azure_responses
+    model: gpt-5.6-terra
+    model_version: "2026-07-09"
+    base_url: https://replace-with-resource-name.services.ai.azure.com/openai/v1/responses
+    api_family: responses
+    api_version: openai-compatible-v1-implicit
+    context_tokens: 272000
+    max_output_tokens: 128000
+    output_limit_field: max_output_tokens
+    input_usd_per_million: 2.00
+    cached_input_usd_per_million: 0.20
+    output_usd_per_million: 12.00
+    documentation_source_url: https://learn.microsoft.com/en-us/azure/foundry/foundry-models/concepts/models-sold-directly-by-azure
+    pricing_source_url: https://azure.microsoft.com/en-us/blog/gpt-5-6-now-available-in-microsoft-foundry/
+    capabilities:
+      thinking: supported
+      structured_output: documented_supported_runner_not_implemented
+      tool_calling: documented_supported_runner_not_implemented
+      parallel_tool_calls: documented_supported_runner_not_implemented
+      vision: documented_supported_runner_not_implemented
+
+  - id: azure-gpt-5.6-luna-eastus2-responses
+    adapter: azure_responses
+    model: gpt-5.6-luna
+    model_version: "2026-07-09"
+    base_url: https://replace-with-resource-name.services.ai.azure.com/openai/v1/responses
+    api_family: responses
+    api_version: openai-compatible-v1-implicit
+    context_tokens: 272000
+    max_output_tokens: 128000
+    output_limit_field: max_output_tokens
+    input_usd_per_million: 0.20
+    cached_input_usd_per_million: 0.02
+    output_usd_per_million: 1.20
+    documentation_source_url: https://learn.microsoft.com/en-us/azure/foundry/foundry-models/concepts/models-sold-directly-by-azure
+    pricing_source_url: https://azure.microsoft.com/en-us/blog/gpt-5-6-now-available-in-microsoft-foundry/
+    capabilities:
+      thinking: supported
+      structured_output: documented_supported_runner_not_implemented
+      tool_calling: documented_supported_runner_not_implemented
+      parallel_tool_calls: documented_supported_runner_not_implemented
+      vision: documented_supported_runner_not_implemented
+
+  - id: azure-deepseek-v4-flash-eastus2-chat
+    adapter: azure_model_inference
+    model: DeepSeek-V4-Flash
+    model_version: "2026-04-23"
+    base_url: https://replace-with-resource-name.services.ai.azure.com/models/chat/completions
+    api_family: chat_completions
+    api_version: openai-compatible-v1
+    context_tokens: 1000000
+    max_output_tokens: 384000
+    output_limit_field: max_tokens
+    input_usd_per_million: 0.19
+    cached_input_usd_per_million: 0.028
+    output_usd_per_million: 0.51
+    documentation_source_url: https://learn.microsoft.com/en-us/azure/foundry/foundry-models/concepts/models-sold-directly-by-azure
+    pricing_source_url: https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/introducing-deepseek-v4-flash-and-v4-pro-in-microsoft-foundry/4515174
+    capabilities:
+      thinking: supported
+      json_object: supported
+      structured_output: partial
+      tool_calling: unsupported
+      parallel_tool_calls: unsupported
+      vision: unsupported
+
+  - id: azure-kimi-k2.6-eastus2-chat
+    adapter: azure_model_inference
+    model: Kimi-K2.6
+    model_version: "2026-04-20"
+    base_url: https://replace-with-resource-name.services.ai.azure.com/models/chat/completions
+    api_family: chat_completions
+    api_version: openai-compatible-v1
+    context_tokens: 262144
+    max_output_tokens: 262144
+    output_limit_field: max_tokens
+    input_usd_per_million: 0.95
+    cached_input_usd_per_million: 0.16
+    output_usd_per_million: 4.00
+    documentation_source_url: https://learn.microsoft.com/en-us/azure/foundry/foundry-models/concepts/models-sold-directly-by-azure
+    pricing_source_url: https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/introducing-kimi-k2-6-in-microsoft-foundry/4513125
+    capabilities:
+      thinking: supported
+      structured_output: unsupported
+      tool_calling: documented_supported_runner_not_implemented
+      parallel_tool_calls: unknown
+      vision: documented_supported_runner_not_implemented

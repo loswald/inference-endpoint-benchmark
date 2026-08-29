@@ -14,6 +14,7 @@ import httpx
 import pytest
 import yaml
 
+from inference_bench.adapters import PreparedRequest
 from inference_bench.adapters.openai_compatible import OpenAICompatibleAdapter
 from inference_bench.cli import (
     _capacity_execution_order,
@@ -115,11 +116,19 @@ class CountingAdapter:
     def preflight(self, route: RouteConfig) -> None:
         return None
 
+    def prepare(self, route: RouteConfig, request: RequestSpec) -> PreparedRequest:
+        return PreparedRequest(payload=materialize_openai_compatible(route, request))
+
     async def infer(self, route: RouteConfig, request: RequestSpec) -> InferenceResult:
         self.calls += 1
         if self.delay:
             await asyncio.sleep(self.delay)
         return _success(request.logical_id, total_seconds=max(0.05, self.delay))
+
+    async def send_prepared(
+        self, route: RouteConfig, request: RequestSpec, prepared: PreparedRequest
+    ) -> InferenceResult:
+        return await self.infer(route, request)
 
     async def close(self) -> None:
         return None

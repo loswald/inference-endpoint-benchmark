@@ -54,6 +54,31 @@ def test_stream_usage_extension_is_route_identity_bound_and_omittable(route) -> 
         }
 
 
+def test_kimi_provider_default_omits_undeclared_reasoning_controls(route) -> None:
+    kimi = replace(
+        route,
+        provider="amazon-bedrock",
+        adapter="bedrock_mantle",
+        model="moonshot.kimi-k2.5",
+        base_url="https://bedrock-mantle.us-east-1.api.aws/v1/chat/completions",
+    )
+    payload = build_payload(kimi, _spec())
+    assert "reasoning_effort" not in payload
+    assert "verbosity" not in payload
+
+
+def test_chat_reasoning_controls_require_an_exact_route_declared_mapping(route) -> None:
+    controlled = replace(
+        route,
+        reasoning_controls={
+            "fast": {"reasoning_effort": "minimal", "verbosity": "low"}
+        },
+    )
+    payload = build_payload(controlled, replace(_spec(), reasoning_budget="fast"))
+    assert payload["reasoning_effort"] == "minimal"
+    assert payload["verbosity"] == "low"
+
+
 def test_payload_build_does_not_mutate_route_defaults(route) -> None:
     configured = RouteConfig(
         id=route.id,

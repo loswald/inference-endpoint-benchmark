@@ -9,7 +9,8 @@ from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
 
-from .adapters import AdapterUnavailable, adapter_for
+from .adapters import AdapterUnavailable, PreparedRequest, adapter_for
+from .adapters.base import validate_adapter_instance
 from .config import CampaignConfig, validate_route_evidence_identity
 from .ledger import Ledger, TimeLimitReached
 from .models import (
@@ -20,7 +21,6 @@ from .models import (
     normalize_result_status,
     normalize_usage_parse_errors,
 )
-from .payload import materialize_openai_compatible
 from .quality import score_result
 from .validity import assess_result
 
@@ -224,19 +224,14 @@ class BenchmarkEngine:
         )
         adapter = self.adapters.get(key) or self.adapters.get(route.adapter)  # type: ignore[arg-type]
         if adapter is None:
-            try:
-                adapter = adapter_for(
-                    route.adapter,
-                    http2=route.http2,
-                    connection_reuse=route.connection_reuse,
-                    transport_max_connections=route.transport_max_connections,
-                )
-            except TypeError as exc:
-                if "unexpected keyword" not in str(exc):
-                    raise
-                adapter = adapter_for(route.adapter)
+            adapter = adapter_for(
+                route.adapter,
+                http2=route.http2,
+                connection_reuse=route.connection_reuse,
+                transport_max_connections=route.transport_max_connections,
+            )
             self.adapters[key] = adapter
-        return adapter
+        return validate_adapter_instance(route.adapter, adapter)
 
     def preflight(self) -> None:
         """Validate every adapter, credential, and transport before the first claim."""
@@ -299,14 +294,13 @@ class BenchmarkEngine:
         # and conservative token-bound calculation all happen before a durable claim. A local
         # pre-send failure therefore creates no ambiguous provider outcome.
         adapter = self._adapter(route)
-        if hasattr(adapter, "preflight"):
-            adapter.preflight(route)
-        if hasattr(adapter, "prepare"):
-            prepared = adapter.prepare(route, spec)
-            materialized = prepared.payload
-        else:
-            prepared = None
-            materialized = materialize_openai_compatible(route, spec)
+        adapter.preflight(route)
+        prepared = adapter.prepare(route, spec)
+        if not isinstance(prepared, PreparedRequest):
+            raise AdapterUnavailable(
+                f"adapter {route.adapter!r} prepare() must return PreparedRequest"
+            )
+        materialized = prepared.payload
         reserved_input_tokens = math.ceil(
             max(spec.planned_input_tokens, materialized.input_token_upper_bound)
             * self.config.input_token_reservation_factor
@@ -351,10 +345,7 @@ class BenchmarkEngine:
                     adapter_started = time.perf_counter()
                     try:
                         async with asyncio.timeout(spec.timeout_seconds):
-                            if prepared is not None and hasattr(adapter, "infer_prepared"):
-                                result = await adapter.infer_prepared(route, spec, prepared)
-                            else:
-                                result = await adapter.infer(route, spec)
+                            result = await adapter.send_prepared(route, spec, prepared)
                     except TimeoutError:
                         result = InferenceResult(
                             logical_id=spec.logical_id,

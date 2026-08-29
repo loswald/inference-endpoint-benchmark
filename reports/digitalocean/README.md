@@ -1,21 +1,20 @@
 # DigitalOcean hosted open-model inference benchmark
 
-This is the dated, reproducible evidence package for the 11 DigitalOcean-hosted open-model
-endpoints frozen for measurement on 28-29 August 2026. It is designed for engineers choosing an
-endpoint and for researchers auditing exactly what was tested. It is not a claim about models added
-to DigitalOcean after the catalog freeze.
+This directory retains the dated machine-readable evidence for the 11 DigitalOcean-hosted
+open-model endpoints frozen for measurement on 28-29 August 2026. **Publication is currently
+withheld.** The previous PDF and figures mislabeled unresolved lower-rate searches as endpoint
+failures and collapsed distinct fixed-rate states into a single red failure state; they have been
+removed until regenerated from the corrected semantics. The tables below remain auditable partial
+evidence, not a completeness certificate or production recommendation.
 
-The finished PDF is
-[`digitalocean-inference-endpoints-technical-benchmark-2026-08-29.pdf`](../../published/digitalocean-final-report/digitalocean-inference-endpoints-technical-benchmark-2026-08-29.pdf).
+## What the current evidence establishes
 
-## What is complete
-
-| Evidence layer | Finished evidence |
+| Evidence layer | Current evidence |
 |---|---|
 | Six-hour matched low-load study | 7/7 hourly panels, 1,232/1,232 scheduled requests, all 11 endpoints and four workload families, stable repeated-prefix and panel-unique fresh-prefix strata |
-| Adaptive load search | All 44 endpoint-by-workload cells represented: 19 repeatedly passing tested lower bounds, 5 repeatedly confirmed brackets, and 20 measured failures at the lowest tested rate |
-| Two-minute fixed-rate test | All 44 cells represented: 3 passed every registered condition, 38 measured failures, and 3 cases where a reliable baseline could not be established |
-| Static and capability refresh | 564 completed cells retained with explicit measured, unsupported, inconclusive, or stopped-by-time-limit states |
+| Adaptive load search | 24/44 endpoint-by-workload cells have repeated numeric evidence: 19 tested lower bounds and 5 confirmed brackets. The other 20 searches stopped after one unhealthy 0.5 req/s starting probe; lower rates were not tested and those cells are unresolved, not endpoint failures. |
+| Two-minute fixed-rate test | All 44 cells have an execution record: 3 passed every registered condition, 38 did not meet every condition at the tested rate, and 3 were transport-gated with no scientific pass/fail result. |
+| Static and capability refresh | 564/2,891 planned cells completed, 2 were inconclusive, and 2,325 were stopped by the phase time limit. Preserve these as partial evidence, not a complete capability matrix. |
 | Context and output probes | One explicit measured state per endpoint; accepted values remain lower bounds unless an accept/reject interval was observed |
 
 The six-hour study completed 1,135 of 1,232 requests successfully (92.1%; Wilson 95% interval
@@ -51,17 +50,16 @@ an upstream model family lacks that capability.
 
 ## Machine-readable package
 
-The publication directory contains:
+The evidence directory contains:
 
-- the PDF report and directly labelled figures;
 - endpoint inventory, adaptive-load, fixed-rate, capability, context/output, quality, recovery, and
   six-hour variation tables;
 - request-level and panel-level 95% intervals, matched cache comparisons, and an outlier audit;
-- source/provenance manifests and a recursive public-safety scan.
+- source/provenance manifests.
 
 No blank cell is silently interpreted as zero or success. The tables use plain states such as
-`passed`, `measured failure`, `unsupported by product contract`, `inconclusive`, and `not run for this
-exact recipe`.
+`passed`, `tested-rate non-pass`, `transport-gated`, `unsupported by product contract`,
+`inconclusive`, `stopped by time limit`, and `not run for this exact recipe`.
 
 ## Reproduce and verify
 
@@ -77,8 +75,8 @@ python -m pytest tests/test_digitalocean_final.py tests/test_digitalocean_variat
 python scripts/verify-digitalocean-final-publication.py published/digitalocean-final-report
 ```
 
-The build command fails closed on unsafe public content and writes both the recursive safety receipt
-and deterministic SHA-256 publication manifest. The verification command checks the complete
+The eventual build command fails closed on unsafe public content and writes both the recursive
+safety receipt and deterministic SHA-256 publication manifest. The verification command checks the complete
 endpoint/workload matrices, all six-hour tables, nonblank coverage and limit states, PDF page and
 endpoint coverage, figure inventory and dimensions, safety receipt, and every published file hash.
 The source commit, campaign hash, estimator definitions, and sampling units are recorded in the PDF

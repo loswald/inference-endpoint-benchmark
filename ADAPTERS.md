@@ -7,7 +7,8 @@ They do not change the workload, retry policy, AIMD controller, statistics, or r
 
 | Adapter | API | Authentication | Provider-specific checks |
 |---|---|---|---|
-| `digitalocean` | Chat Completions | bearer token | official inference host supplied by route |
+| `alibaba_model_studio` | Chat Completions | bearer token | pay-as-you-go channel, official region-bound host, exact chat path |
+| `alibaba_model_studio_responses` | Responses | bearer token | pay-as-you-go channel, official region-bound host, exact Responses path |
 | `bedrock_mantle` | Chat Completions | Bedrock API key | `api.aws` host and exact chat path |
 | `bedrock_mantle_responses` | Responses | Bedrock API key | `api.aws` host and exact Responses path |
 | `azure_model_inference` / `azure_openai` | Chat Completions | `api-key` or bearer | Azure Foundry/OpenAI host and exact chat path |
@@ -15,6 +16,10 @@ They do not change the workload, retry policy, AIMD controller, statistics, or r
 | `vertex_openai` | Chat Completions | service-account file or ADC | renewable OAuth and Google API host |
 | `openrouter` | Chat Completions | bearer token | exact upstream pin, fallbacks off, response metadata attested |
 | `openai_compatible` | Chat Completions | configurable header | generic protocol behavior only |
+
+DigitalOcean currently uses `openai_compatible` plus a dated provider profile. A provider does not
+need a bespoke adapter unless it has a provider-specific authentication, routing, error, or response
+contract that the generic transport cannot express.
 
 `bedrock_native`, `vertex_native`, and `azure_model_inference_native` are explicit placeholders.
 Live preflight refuses them. The compatible transports above are real provider implementations, not
@@ -42,6 +47,11 @@ TTFT.
 Responses streaming recognizes output-text deltas and terminal `response.completed` or
 `response.incomplete` events. Non-streaming Responses output reconstructs text and function calls
 from the output-item array.
+
+Alibaba documents several meanings for HTTP 429. Rate, token-allocation, and burst codes enter the
+adaptive load controller and cause it to test a lower/smoother load. Billing or entitlement codes
+are non-retryable configuration outcomes; they are never mistaken for a capacity boundary. Unknown
+429 codes remain conservative rate observations until their exact provider contract is admitted.
 
 ## OpenRouter attribution
 

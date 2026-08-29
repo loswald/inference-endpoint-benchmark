@@ -11,15 +11,23 @@ workload; the software does not manufacture a single global score.
 
 ## Evidence status
 
-- [DigitalOcean hosted inference report](published/digitalocean-final-report/digitalocean-inference-endpoints-technical-benchmark-2026-08-29.pdf)
-  — the complete dated package for the 11 exact hosted open-model endpoints frozen on 28-29 August
-  2026. It combines 44/44 adaptive-load cells, 44/44 two-minute fixed-rate cells, a 1,232-request
-  matched six-hour study, capabilities, caching, context/output limits, uncertainty intervals, and
-  one plain-language production decision page per endpoint. See the
-  [method and data guide](reports/digitalocean/README.md).
-- Azure AI Foundry, Amazon Bedrock, and Google Vertex AI — corrected load, sustained-soak, and
-  matched time-panel measurements are in progress. Their atlas will be published only after the
-  final evidence and every rendered page pass the same integrity and visual checks.
+Implementation and measurement are different claims. This table is the current public evidence
+boundary; “not run” means exactly that, not failure and not zero performance.
+
+| Provider | Adapter | Live transport proof | Static / capabilities | Adaptive load | Fixed-rate stability | Time variation | Public report |
+|---|---|---|---|---|---|---|---|
+| DigitalOcean hosted open models | implemented | established | partial: 564 / 2,891 planned cells | partial: 24 / 44 repeatedly confirmed; 20 need lower-rate closure | 48 / 48 executed: 3 pass, 38 tested-rate non-pass, 3 no-valid-test | complete: 7 matched panels, 1,232 required observations | withheld pending corrected closure and graphics |
+| Alibaba Cloud Model Studio, Singapore pay-as-you-go | Chat and Responses implemented | established for `qwen3.8-flash` by direct and packaged-library calls | not run | not run | not run | not run | not published |
+| Amazon Bedrock | Chat and Responses implemented | not established by this repository package | not run here | not run here | not run here | not run here | not published |
+| Azure AI Foundry | Chat and Responses implemented | not established by this repository package | not run here | not run here | not run here | not run here | not published |
+| Google Vertex AI | Chat implemented | not established by this repository package | not run here | not run here | not run here | not run here | not published |
+| OpenRouter | Chat implemented | not established by this repository package | not run here | not run here | not run here | not run here | not published |
+
+For DigitalOcean, the retained [method and data guide](reports/digitalocean/README.md) states exactly
+what each measured state establishes. For Alibaba, the public
+[provider contract](docs/provider-contracts/alibaba-model-studio-2026-08-29.yaml) and its sanitized
+[receipts](docs/provider-contracts/receipts/) contain hash-bound proof metadata without credentials,
+prompts, or model output.
 
 The evidence files are observations from exact routes and test windows, not permanent provider-wide
 rankings. A blank or “not established” cell is deliberately different from a measured zero.
@@ -34,7 +42,9 @@ rankings. A blank or “not established” cell is deliberately different from a
 | Azure AI Foundry Responses | `azure_responses` | implemented |
 | Google Vertex AI OpenAI-compatible Chat Completions | `vertex_openai` | implemented, renewable OAuth |
 | OpenRouter Chat Completions | `openrouter` | implemented, exact upstream attested |
-| DigitalOcean Chat Completions | `digitalocean` | implemented |
+| Alibaba Model Studio Chat Completions | `alibaba_model_studio` | implemented, region and pay-as-you-go isolated |
+| Alibaba Model Studio Responses | `alibaba_model_studio_responses` | implemented as a separate API contract |
+| DigitalOcean Chat Completions | `openai_compatible` | implemented through a provider profile |
 | Generic OpenAI-compatible Chat Completions | `openai_compatible` | implemented |
 
 Native Bedrock Converse and native Gemini `generateContent` are not silently emulated. They remain
@@ -92,11 +102,14 @@ The non-load suites cover:
 
 AIMD is a feedback controller, not a score.
 
-1. Start at a low offered request rate.
+1. Establish a healthy low-load reference. If the starting probe is unhealthy, halve the rate and
+   keep trying through the declared floor; stopping above that floor is a configuration error.
 2. Increase quickly until the endpoint shows stress.
 3. Continue with smaller additive increases while healthy.
-4. After congestion, multiply the offered rate downward—normally by one half.
-5. Confirm the best healthy rate in three separated epochs.
+4. After congestion, multiply the offered rate downward—normally by one half, never below the
+   declared floor.
+5. Confirm the best healthy rate in three separated epochs, stepping lower and retrying when a
+   confirmation candidate is unhealthy.
 6. After a real overload, fall back and measure recovery.
 
 Arrivals are open-loop: requests are scheduled independently of previous completions. If the
@@ -109,6 +122,12 @@ does **not** by itself prove sustained capacity. The fixed-rate stability suite 
 `soak`) tests one candidate rate in multiple 30-second blocks. A passing claim requires every
 registered reliability, latency, queue, usage, quality, and recovery criterion to hold. Merely
 finishing the program is not a pass.
+
+“Unhealthy” is a composite controller state, not a synonym for “the endpoint failed.” Reliability,
+throttling, queue delay, and end-to-end latency drive the load controller. Missing TTFT remains an
+explicit observability gap but does not erase an otherwise successful capacity observation. If no
+healthy reference is found through the declared floor, the result says exactly that lower rates were
+not tested; it does not claim that the endpoint is unusable.
 
 ## Parallelism without contaminating capacity
 
@@ -161,6 +180,11 @@ pip install -r requirements.lock
 pip install -e . --no-deps
 ```
 
+A Git checkout is not required at runtime. Built wheels carry the exact dependency lock; an
+installed wheel or unpacked source archive identifies itself by hashing its package bytes, version,
+and lockfile. Clean Git checkouts retain the commit-based identity. Both forms are written into run
+and report provenance and are checked again before terminal publication.
+
 For development:
 
 ```bash
@@ -171,12 +195,21 @@ ruff check .
 
 ## Running one provider
 
-Start from [examples/digitalocean.yaml](examples/digitalocean.yaml) or a private provider config.
+Start from [examples/digitalocean.yaml](examples/digitalocean.yaml), the
+[Alibaba Singapore provider profile](examples/provider-profiles/alibaba-model-studio-singapore.yaml),
+or a private provider config.
 A route records the exact provider, model/deployment, API family, region, context/output limits,
 prices, authentication environment-variable name, documented capabilities, and dated source URLs.
 Credentials remain environment variables and never enter a report.
 
 ```bash
+# Compose a reusable provider catalog with a provider-neutral experiment. This reads no credential
+# and sends no traffic.
+inference-bench compile-profile \
+  examples/provider-profiles/alibaba-model-studio-singapore.yaml \
+  examples/experiment-profiles/standard-static-and-capacity.yaml \
+  --output .private/alibaba-comprehensive.yaml
+
 # No credential lookup and no provider traffic:
 inference-bench plan .private/azure.yaml
 
@@ -198,13 +231,14 @@ inference-bench plan-matrix .private/providers.yaml
 inference-bench run-matrix .private/providers.yaml \
   --output-root runs/multi-provider-001 --confirm-live
 
-# Combine a main AIMD run, a follow-up soak run, and optional time panels:
+# Combine a main adaptive-load run, a follow-up fixed-rate run, and optional time panels:
 inference-bench report-matrix .private/providers.yaml \
   --run-root runs/multi-provider-001 \
   --run-root runs/multi-provider-soak-001 \
   --output published/atlas
 
-# Turn every observed endpoint × workload AIMD lower bound into a two-minute soak campaign.
+# Turn every observed endpoint × workload adaptive-load bound into a two-minute fixed-rate campaign.
+# The command retains its historical `derive-soak` name for compatibility.
 # The generated .rates.json explains the evidence used for each candidate rate.
 inference-bench derive-soak provider.yaml runs/provider/report/controller-summary.csv \
   --output .private/provider-soak.yaml
@@ -225,7 +259,39 @@ One provider failing does not merge or relabel another provider's evidence.
 `inference-endpoint-evidence-atlas.pdf`. The atlas starts with method and coverage pages, then shows
 separate figures for low-load latency, AIMD bounds, sustained RPM/TPM, context retrieval, and
 functional capabilities. It ends with a one-page operating-evidence sheet for every exact route.
-Missing measurements stay blank and labelled; they never become zeroes.
+Missing measurements receive an explicit state and plain-language explanation; they never become
+blank cells or zeroes.
+
+## Extending the library
+
+Providers and experiments are separate. A `provider-profile/v1` file defines exact route identity,
+transport, region, billing channel, prices, limits, and credential environment-variable names. A
+`benchmark-experiment/v1` file defines the measurement design. `compile-profile` combines them
+deterministically, rejects unknown or duplicate fields, emits a canonical campaign, and never reads
+credentials or sends traffic.
+
+Private or third-party transports can register an adapter factory through the Python entry-point
+group `inference_endpoint_benchmark.adapters`. New experiment suites use
+`inference_endpoint_benchmark.suites` and return versioned `SuitePlugin` objects. Neither extension
+requires editing the execution kernel.
+
+The `inference_bench.reporting` package is provider-neutral: a `report-profile/v1` file maps source
+tables, endpoint labels, workload recipes, metrics, intervals, and measured-state rules into typed
+evidence cells. Its validators reject missing matrix cells, impossible intervals, duplicate cell
+identities, and unexplained states before publication. See
+[examples/report-profiles](examples/report-profiles/) and the public API in
+[`inference_bench.reporting`](src/inference_bench/reporting/__init__.py).
+
+When an older adaptive search did not reach a healthy low-load reference, a
+`capacity-closure-profile/v1` selects only the unresolved route × workload cells and maps them back
+to current shapes. The credential-free compiler refuses ambiguous mappings and emits a new plan
+without replaying completed request IDs:
+
+```bash
+inference-bench plan-capacity-closure \
+  provider.yaml prior-run/report/controller-summary.csv closure-profile.yaml \
+  --output closure-plan
+```
 
 ## Output that engineers can use
 
@@ -235,7 +301,7 @@ Every report contains:
   sample size, units, and 95% intervals;
 - `load-block-summary.csv` — offered and achieved RPM, successful input/output TPM, errors, queue
   drain, and block-level intervals;
-- `controller-summary.csv` — AIMD bracket, confirmations, recovery, and soak completion for every
+- `controller-summary.csv` — adaptive-load bracket, confirmations, recovery, and fixed-rate test completion for every
   endpoint × workload;
 - `time-variation-summary.csv` — matched low-load panels across the day;
 - `coverage-ledger.csv` — every planned cell and its completed, unsupported, inconclusive, or

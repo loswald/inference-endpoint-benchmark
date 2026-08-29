@@ -1,13 +1,48 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import httpx
+
 from ..models import RouteConfig
 from .openai_compatible import OpenAICompatibleAdapter
 from .responses import ResponsesAdapter
+
+_ALIBABA_WORKSPACE_HOST = re.compile(
+    r"^(?P<workspace>[a-z0-9][a-z0-9-]*)\."
+    r"(?P<region>cn-beijing|ap-southeast-1|ap-northeast-1|eu-central-1|"
+    r"cn-hongkong|us-east-1)\.maas\.aliyuncs\.com$"
+)
+_ALIBABA_DASHSCOPE_REGIONS = {
+    "dashscope.aliyuncs.com": "cn-beijing",
+    "dashscope-intl.aliyuncs.com": "ap-southeast-1",
+    "dashscope-us.aliyuncs.com": "us-east-1",
+    "cn-hongkong.dashscope.aliyuncs.com": "cn-hongkong",
+}
+_ALIBABA_ADAPTIVE_429_CODES = frozenset(
+    code.casefold()
+    for code in (
+        "Throttling.RateQuota",
+        "LimitRequests",
+        "limit_requests",
+        "Throttling.AllocationQuota",
+        "insufficient_quota",
+        "Throttling.BurstRate",
+        "limit_burst_rate",
+    )
+)
+_ALIBABA_ACCOUNT_429_CODES = frozenset(
+    code.casefold()
+    for code in (
+        "CommodityNotPurchased",
+        "PrepaidBillOverdue",
+        "PostpaidBillOverdue",
+    )
+)
 
 
 def _require_host(route: RouteConfig, *suffixes: str) -> None:
@@ -15,6 +50,102 @@ def _require_host(route: RouteConfig, *suffixes: str) -> None:
     if not any(host == suffix or host.endswith("." + suffix) for suffix in suffixes):
         expected = ", ".join(suffixes)
         raise RuntimeError(f"{route.adapter} endpoint host must belong to {expected}")
+
+
+def _preflight_alibaba_payg(route: RouteConfig, expected_path: str) -> None:
+    parsed = urlsplit(route.base_url)
+    if route.provider != "alibaba-model-studio":
+        raise RuntimeError(
+            "Alibaba Model Studio adapters require provider=alibaba-model-studio"
+        )
+    if (
+        parsed.scheme.casefold() != "https"
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.port is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise RuntimeError(
+            "Alibaba Model Studio pay-as-you-go routes require a canonical HTTPS endpoint "
+            "without credentials, a custom port, query parameters, or a fragment"
+        )
+    host = (parsed.hostname or "").casefold()
+    workspace_match = _ALIBABA_WORKSPACE_HOST.fullmatch(host)
+    if workspace_match is not None:
+        workspace = workspace_match.group("workspace")
+        if workspace in {"token-plan", "trial"} or workspace.startswith("replace-with-"):
+            workspace_match = None
+    observed_region = (
+        workspace_match.group("region")
+        if workspace_match is not None
+        else _ALIBABA_DASHSCOPE_REGIONS.get(host)
+    )
+    if observed_region is None:
+        raise RuntimeError(
+            "Alibaba Model Studio route must use an official pay-as-you-go workspace or "
+            "DashScope domain"
+        )
+    if route.billing_channel != "pay_as_you_go":
+        raise RuntimeError("Alibaba automated benchmarking requires billing_channel=pay_as_you_go")
+    if route.region != observed_region:
+        raise RuntimeError(
+            "Alibaba Model Studio API keys, model catalogs, and endpoints are region-bound"
+        )
+    if parsed.path.rstrip("/") != expected_path:
+        raise RuntimeError(f"Alibaba Model Studio route must use {expected_path}")
+    if route.auth.header.casefold() != "authorization" or route.auth.prefix != "Bearer ":
+        raise RuntimeError(
+            "Alibaba Model Studio OpenAI-compatible routes require Authorization: Bearer"
+        )
+
+
+def _alibaba_error_code(raw: bytes) -> str | None:
+    if len(raw) > 1_000_000:
+        return None
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    values = [payload.get("code")]
+    nested = payload.get("error")
+    if isinstance(nested, dict):
+        values.extend((nested.get("code"), nested.get("type")))
+    return next((value for value in values if isinstance(value, str) and value), None)
+
+
+class _AlibabaErrorClassificationMixin:
+    def _classify_http_error(
+        self, response: httpx.Response, raw: bytes
+    ) -> tuple[str, str]:
+        code = _alibaba_error_code(raw)
+        normalized = code.casefold() if code is not None else None
+        if response.status_code == 429:
+            if normalized in _ALIBABA_ACCOUNT_429_CODES:
+                return "client_error", "provider_billing_or_entitlement"
+            if normalized in _ALIBABA_ADAPTIVE_429_CODES:
+                return "rate_limited", "provider_rate_limit"
+        if response.status_code in {400, 401, 403, 404}:
+            return "client_error", "provider_route_fatal"
+        return super()._classify_http_error(response, raw)  # type: ignore[misc]
+
+
+class AlibabaModelStudioAdapter(_AlibabaErrorClassificationMixin, OpenAICompatibleAdapter):
+    """Alibaba Model Studio pay-as-you-go OpenAI-compatible chat transport."""
+
+    def preflight(self, route: RouteConfig) -> None:
+        _preflight_alibaba_payg(route, "/compatible-mode/v1/chat/completions")
+        super().preflight(route)
+
+
+class AlibabaModelStudioResponsesAdapter(_AlibabaErrorClassificationMixin, ResponsesAdapter):
+    """Alibaba Model Studio pay-as-you-go OpenAI-compatible Responses transport."""
+
+    def preflight(self, route: RouteConfig) -> None:
+        _preflight_alibaba_payg(route, "/compatible-mode/v1/responses")
+        super().preflight(route)
 
 
 class BedrockMantleAdapter(OpenAICompatibleAdapter):

@@ -34,6 +34,10 @@ PROTECTED_REQUEST_DEFAULT_KEYS = frozenset(
         "response_format",
         "logprobs",
         "stream_options",
+        "reasoning",
+        "reasoning_effort",
+        "text",
+        "verbosity",
     }
 )
 # The hard cost guard models text/image prompt tokens and billed completion tokens only. Route
@@ -103,8 +107,10 @@ _USAGE_COUNT_FIELDS = frozenset(
         "output_tokens",
         "total_tokens",
         "prompt_tokens_details.cached_tokens",
+        "input_tokens_details.cached_tokens",
         "cache_read_input_tokens",
         "completion_tokens_details.reasoning_tokens",
+        "output_tokens_details.reasoning_tokens",
         "reasoning_tokens",
     }
 )
@@ -112,7 +118,9 @@ PUBLIC_USAGE_PARSE_ERRORS = frozenset(
     {
         "usage_wrong_json_type",
         "prompt_tokens_details_wrong_json_type",
+        "input_tokens_details_wrong_json_type",
         "completion_tokens_details_wrong_json_type",
+        "output_tokens_details_wrong_json_type",
         "input_tokens_alias_conflict",
         "output_tokens_alias_conflict",
         "total_tokens_alias_conflict",
@@ -142,7 +150,8 @@ PUBLIC_USAGE_PARSE_ERRORS = frozenset(
 HTTP_ADAPTER_NAMES = frozenset(
     {
         "openai_compatible",
-        "digitalocean",
+        "alibaba_model_studio",
+        "alibaba_model_studio_responses",
         "bedrock_mantle",
         "bedrock_mantle_responses",
         "azure_openai",
@@ -154,6 +163,12 @@ HTTP_ADAPTER_NAMES = frozenset(
 )
 HTTP_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 ROUTE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+REASONING_BUDGET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+PROVIDER_DEFAULT_REASONING_BUDGET = "provider_default"
+_REASONING_CONTROL_FIELDS_BY_API_FAMILY = {
+    "chat_completions": frozenset({"reasoning_effort", "verbosity"}),
+    "responses": frozenset({"reasoning.effort", "text.verbosity"}),
+}
 
 
 def canonical_json(value: Any) -> str:
@@ -278,6 +293,12 @@ def public_error_category(value: object) -> str | None:
         return "protocol_error"
     if re.fullmatch(r"http_[1-5][0-9]{2}", normalized):
         return "http_error"
+    if normalized == "provider_rate_limit":
+        return "provider_rate_limit"
+    if normalized == "provider_billing_or_entitlement":
+        return "provider_billing_or_entitlement"
+    if normalized == "provider_route_fatal":
+        return "provider_route_fatal"
     if "timeout" in normalized:
         return "timeout"
     if any(token in normalized for token in ("transport", "connect", "network")):
@@ -322,6 +343,7 @@ class RouteConfig:
     auth: AuthConfig
     region: str = "not_reported"
     api_family: str = "chat_completions"
+    billing_channel: str = "not_reported"
     api_version: str = "not_reported"
     model_version: str = "not_reported"
     upstream_provider: str | None = None
@@ -346,6 +368,9 @@ class RouteConfig:
     extra_headers: dict[str, str] = field(default_factory=dict)
     retained_header_names: tuple[str, ...] = DEFAULT_RETAINED_HEADER_NAMES
     request_defaults: dict[str, Any] = field(default_factory=dict)
+    # Named budgets are an exact route-specific wire contract. An empty mapping means that this
+    # route declares no controllable reasoning budget. provider_default always omits controls.
+    reasoning_controls: dict[str, dict[str, str]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for name in ("id", "provider", "adapter", "model", "base_url"):
@@ -359,6 +384,7 @@ class RouteConfig:
         for name in (
             "region",
             "api_family",
+            "billing_channel",
             "api_version",
             "model_version",
             "quota_scope",
@@ -421,7 +447,12 @@ class RouteConfig:
                 )
             expected_api_family = (
                 "responses"
-                if self.adapter in {"bedrock_mantle_responses", "azure_responses"}
+                if self.adapter
+                in {
+                    "alibaba_model_studio_responses",
+                    "bedrock_mantle_responses",
+                    "azure_responses",
+                }
                 else "chat_completions"
             )
             if self.api_family != expected_api_family:
@@ -568,6 +599,57 @@ class RouteConfig:
                 "request_defaults contains fields outside the token-cost model allowlist: "
                 + ", ".join(unsupported_defaults)
             )
+        if not isinstance(self.reasoning_controls, dict):
+            raise ValueError("reasoning_controls must be a mapping")
+        allowed_control_fields = _REASONING_CONTROL_FIELDS_BY_API_FAMILY.get(self.api_family)
+        if self.reasoning_controls and allowed_control_fields is None:
+            raise ValueError(
+                f"reasoning_controls are not implemented for api_family={self.api_family}"
+            )
+        for budget, controls in self.reasoning_controls.items():
+            if not isinstance(budget, str) or not REASONING_BUDGET_RE.fullmatch(budget):
+                raise ValueError(
+                    "reasoning control budget names must contain only ASCII letters, digits, "
+                    "'.', '_', or '-' (maximum 64 characters)"
+                )
+            if budget == PROVIDER_DEFAULT_REASONING_BUDGET:
+                if controls != {}:
+                    raise ValueError(
+                        "provider_default reasoning budget must omit all wire controls"
+                    )
+                continue
+            if not isinstance(controls, dict) or not controls:
+                raise ValueError(
+                    f"reasoning_controls.{budget} must be a nonempty mapping of wire fields"
+                )
+            unsupported_fields = sorted(set(controls) - set(allowed_control_fields or ()))
+            if unsupported_fields:
+                raise ValueError(
+                    f"reasoning_controls.{budget} contains unsupported {self.api_family} "
+                    "wire fields: " + ", ".join(unsupported_fields)
+                )
+            if any(
+                not isinstance(field_name, str)
+                or not isinstance(value, str)
+                or not value.strip()
+                for field_name, value in controls.items()
+            ):
+                raise ValueError(
+                    f"reasoning_controls.{budget} must map wire fields to nonempty strings"
+                )
+
+    def reasoning_control(self, budget: str) -> dict[str, str]:
+        """Resolve one exact named control without silently applying provider guesses."""
+
+        if budget == PROVIDER_DEFAULT_REASONING_BUDGET:
+            return {}
+        try:
+            return dict(self.reasoning_controls[budget])
+        except KeyError as exc:
+            raise ValueError(
+                f"route {self.id} does not declare reasoning budget {budget!r}; "
+                "use provider_default to omit reasoning controls"
+            ) from exc
 
     @property
     def identity_hash(self) -> str:
@@ -584,6 +666,7 @@ class RouteConfig:
                 },
                 "region": self.region,
                 "api_family": self.api_family,
+                "billing_channel": self.billing_channel,
                 "api_version": self.api_version,
                 "model_version": self.model_version,
                 "upstream_provider": self.upstream_provider,
@@ -609,6 +692,7 @@ class RouteConfig:
                 "extra_headers": self.extra_headers,
                 "retained_header_names": self.retained_header_names,
                 "request_defaults": self.request_defaults,
+                "reasoning_controls": self.reasoning_controls,
             }
         )
 
@@ -697,6 +781,7 @@ class RequestSpec:
     parallel_tool_calls: bool | None = None
     response_format: dict[str, Any] | None = None
     logprobs: bool | None = None
+    reasoning_budget: str = PROVIDER_DEFAULT_REASONING_BUDGET
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -713,6 +798,13 @@ class RequestSpec:
             raise ValueError("token counts must be nonnegative/positive")
         if not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
+        if not isinstance(self.reasoning_budget, str) or not REASONING_BUDGET_RE.fullmatch(
+            self.reasoning_budget
+        ):
+            raise ValueError(
+                "reasoning_budget must contain only ASCII letters, digits, '.', '_', or '-' "
+                "(maximum 64 characters)"
+            )
 
     def payload_material(self) -> dict[str, Any]:
         return {
@@ -728,6 +820,8 @@ class RequestSpec:
             "parallel_tool_calls": self.parallel_tool_calls,
             "response_format": self.response_format,
             "logprobs": self.logprobs,
+            # Explicitly bind intentional provider-default omission into request identity.
+            "reasoning_budget": self.reasoning_budget,
             "synthetic_payload_descriptor": {
                 key: value
                 for key, value in self.metadata.items()

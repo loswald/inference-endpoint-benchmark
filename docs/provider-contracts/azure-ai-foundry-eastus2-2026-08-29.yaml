@@ -1,0 +1,310 @@
+schema: provider-evidence-bundle/v1
+provider: azure-ai-foundry
+retrieved_at_utc: "2026-08-29T23:00:00Z"
+source_role: provider_primary_documentation_plus_sanitized_live_transport_receipts
+rights_posture: public_provider_documentation_for_internal_r_and_d
+
+scope:
+  region: eastus2
+  deployment_sku: GlobalStandard
+  billing_channel: azure_subscription_metered
+  account_name_publication: redacted
+  exact_text_routes: 5
+  performance_claim_eligible: false
+  claim_boundary: >-
+    This bundle admits five exact deployment/API transports for future benchmarking. The
+    one-request canaries prove reachability, parser compatibility, streaming, and usage
+    accounting only. They do not prove quality, latency, capacity, reliability, or Pareto rank.
+
+endpoint_contracts:
+  responses:
+    host_template: "{resource}.services.ai.azure.com"
+    path: /openai/v1/responses
+    api_version: openai-compatible-v1-implicit
+    authentication: api-key
+    deployment_selector: request.model
+    documentation_status: current
+  chat_completions:
+    host_template: "{resource}.services.ai.azure.com"
+    path: /models/chat/completions
+    api_version: openai-compatible-v1
+    authentication: api-key
+    deployment_selector: request.model
+    documentation_status: live_proved_legacy_model_inference_path
+    migration_note: >-
+      Microsoft now recommends the OpenAI v1-compatible endpoint for new integrations and
+      documents retirement of the Azure AI Inference beta SDK. This profile preserves the
+      exact /models/chat/completions path that was live-proved on 2026-08-29; moving either
+      chat route to /openai/v1/chat/completions requires a new route-specific canary.
+
+quota_contract:
+  documented_global_standard_scope: >-
+    Deployments of the same model and version share one quota pool across all regions in
+    an Azure subscription.
+  live_control_plane_allocations:
+    gpt-5.6-sol:
+      rpm: 7500
+      tpm: 7500000
+    gpt-5.6-terra:
+      rpm: 7500
+      tpm: 7500000
+    gpt-5.6-luna:
+      rpm: 5000
+      tpm: 5000000
+    DeepSeek-V4-Flash:
+      rpm: 1000
+      tpm: 1000000
+    Kimi-K2.6:
+      rpm: 100
+      tpm: 100000
+  interpretation: >-
+    These are configured deployment limits observed through Azure Resource Manager, not
+    measured sustainable throughput. Azure can enforce RPM over shorter intervals, and TPM
+    admission uses an estimated maximum processed-token count rather than billable usage.
+
+models:
+  gpt-5.6-sol:
+    deployment_name: gpt-5.6-sol
+    model_version: "2026-07-09"
+    lifecycle: generally_available
+    api_family_live_proved: responses
+    documented_context:
+      model_window_tokens: 1050000
+      maximum_input_tokens: 922000
+      maximum_output_tokens: 128000
+      short_context_pricing_maximum_input_tokens: 272000
+    global_standard_short_context_price_usd_per_million_tokens:
+      input: 5.00
+      cached_input: 0.50
+      cache_write: 6.25
+      output: 30.00
+    scheduled_price_change:
+      begins_utc: "2026-09-01T00:00:00Z"
+      input: 4.00
+      output: 20.00
+      end: no_earlier_than_2026-11-30
+    documented_capabilities:
+      reasoning: true
+      responses_api: true
+      chat_completions_api: true
+      structured_outputs: true
+      text_input: true
+      image_input: true
+      functions_and_tools: true
+      parallel_tool_calling: true
+      computer_use: true
+    live_proof_scope: text_only_nonstream_and_stream
+
+  gpt-5.6-terra:
+    deployment_name: gpt-5.6-terra
+    model_version: "2026-07-09"
+    lifecycle: generally_available
+    api_family_live_proved: responses
+    documented_context:
+      model_window_tokens: 1050000
+      maximum_input_tokens: 922000
+      maximum_output_tokens: 128000
+      short_context_pricing_maximum_input_tokens: 272000
+    global_standard_short_context_price_usd_per_million_tokens:
+      input: 2.00
+      cached_input: 0.20
+      cache_write: 2.50
+      output: 12.00
+    documented_capabilities:
+      reasoning: true
+      responses_api: true
+      chat_completions_api: true
+      structured_outputs: true
+      text_input: true
+      image_input: true
+      functions_and_tools: true
+      parallel_tool_calling: true
+      computer_use: true
+    live_proof_scope: text_only_nonstream_and_stream
+
+  gpt-5.6-luna:
+    deployment_name: gpt-5.6-luna
+    model_version: "2026-07-09"
+    lifecycle: generally_available
+    api_family_live_proved: responses
+    documented_context:
+      model_window_tokens: 1050000
+      maximum_input_tokens: 922000
+      maximum_output_tokens: 128000
+      short_context_pricing_maximum_input_tokens: 272000
+    global_standard_short_context_price_usd_per_million_tokens:
+      input: 0.20
+      cached_input: 0.02
+      cache_write: 0.25
+      output: 1.20
+    documented_capabilities:
+      reasoning: true
+      responses_api: true
+      chat_completions_api: true
+      structured_outputs: true
+      text_input: true
+      image_input: true
+      functions_and_tools: true
+      parallel_tool_calling: true
+      computer_use: true
+    live_proof_scope: text_only_nonstream_and_stream
+
+  DeepSeek-V4-Flash:
+    deployment_name: DeepSeek-V4-Flash
+    model_version: "2026-04-23"
+    lifecycle: generally_available
+    api_family_live_proved: chat_completions
+    documented_context:
+      maximum_input_tokens: 1000000
+      maximum_output_tokens: 384000
+    global_standard_price_usd_per_million_tokens:
+      input: 0.19
+      cached_input: 0.028
+      output: 0.51
+    documented_capabilities:
+      reasoning_content: true
+      text_input: true
+      text_output: true
+      languages: [en, zh]
+      tool_calling: false
+      response_formats: [text, json]
+    live_proof_scope: text_only_nonstream_and_stream
+
+  Kimi-K2.6:
+    deployment_name: Kimi-K2.6
+    model_version: "2026-04-20"
+    lifecycle: preview
+    documented_retirement_date: "2027-04-16"
+    api_family_live_proved: chat_completions
+    documented_context:
+      maximum_input_tokens: 262144
+      maximum_output_tokens: 262144
+    global_standard_price_usd_per_million_tokens:
+      input: 0.95
+      cached_input: 0.16
+      output: 4.00
+    documented_capabilities:
+      reasoning_content: true
+      text_input: true
+      image_input: true
+      text_output: true
+      languages: [en, zh]
+      tool_calling: true
+      response_formats: [text]
+    live_proof_scope: text_only_nonstream_and_stream
+    operational_note: >-
+      A 32-token streaming canary spent its entire allowance on hidden reasoning and produced
+      no visible text. A 512-token canary completed with visible text and 91 reported reasoning
+      tokens. Benchmark workloads must reserve enough output headroom for hidden reasoning.
+
+profile_execution_contract:
+  gpt_5_6_context_tokens: 272000
+  gpt_5_6_context_reason: >-
+    The reusable RouteConfig has one input/output price pair and cannot represent Azure's
+    short- versus long-context pricing tiers. The public executable profile therefore remains
+    within the documented short-context tier. This is an execution envelope, not a claim that
+    the models stop at 272k; their full documented window is 1.05M tokens.
+  cache_write_cost_gap: >-
+    RouteConfig has no separate cache-write price. The profile records ordinary and cached-read
+    prices exactly, while this evidence bundle records cache-write prices. Cost results for GPT-5.6
+    cache-population requests must be labeled estimated until tiered cache-write accounting exists.
+  pricing_freshness: >-
+    GPT-5.6 Sol has a scheduled promotion beginning 2026-09-01. Refresh the dated profile before
+    any later spend-bearing run; do not silently apply the future rate to 2026-08-29 evidence.
+
+live_proof:
+  performed_at_utc: "2026-08-29T22:47:00Z"
+  exact_region: eastus2
+  resource_host_redacted: true
+  deployment_mutation_performed: false
+  ptu_used: false
+  prompts_outputs_bodies_headers_published: false
+  source_commit: 5215e03305ebc8aaeeb541757992375852d6c7b4
+  source_worktree_clean: false
+  source_file_hashes_retained_in_private_receipts: true
+  nonstream_manifest_sha256: 908666cfb3fdccad3e058c93920d10654369f5954f5e342e6b3c562278d58c43
+  stream_manifest_sha256: 473322cfeced0baff7d0f224e3205b201d4265526281caf82abfaad73017ecf9
+  routes:
+    azure-gpt-5.6-sol-eastus2-responses:
+      nonstream_receipt_sha256: 70882b131a7a1869ff58c82025ef38c38c822a1edfabe086d64f7ffe7c0d9458
+      stream_receipt_sha256: c2a1a872da9e4796a74dff6e3f34ce6d89c212aa31015e166dbcea1743d279bf
+      nonstream_http_status: 200
+      stream_http_status: 200
+      usage_complete: true
+      ttft_recorded_in_stream: true
+    azure-gpt-5.6-terra-eastus2-responses:
+      nonstream_receipt_sha256: 2c465d1ac0dae7e17039956a0a260185dd9db84a694d9f19a677f5639e685048
+      stream_receipt_sha256: c044d3dbaef1ce28b2418322bfa4452f0d075eeab84e7381ab0b0ecfdec1eef8
+      nonstream_http_status: 200
+      stream_http_status: 200
+      usage_complete: true
+      ttft_recorded_in_stream: true
+    azure-gpt-5.6-luna-eastus2-responses:
+      nonstream_receipt_sha256: cc778bb6487a96865561c7a4b35419db38fc31978dceb9296032d551f0c805e3
+      stream_receipt_sha256: 66aac0427c98ea18560ee712599f8199baa074f9672caeada3fa7bdb5ef8eb75
+      nonstream_http_status: 200
+      stream_http_status: 200
+      usage_complete: true
+      ttft_recorded_in_stream: true
+    azure-deepseek-v4-flash-eastus2-chat:
+      nonstream_receipt_sha256: f00e1fce7ac528442d423883b2064e4bb72afd29cf05fa74fbc32d1b65001c5d
+      stream_receipt_sha256: 548d6996e73512f70521c4cdebb2b8dae37fbeaf36fd7ad53e42d09802d78ab6
+      nonstream_http_status: 200
+      stream_http_status: 200
+      usage_complete: true
+      ttft_recorded_in_stream: true
+    azure-kimi-k2.6-eastus2-chat:
+      nonstream_receipt_sha256: 8b0c102276ccbc31d30f329b44427212531ea1be0d64bd846e1c80fe6418df34
+      short_stream_receipt_sha256: ae509ba471a08429e5f006f6c4a2be3361093ad47afec3b5fdbc34a691487834
+      visible_stream_512_receipt_sha256: 1f7989de2a28ac8f3fd7303189055b54e818a23fcfaf427e3320165e27e7cda1
+      nonstream_http_status: 200
+      stream_http_status: 200
+      usage_complete: true
+      ttft_recorded_with_512_token_allowance: true
+
+excluded_live_transport:
+  text-embedding-3-large:
+    deployment_live: true
+    dimensions: 3072
+    receipt_sha256: d88c7240841ae7de90646f17a04006c3ac4259c66a8088e975cfd3ed3125df1f
+    profile_status: excluded_until_public_embedding_adapter_exists
+
+explicit_gaps:
+  - No quality, latency-distribution, capacity, reliability, cache-hit, or long-context benchmark was run during route admission.
+  - GPT-5.6 prompts above 272,000 tokens require the separate long-context price tier, which the current RouteConfig cannot express.
+  - GPT-5.6 cache-write pricing cannot be represented by the current single cached-input price field.
+  - Kimi-K2.6 is a preview deployment and its vision and tool-calling capabilities are documented but not live-proved by this text-only admission.
+  - DeepSeek-V4-Flash and Kimi-K2.6 were proved on the legacy /models/chat/completions path; the recommended OpenAI v1 chat path requires its own canary before substitution.
+  - Embeddings transport is live, but the benchmark package does not yet expose an embedding adapter or embedding workloads.
+
+sources:
+  - https://learn.microsoft.com/en-us/azure/foundry/foundry-models/concepts/models-sold-directly-by-azure
+  - https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/responses
+  - https://learn.microsoft.com/en-us/azure/foundry/foundry-models/how-to/quickstart-ai-project
+  - https://learn.microsoft.com/en-us/azure/foundry/foundry-models/quotas-limits
+  - https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/quota
+  - https://learn.microsoft.com/en-us/azure/foundry/openai/concepts/model-retirement-schedule
+  - https://azure.microsoft.com/en-us/blog/gpt-5-6-now-available-in-microsoft-foundry/
+  - https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/introducing-deepseek-v4-flash-and-v4-pro-in-microsoft-foundry/4515174
+  - https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/introducing-kimi-k2-6-in-microsoft-foundry/4513125
+
+source_bindings:
+  gpt_5_6_capabilities_context_and_versions:
+    - https://learn.microsoft.com/en-us/azure/foundry/foundry-models/concepts/models-sold-directly-by-azure
+  gpt_5_6_short_context_pricing:
+    - https://azure.microsoft.com/en-us/blog/gpt-5-6-now-available-in-microsoft-foundry/
+  deepseek_v4_flash_context_and_capabilities:
+    - https://learn.microsoft.com/en-us/azure/foundry/foundry-models/concepts/models-sold-directly-by-azure
+  deepseek_v4_flash_pricing:
+    - https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/introducing-deepseek-v4-flash-and-v4-pro-in-microsoft-foundry/4515174
+  kimi_k2_6_context_capabilities_and_lifecycle:
+    - https://learn.microsoft.com/en-us/azure/foundry/foundry-models/concepts/models-sold-directly-by-azure
+    - https://learn.microsoft.com/en-us/azure/foundry/openai/concepts/model-retirement-schedule
+  kimi_k2_6_pricing:
+    - https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/introducing-kimi-k2-6-in-microsoft-foundry/4513125
+  endpoint_shapes:
+    - https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/responses
+    - https://learn.microsoft.com/en-us/azure/foundry/foundry-models/how-to/quickstart-ai-project
+  quota_scope_and_rate_limit_semantics:
+    - https://learn.microsoft.com/en-us/azure/foundry/foundry-models/quotas-limits
+    - https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/quota

@@ -1,0 +1,218 @@
+schema: provider-evidence-bundle/v1
+provider: alibaba-model-studio
+retrieved_at_utc: 2026-08-29T00:00:00Z
+source_role: provider_primary_documentation
+rights_posture: public_provider_documentation_for_internal_r_and_d
+
+route_contract:
+  billing_channel: pay_as_you_go
+  region: ap-southeast-1
+  deployment_scope: International
+  host_template: "{WorkspaceId}.ap-southeast-1.maas.aliyuncs.com"
+  chat_path: /compatible-mode/v1/chat/completions
+  responses_path: /compatible-mode/v1/responses
+  native_base_path: /api/v1
+  authentication: authorization_bearer
+  quota_scope: root_account_plus_model_across_users_workspaces_and_keys
+
+qwen3_8_flash:
+  exact_catalog_id: qwen3.8-flash
+  context_window_tokens: 1000000
+  singapore_list_price_usd_per_million_tokens:
+    input: 0.15
+    output: 0.47
+  singapore_default_limits:
+    rpm: 15000
+    tpm_including_input_and_output: 2000000
+  documented_capabilities:
+    streaming: true
+    thinking: documented_supported_runner_not_implemented
+    function_calling: true
+    json_object: true
+    json_schema: true
+    implicit_exact_prefix_cache: true
+    explicit_ephemeral_cache: documented_supported_runner_not_implemented
+    batch_chat: documented_unsupported_for_exact_route
+    batch_embeddings: documented_unsupported_for_exact_route
+
+flat_price_chat_admission:
+  claim_boundary: >-
+    Authenticated-catalog presence plus current official documentation only. Except for
+    qwen3.8-flash, each route still requires a final-build transport canary before a measured
+    campaign; catalog presence is not represented as successful inference.
+  routes:
+    - model: qwen3.8-max
+      catalog_present: true
+      context_window_tokens: 1000000
+      maximum_output_tokens: not_published_in_authenticated_catalog
+      input_usd_per_million: 2.00
+      output_usd_per_million: 6.00
+      singapore_default_rpm: 15000
+      singapore_default_tpm: 2000000
+    - model: qwen3.8-27b
+      catalog_present: true
+      context_window_tokens: 1000000
+      maximum_output_tokens: 131072
+      input_usd_per_million: 0.50
+      output_usd_per_million: 3.00
+      implicit_cached_input_usd_per_million: 0.10
+      singapore_default_rpm: 5000
+      singapore_default_tpm: 5000000
+    - model: deepseek-v4-flash
+      catalog_present: true
+      context_window_tokens: 1000000
+      maximum_output_tokens: not_bound
+      input_usd_per_million: 0.20
+      output_usd_per_million: 0.40
+      singapore_default_rpm: 10000
+      singapore_default_tpm: 1200000
+    - model: deepseek-v4-pro
+      catalog_present: true
+      context_window_tokens: 1000000
+      maximum_output_tokens: not_bound
+      input_usd_per_million: 2.40
+      output_usd_per_million: 4.80
+      singapore_default_rpm: 10000
+      singapore_default_tpm: 1200000
+    - model: kimi-k2.7-code
+      catalog_present: true
+      context_window_tokens: not_bound
+      maximum_output_tokens: not_bound
+      input_usd_per_million: 0.95
+      output_usd_per_million: 4.00
+      singapore_default_rpm: 500
+      singapore_default_tpm: 1000000
+    - model: kimi-k3
+      catalog_present: true
+      context_window_tokens: 1000000
+      maximum_output_tokens: not_bound
+      input_usd_per_million: 3.00
+      output_usd_per_million: 15.00
+      singapore_default_rpm: 10000
+      singapore_default_tpm: 1200000
+    - model: glm-5.2
+      catalog_present: true
+      context_window_tokens: 198000
+      maximum_output_tokens: not_bound
+      input_usd_per_million: 1.40
+      output_usd_per_million: 4.40
+      singapore_default_rpm: 500
+      singapore_default_tpm: 1000000
+
+provider_contracts:
+  stream_usage:
+    include_usage_request_field: stream_options.include_usage
+    terminal_usage_chunk: true
+  caching:
+    implicit: automatic_best_effort_exact_prefix
+    implicit_minimum_prefix_tokens: 256
+    explicit_minimum_prefix_tokens: 1024
+    explicit_ttl_minutes: 5
+    explicit_maximum_markers: 4
+  batch:
+    # Batch support is region- and model-specific. Do not infer Singapore support from the
+    # broader China (Beijing) matrix.
+    singapore:
+      supported_endpoint: /v1/chat/completions
+      supported_chat_models: [qwen-max, qwen-plus, qwen-flash, qwen-turbo]
+      exact_qwen3_8_flash_state: documented_unsupported_for_exact_route
+      embeddings_state: documented_unsupported_in_region
+    china_beijing:
+      supported_endpoints: [/v1/chat/completions, /v1/embeddings]
+      text_embedding_models: [text-embedding-v4]
+    maximum_rows: 50000
+    maximum_file_bytes: 500000000
+    cache_discount_eligible: false
+  adaptive_load:
+    dimensions: [rpm, tpm, rps, tps, burst_growth]
+    congestion_http_status: 429
+    typical_recovery_seconds: 60
+
+live_proof:
+  performed_at_utc: 2026-08-29
+  exact_region: ap-southeast-1
+  workspace_host_redacted: true
+  authenticated_catalog_ids_returned: 164
+  exact_routes_proven_callable_by_catalog_receipt: 0
+  authenticated_catalog_receipt_path: receipts/alibaba-model-studio-catalog-20260829.json
+  authenticated_catalog_receipt_sha256: e17175621438b1aa2a41beeea3f0c8ac1d0aaaf295f032845eb4ce6e5fec744f
+  qwen3_8_flash_canary:
+    http_status: 200
+    prompt_tokens: 70
+    completion_tokens: 30
+    receipt_path: receipts/alibaba-model-studio-qwen38-canary-20260829.json
+    receipt_sha256: 99b80f83e111c6a76cf7d4dd5e1c698f41c85b4e977e676fdb25c4bdc327ef85
+    prompt_and_output_retained: false
+  packaged_library_streaming_canary:
+    evidence_scope: transport_stream_parser_usage_accounting_and_receipt_only
+    performance_claim_eligible: false
+    exact_route: qwen3.8-flash
+    http_status: 200
+    successful_terminal_requests: 1
+    rate_limited_requests: 0
+    input_tokens: 337
+    output_tokens: 44
+    settled_exposure_usd: 0.00007123
+    campaign_identity_sha256: 6b3026d4f81ee4ea50fba8f9627d24a217c81303fd66798a95a893a862b635e9
+    source_wheel_sha256: 8c8d288016826cd955f00bdefd11a360968e581b748989290ae2376e207bcae7
+    reproducibility_manifest_sha256: 58beb0b5dcdca8ba3fb95e1a003492bdabf187d8c11dfd8df3013a455ed40a22
+    matched_summary_sha256: ac89e36542594b5e874cc528f26fc0be2d1732b1367f33b45eed43839ab09998
+    workspace_host_redacted: true
+    prompt_and_output_publication: prohibited
+
+explicit_unknowns:
+  - qwen3.8-flash maximum output tokens were not present in the authenticated catalog response
+  - standard rate-limit remaining/reset response headers are not documented
+  - implicit cache TTL and deterministic hit probability are not documented
+  - OpenAI-compatible Responses structured-output parameters are not documented
+  - universal pay-as-you-go support for GET /models is not documented
+  - qwen3-rerank is documented for Singapore but was absent from the authenticated 164-ID
+    catalog; route admission requires a tiny catalog/API reconciliation canary
+
+sources:
+  - https://www.alibabacloud.com/help/en/model-studio/regions
+  - https://www.alibabacloud.com/help/en/model-studio/base-url
+  - https://www.alibabacloud.com/help/en/model-studio/get-api-key
+  - https://www.alibabacloud.com/help/en/model-studio/qwen-api-reference
+  - https://www.alibabacloud.com/help/en/model-studio/qwen-api-via-openai-chat-completions
+  - https://www.alibabacloud.com/help/en/model-studio/qwen-api-via-openai-responses
+  - https://www.alibabacloud.com/help/en/model-studio/model-pricing
+  - https://www.alibabacloud.com/help/en/model-studio/rate-limit
+  - https://www.alibabacloud.com/help/en/model-studio/rate-limiting-best-practices
+  - https://www.alibabacloud.com/help/en/model-studio/error-code
+  - https://www.alibabacloud.com/help/en/model-studio/context-cache
+  - https://www.alibabacloud.com/help/en/model-studio/batch-inference
+  - https://www.alibabacloud.com/help/en/model-studio/batch-interfaces-compatible-with-openai
+  - https://www.alibabacloud.com/help/en/model-studio/qwen-function-calling
+  - https://www.alibabacloud.com/help/en/model-studio/qwen-structured-output
+  - https://www.alibabacloud.com/help/en/model-studio/vision-model
+  - https://www.alibabacloud.com/help/en/model-studio/text-embedding-synchronous-api
+  - https://www.alibabacloud.com/help/en/model-studio/text-rerank-api
+
+source_bindings:
+  regional_host_auth_and_billing:
+    - https://www.alibabacloud.com/help/en/model-studio/regions
+    - https://www.alibabacloud.com/help/en/model-studio/base-url
+    - https://www.alibabacloud.com/help/en/model-studio/get-api-key
+  chat_responses_and_stream_usage:
+    - https://www.alibabacloud.com/help/en/model-studio/qwen-api-reference
+    - https://www.alibabacloud.com/help/en/model-studio/qwen-api-via-openai-chat-completions
+    - https://www.alibabacloud.com/help/en/model-studio/qwen-api-via-openai-responses
+  price_and_quota:
+    - https://www.alibabacloud.com/help/en/model-studio/model-pricing
+    - https://www.alibabacloud.com/help/en/model-studio/rate-limit
+    - https://www.alibabacloud.com/help/en/model-studio/rate-limiting-best-practices
+  errors_and_controller_classification:
+    - https://www.alibabacloud.com/help/en/model-studio/error-code
+  caching:
+    - https://www.alibabacloud.com/help/en/model-studio/context-cache
+  batch:
+    - https://www.alibabacloud.com/help/en/model-studio/batch-inference
+    - https://www.alibabacloud.com/help/en/model-studio/batch-interfaces-compatible-with-openai
+  tools_structured_output_and_vision:
+    - https://www.alibabacloud.com/help/en/model-studio/qwen-function-calling
+    - https://www.alibabacloud.com/help/en/model-studio/qwen-structured-output
+    - https://www.alibabacloud.com/help/en/model-studio/vision-model
+  embeddings_and_reranking:
+    - https://www.alibabacloud.com/help/en/model-studio/text-embedding-synchronous-api
+    - https://www.alibabacloud.com/help/en/model-studio/text-rerank-api

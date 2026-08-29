@@ -69,6 +69,7 @@ def test_interaction_cover_is_built_over_realized_route_levels(route) -> None:
         "top_p": [0.25, 1.0],
         "stream": [False, True],
         "max_output_tokens": [64, 128],
+        "reasoning_budget": ["provider_default"],
     }
     for spec in specs:
         observed = spec.metadata["factors"]
@@ -77,6 +78,7 @@ def test_interaction_cover_is_built_over_realized_route_levels(route) -> None:
             "top_p": spec.top_p,
             "stream": spec.stream,
             "max_output_tokens": spec.max_output_tokens,
+            "reasoning_budget": spec.reasoning_budget,
         }
         assert spec.metadata["realized_factor_levels"] == factors
     for left_index, left in enumerate(factors):
@@ -86,6 +88,38 @@ def test_interaction_cover_is_built_over_realized_route_levels(route) -> None:
             }
             assert observed_pairs == set(itertools.product(factors[left], factors[right]))
     assert len({spec.cell_id for spec in specs}) == len(specs)
+
+
+def test_interaction_cover_includes_only_route_declared_reasoning_budgets(route) -> None:
+    controlled = replace(
+        route,
+        reasoning_controls={
+            "fast": {"reasoning_effort": "minimal", "verbosity": "low"},
+            "deep": {"reasoning_effort": "high", "verbosity": "high"},
+        },
+    )
+    specs = plan_interactions(
+        controlled,
+        {
+            "temperatures": [0.0],
+            "top_ps": [1.0],
+            "stream": [True],
+            "output_tokens": [64],
+            "reasoning_budgets": ["provider_default", "fast", "deep"],
+        },
+        seed=1,
+    )
+    assert {spec.reasoning_budget for spec in specs} == {"provider_default", "fast", "deep"}
+    assert all("reasoning=" in spec.cell_id for spec in specs)
+    assert {spec.metadata["reasoning_control_state"] for spec in specs} == {
+        "provider_default_omitted",
+        "explicit_route_declared_control",
+    }
+
+
+def test_reasoning_selection_fails_instead_of_guessing_for_undeclared_route(route) -> None:
+    with pytest.raises(ValueError, match="does not declare reasoning budget"):
+        plan_interactions(route, {"reasoning_budgets": ["minimal"]}, seed=1)
 
 
 def test_interaction_outputs_are_not_arbitrarily_clipped_without_route_limit(route) -> None:

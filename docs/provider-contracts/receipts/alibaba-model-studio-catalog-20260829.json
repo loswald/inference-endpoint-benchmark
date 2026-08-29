@@ -1,0 +1,13 @@
+{
+  "schema": "public-provider-catalog-receipt/v1",
+  "provider": "alibaba_model_studio",
+  "region": "ap-southeast-1",
+  "api_family": "openai_models",
+  "endpoint_host_redacted": true,
+  "observed_at_utc": "2026-08-29T21:56:19.6252797Z",
+  "authenticated": true,
+  "catalog_ids_returned": 164,
+  "catalog_ids_newline_sha256": "0eb76db51347ee94753b874809e412f0f7f620d4e73f919a15e1a64af377329e",
+  "exact_routes_proven_callable_by_this_receipt": 0,
+  "private_source_receipt_file_sha256": "c04b9c930c60348d8eb917d9134f757909faae0aa6cc6b2e45b1442ad89029bb"
+}

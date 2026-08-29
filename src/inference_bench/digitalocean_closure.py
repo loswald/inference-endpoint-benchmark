@@ -223,9 +223,13 @@ def build_digitalocean_closure_package(
             "concurrency": 128,
             "baseline_rps": 0.5,
             "baseline_samples": 20,
-            "baseline_attempts": 1,
+            # 0.5, 0.25, 0.125, 0.0625, and the registered 0.03125 req/s floor.
+            # A search that stops after the first unhealthy baseline is not adaptive.
+            "baseline_attempts": 5,
             "baseline_multiplicative_decrease": 0.5,
-            "confirmation_max_stages": 1,
+            # Permit failed confirmation candidates to step down repeatedly instead of
+            # terminating after one stage.
+            "confirmation_max_stages": 12,
             "confirmation_multiplicative_decrease": 0.5,
             "confirmation_separator_samples": 5,
             "minimum_rps": 0.03125,

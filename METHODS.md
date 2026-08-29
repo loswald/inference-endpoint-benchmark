@@ -76,6 +76,14 @@ baseline duration is extended as needed so that all samples fit without exceedin
 avoids zero-arrival Poisson baselines and makes the p95 sample size explicit; load-bearing AIMD,
 confirmation, recovery, and soak epochs retain seeded open-loop Poisson arrivals.
 
+If the starting baseline is unhealthy, the runner geometrically lowers the baseline rate until it
+finds a healthy reference or actually tests `minimum_rps`. Planning rejects an explicit
+`baseline_attempts` value that cannot reach that floor. A no-healthy result at the floor is a
+left-censored search result, not proof that the endpoint cannot serve requests below the floor.
+Successful responses without a visible first-output event remain eligible for reliability,
+queueing, and end-to-end capacity control; TTFT and decode-rate claims stay explicitly unavailable
+for those responses.
+
 Long-load size is not fixed at 32K. The `warmup`, `latency`, `aimd`, and `soak` suites can bind
 `long_input_tokens` and `long_output_tokens` into campaign identity. `long_short` uses the configured
 input target with a short output; `short_long` uses the configured output target with a short input;
@@ -93,8 +101,9 @@ not replay its already-terminal identities. Reports therefore label every non-wa
 An interrupted partial epoch is never replayed. It is scientifically censored and does not count as
 healthy or as congestion. The same applies to a Poisson epoch with zero scheduled arrivals and to a
 cost/time/402/reservation-guarded epoch. A censored baseline stops that endpoint × shape controller;
-a completed but unhealthy low-load baseline also stops and explicitly censors the controller as
-`unhealthy_low_load_baseline`; it cannot define latency thresholds or capacity. A censored ramp
+a completed but unhealthy low-load baseline stops and explicitly censors the controller as
+`unhealthy_low_load_baseline` only after the registered search has actually tested its declared
+minimum rate; it cannot define latency thresholds or capacity. A censored ramp
 epoch leaves the tested rate and best-healthy candidate unchanged and breaks consecutiveness of
 unhealthy evidence. Censored blocks remain in the coverage/audit ledger but are excluded from
 capacity estimates and confidence intervals.
@@ -112,9 +121,9 @@ These short epochs seek a knee. Only two consecutive scientifically eligible unh
 bracket one; otherwise the result is explicitly left- or right-censored. They do not establish
 sustained capacity.
 
-## Sustained soaks
+## Fixed-rate stability tests (suite name: `soak`)
 
-A soak consists of four 30-second analysis blocks by default. The runner records the tested rate and
+A fixed-rate test consists of four 30-second analysis blocks by default. The runner records the tested rate and
 block health, but the report does not automatically certify sustainable capacity. Capacity above or
 below the tested rate is not inferred. The current runner also does not construct paired low-load and
 near-load quality trials, so low-load quality scores must not be interpreted as evidence that quality

@@ -8,8 +8,8 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
-from .config import suite_applies_to_route
-from .models import RequestSpec, RouteConfig
+from .models import PROVIDER_DEFAULT_REASONING_BUDGET, RequestSpec, RouteConfig
+from .suite_registry import suite_applies_to_route
 
 
 def _png_chunk(kind: bytes, payload: bytes) -> bytes:
@@ -43,6 +43,33 @@ VISION_RED_PNG_DATA_URI = solid_rgb_png_data_uri(rgb=(255, 0, 0))
 
 def _matched_cell(label: str, input_tokens: int, output_tokens: int) -> str:
     return f"{label}:in{input_tokens}:out{output_tokens}"
+
+
+def _selected_reasoning_budgets(
+    route: RouteConfig, config: dict[str, Any]
+) -> tuple[str, ...]:
+    """Resolve an explicit suite selection, failing instead of guessing provider semantics."""
+
+    by_route = config.get("reasoning_budgets_by_route") or {}
+    configured = by_route.get(
+        route.id,
+        config.get("reasoning_budgets", [PROVIDER_DEFAULT_REASONING_BUDGET]),
+    )
+    budgets = tuple(str(value) for value in configured)
+    for budget in budgets:
+        route.reasoning_control(budget)
+    return budgets
+
+
+def _reasoning_metadata(route: RouteConfig, budget: str) -> dict[str, Any]:
+    controls = route.reasoning_control(budget)
+    return {
+        "reasoning_budget": budget,
+        "reasoning_control_state": (
+            "provider_default_omitted" if not controls else "explicit_route_declared_control"
+        ),
+        "reasoning_control_wire_fields": sorted(controls),
+    }
 
 
 def _words(target_tokens: int, seed: str) -> str:
@@ -346,6 +373,13 @@ def plan_capability(route: RouteConfig, config: dict[str, Any], *, seed: int) ->
         suite="capability",
         workload_key="capability:{route}:baseline",
     )
+    base = replace(
+        base,
+        metadata={
+            **base.metadata,
+            **_reasoning_metadata(route, PROVIDER_DEFAULT_REASONING_BUDGET),
+        },
+    )
     probes: list[RequestSpec] = [
         replace(
             base,
@@ -354,6 +388,26 @@ def plan_capability(route: RouteConfig, config: dict[str, Any], *, seed: int) ->
             ),
         )
     ]
+    for budget in _selected_reasoning_budgets(route, config):
+        if budget == PROVIDER_DEFAULT_REASONING_BUDGET:
+            continue
+        probes.append(
+            replace(
+                base,
+                logical_id=f"capability:{route.id}:reasoning:{budget}",
+                cell_id=_matched_cell(
+                    f"reasoning_budget_{budget}",
+                    base.planned_input_tokens,
+                    base.max_output_tokens,
+                ),
+                reasoning_budget=budget,
+                metadata={
+                    **base.metadata,
+                    **_reasoning_metadata(route, budget),
+                    "capability_evidence_scope": "named_reasoning_control_acceptance",
+                },
+            )
+        )
     probes.append(
         replace(
             base,
@@ -806,6 +860,7 @@ def plan_interactions(
         # The covering array is built over the levels that will actually be sent. Clipping after
         # construction can collapse levels and silently destroy strength-two coverage.
         "max_output_tokens": realized_outputs,
+        "reasoning_budget": list(_selected_reasoning_budgets(route, config)),
     }
     result: list[RequestSpec] = []
     base = shape_spec(
@@ -819,7 +874,7 @@ def plan_interactions(
         realized_output = int(row["max_output_tokens"])
         factor_label = (
             f"interaction_t={float(row['temperature']):g}_p={float(row['top_p']):g}_"
-            f"stream={int(bool(row['stream']))}"
+            f"stream={int(bool(row['stream']))}_reasoning={row['reasoning_budget']}"
         )
         result.append(
             replace(
@@ -830,10 +885,12 @@ def plan_interactions(
                 top_p=float(row["top_p"]),
                 stream=bool(row["stream"]),
                 max_output_tokens=realized_output,
+                reasoning_budget=str(row["reasoning_budget"]),
                 metadata={
                     "covering_array_strength": 2,
                     "factors": row,
                     "realized_factor_levels": factors,
+                    **_reasoning_metadata(route, str(row["reasoning_budget"])),
                 },
             )
         )
@@ -1172,16 +1229,19 @@ PLANNERS = {
 def plan_static_suites(
     routes: Iterable[RouteConfig], suites: dict[str, dict[str, Any]], *, seed: int
 ) -> list[RequestSpec]:
+    from .suite_registry import suite_plugins
+
     result: list[RequestSpec] = []
+    plugins = suite_plugins()
     for route in routes:
-        for name, planner in PLANNERS.items():
+        for name, plugin in plugins.items():
             config = suites.get(name)
             if (
                 config is not None
                 and config.get("enabled", True)
                 and suite_applies_to_route(config, route.id)
             ):
-                result.extend(planner(route, config, seed=seed))
+                result.extend(plugin.planner(route, config, seed=seed))
     return result
 
 

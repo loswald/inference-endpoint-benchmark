@@ -12,7 +12,7 @@ campaign:
 
 route_defaults:
   provider: digitalocean
-  adapter: digitalocean
+  adapter: openai_compatible
   base_url: https://inference.do-ai.run/v1/chat/completions
   auth:
     env: DIGITALOCEAN_INFERENCE_API_KEY
@@ -44,7 +44,7 @@ routes:
   -
     id: deepseek-v4-flash-0731
     provider: digitalocean
-    adapter: digitalocean
+    adapter: openai_compatible
     model: deepseek-v4-flash-0731
     base_url: https://inference.do-ai.run/v1/chat/completions
     auth:

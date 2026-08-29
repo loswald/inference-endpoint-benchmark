@@ -1,6 +1,19 @@
-from .base import Adapter, AdapterUnavailable, adapter_for
+from .base import (
+    ADAPTER_ENTRY_POINT_GROUP,
+    Adapter,
+    AdapterPlugin,
+    AdapterUnavailable,
+    PreparedRequest,
+    adapter_for,
+    adapter_plugin,
+    available_adapters,
+    register_adapter,
+    validate_adapter_route,
+)
 from .openai_compatible import OpenAICompatibleAdapter
 from .providers import (
+    AlibabaModelStudioAdapter,
+    AlibabaModelStudioResponsesAdapter,
     AzureModelInferenceAdapter,
     AzureResponsesAdapter,
     BedrockMantleAdapter,
@@ -10,14 +23,23 @@ from .providers import (
 )
 
 __all__ = [
+    "AlibabaModelStudioAdapter",
+    "AlibabaModelStudioResponsesAdapter",
     "Adapter",
+    "AdapterPlugin",
     "AdapterUnavailable",
+    "ADAPTER_ENTRY_POINT_GROUP",
     "AzureModelInferenceAdapter",
     "AzureResponsesAdapter",
     "BedrockMantleAdapter",
     "BedrockMantleResponsesAdapter",
     "OpenAICompatibleAdapter",
     "OpenRouterAdapter",
+    "PreparedRequest",
     "VertexOpenAIAdapter",
     "adapter_for",
+    "adapter_plugin",
+    "available_adapters",
+    "register_adapter",
+    "validate_adapter_route",
 ]

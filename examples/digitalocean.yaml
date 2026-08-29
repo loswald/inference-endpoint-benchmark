@@ -17,7 +17,7 @@ campaign:
 routes:
   - id: do-example-route
     provider: digitalocean
-    adapter: digitalocean
+    adapter: openai_compatible
     model: replace-with-exact-model-id
     base_url: https://inference.do-ai.run/v1/chat/completions
     auth:

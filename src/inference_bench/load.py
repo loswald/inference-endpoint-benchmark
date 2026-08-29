@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import random
 from contextlib import suppress
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from .acceptance import AcceptancePolicy
 from .engine import BenchmarkEngine, PaymentRequiredLatched, ReservationOverrunLatched
 from .ledger import BudgetExceeded, TimeLimitReached
 from .models import RouteConfig
@@ -88,6 +90,56 @@ def baseline_design(
     return samples, duration, samples / duration
 
 
+def baseline_attempt_count(
+    config: dict[str, Any],
+    initial_rate: float,
+    *,
+    field_prefix: str,
+) -> int:
+    """Resolve a baseline search that actually reaches its configured rate floor.
+
+    ``baseline_attempts`` is a maximum-search contract, not permission to stop above
+    ``minimum_rps`` and call the search complete. When it is omitted, derive the smallest
+    attempt count that tests the floor. When it is explicit, fail the plan if the count cannot
+    reach the floor before any provider traffic is sent.
+    """
+
+    initial = _strict_positive_float(initial_rate, f"{field_prefix}.effective_baseline_rps")
+    minimum = _strict_positive_float(
+        config.get("minimum_rps", 0.01), f"{field_prefix}.minimum_rps"
+    )
+    decrease = _strict_positive_float(
+        config.get("baseline_multiplicative_decrease", 0.5),
+        f"{field_prefix}.baseline_multiplicative_decrease",
+    )
+    if decrease > 1:
+        raise ValueError(
+            f"{field_prefix}.baseline_multiplicative_decrease must lie in (0, 1]"
+        )
+    if initial <= minimum:
+        required = 1
+    elif decrease == 1:
+        raise ValueError(
+            f"{field_prefix}.baseline_multiplicative_decrease must be below 1 when "
+            "the baseline starts above minimum_rps"
+        )
+    else:
+        required = 1 + math.ceil(math.log(minimum / initial) / math.log(decrease))
+        while initial * decrease ** (required - 1) > minimum * (1 + 1e-12):
+            required += 1
+
+    configured = config.get("baseline_attempts")
+    if configured is None:
+        return required
+    attempts = _strict_positive_int(configured, f"{field_prefix}.baseline_attempts")
+    if attempts < required:
+        raise ValueError(
+            f"{field_prefix}.baseline_attempts={attempts} stops above minimum_rps; "
+            f"at least {required} attempts are required to test the configured floor"
+        )
+    return attempts
+
+
 def next_healthy_aimd_rate(
     current_rps: float,
     *,
@@ -140,6 +192,7 @@ def aimd_max_rps(config: dict[str, Any], shape: str) -> float | None:
 
 
 def validate_aimd_config(config: dict[str, Any], default_concurrency: int) -> None:
+    AcceptancePolicy.from_suite(config)
     epochs = _strict_positive_int(config.get("epochs", 12), "aimd.epochs")
     _strict_positive_float(config.get("epoch_seconds", 20), "aimd.epoch_seconds")
     initial_rps = _strict_positive_float(config.get("initial_rps", 0.25), "aimd.initial_rps")
@@ -186,7 +239,6 @@ def validate_aimd_config(config: dict[str, Any], default_concurrency: int) -> No
     )
     if samples < MIN_BASELINE_SAMPLES:
         raise ValueError(f"aimd.baseline_samples must be at least {MIN_BASELINE_SAMPLES}")
-    _strict_positive_int(config.get("baseline_attempts", 3), "aimd.baseline_attempts")
     baseline_decrease = _strict_positive_float(
         config.get("baseline_multiplicative_decrease", 0.5),
         "aimd.baseline_multiplicative_decrease",
@@ -207,9 +259,16 @@ def validate_aimd_config(config: dict[str, Any], default_concurrency: int) -> No
     minimum_rps = _strict_positive_float(config.get("minimum_rps", 0.01), "aimd.minimum_rps")
     if max_rps is not None and minimum_rps > max_rps:
         raise ValueError("aimd.minimum_rps must not exceed aimd.max_rps")
+    _, _, effective_baseline_rate = baseline_design(
+        config,
+        float(config.get("epoch_seconds", 20)),
+        default_rps=min(initial_rps, 0.5),
+    )
+    baseline_attempt_count(config, effective_baseline_rate, field_prefix="aimd")
 
 
 def validate_soak_config(config: dict[str, Any], default_concurrency: int) -> None:
+    AcceptancePolicy.from_suite(config)
     _strict_positive_int(config.get("blocks", 4), "soak.blocks")
     _strict_positive_float(config.get("block_seconds", 30), "soak.block_seconds")
     _strict_positive_int(config.get("concurrency", default_concurrency), "soak.concurrency")
@@ -220,7 +279,6 @@ def validate_soak_config(config: dict[str, Any], default_concurrency: int) -> No
     )
     if samples < MIN_BASELINE_SAMPLES:
         raise ValueError(f"soak.baseline_samples must be at least {MIN_BASELINE_SAMPLES}")
-    _strict_positive_int(config.get("baseline_attempts", 3), "soak.baseline_attempts")
     baseline_decrease = _strict_positive_float(
         config.get("baseline_multiplicative_decrease", 0.5),
         "soak.baseline_multiplicative_decrease",
@@ -235,6 +293,12 @@ def validate_soak_config(config: dict[str, Any], default_concurrency: int) -> No
     if not 0 < rate_decrease < 1:
         raise ValueError("soak.rate_multiplicative_decrease must lie in (0, 1)")
     _strict_positive_float(config.get("minimum_rps", 0.01), "soak.minimum_rps")
+    _, _, effective_baseline_rate = baseline_design(
+        config,
+        float(config.get("block_seconds", 30)),
+        default_rps=float(config.get("rate_rps", 0.25)),
+    )
+    baseline_attempt_count(config, effective_baseline_rate, field_prefix="soak")
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,6 +334,8 @@ class EpochSummary:
     launch_guard_reason: str | None
     controller_eligible: bool
     scientific_censor_reason: str | None
+    acceptance_policy_sha256: str = AcceptancePolicy().identity_hash
+    health_reasons: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -326,6 +392,12 @@ def _paused_result(values: list[EpochSummary]) -> LoadRunResult:
 
 
 _RETRYABLE_STATUSES = {"rate_limited", "server_error", "timeout", "transport_error"}
+_ROUTE_FATAL_STATUSES = {"client_error", "adapter_unavailable"}
+_ROUTE_FATAL_CENSOR_REASON = "route_fatal_provider_or_configuration_error"
+
+
+def _controller_route_fatal(summary: EpochSummary) -> bool:
+    return summary.scientific_censor_reason == _ROUTE_FATAL_CENSOR_REASON
 
 
 def _is_final_logical_attempt(row: dict[str, Any], retries: int) -> bool:
@@ -354,6 +426,7 @@ def _build_epoch_summary(
     scientific_censor_reason: str | None,
     max_p95_ttft_seconds: float | None,
     max_p95_total_seconds: float | None,
+    acceptance_policy: AcceptancePolicy,
 ) -> EpochSummary:
     if not logical_ids and scientific_censor_reason is None:
         scientific_censor_reason = "zero_scheduled_poisson_arrivals"
@@ -369,6 +442,13 @@ def _build_epoch_summary(
         if _is_final_logical_attempt(latest, engine.config.retries):
             final_rows.append(latest)
     physical_attempts = [row for row in attempt_rows if row["state"] in {"terminal", "unknown"}]
+    route_fatal_attempts = [
+        row for row in physical_attempts if row.get("status") in _ROUTE_FATAL_STATUSES
+    ]
+    if route_fatal_attempts and stop_reason is None and scientific_censor_reason is None:
+        # Permanent route, authentication, entitlement, billing, or request-contract failures
+        # are not congestion observations. Lowering offered load cannot repair them.
+        scientific_censor_reason = _ROUTE_FATAL_CENSOR_REASON
     success = [
         row for row in final_rows if row["state"] == "terminal" and row["status"] == "success"
     ]
@@ -403,33 +483,62 @@ def _build_epoch_summary(
         if row["queue_delay_seconds"] is not None
     ]
     p95_queue_delay = quantile(queue_delays, 0.95) if queue_delays else None
-    healthy = bool(
-        completed
-        and stop_reason is None
-        and not unknown
-        and logical_observed == len(logical_ids)
-        and success_rate >= 0.99
-        and physical_count > 0
-        and rate_limited / physical_count <= 0.01
-        and (server_errors + timeouts + transport_errors) / physical_count <= 0.01
-        # Response drain after the registered arrival window is not queue growth. A slow final
-        # request may finish well after the window even when every arrival starts immediately.
-        # Coordinated-omission-safe congestion is instead detected from the measured delay between
-        # each registered arrival and admission through the independent concurrency ceiling.
-        and len(queue_delays) == logical_observed
-        and p95_queue_delay is not None
-        and p95_queue_delay <= max(1.0, duration_seconds * 0.1)
-        and len(ttfts) == len(success)
-        and len(arrivals) == len(success)
-        and (
-            max_p95_ttft_seconds is None
-            or (p95_ttft is not None and p95_ttft <= max_p95_ttft_seconds)
-        )
-        and (
-            max_p95_total_seconds is None
-            or (p95_total is not None and p95_total <= max_p95_total_seconds)
-        )
-    )
+    health_reasons: list[str] = []
+    if not completed:
+        health_reasons.append("no_completed_logical_outcome")
+    if stop_reason is not None:
+        health_reasons.append("launch_guard_or_runner_stop")
+    if unknown:
+        health_reasons.append("unknown_provider_outcome")
+    if route_fatal_attempts:
+        health_reasons.append(_ROUTE_FATAL_CENSOR_REASON)
+    if (
+        acceptance_policy.require_all_logical_outcomes
+        and logical_observed != len(logical_ids)
+    ):
+        health_reasons.append("incomplete_logical_outcomes")
+    if success_rate < acceptance_policy.min_success_fraction:
+        health_reasons.append("success_fraction_below_policy")
+    if physical_count == 0:
+        health_reasons.append("no_physical_attempts")
+    else:
+        if rate_limited / physical_count > acceptance_policy.max_throttled_attempt_fraction:
+            health_reasons.append("throttled_attempt_fraction_above_policy")
+        retryable_errors = server_errors + timeouts + transport_errors
+        if (
+            retryable_errors / physical_count
+            > acceptance_policy.max_retryable_error_attempt_fraction
+        ):
+            health_reasons.append("retryable_error_attempt_fraction_above_policy")
+    # Response drain after the arrival window is not queue growth. Admission delay is the
+    # coordinated-omission-safe congestion signal.
+    if (
+        acceptance_policy.require_all_queue_observations
+        and len(queue_delays) != logical_observed
+    ):
+        health_reasons.append("incomplete_queue_delay_observations")
+    if p95_queue_delay is None:
+        health_reasons.append("p95_queue_delay_not_estimable")
+    elif p95_queue_delay > acceptance_policy.queue_delay_limit(duration_seconds):
+        health_reasons.append("p95_queue_delay_above_policy")
+    # TTFT is an observability estimand. It participates only when a valid baseline supplied an
+    # explicit comparative ceiling; missing TTFT alone never becomes a capacity failure.
+    if (
+        acceptance_policy.require_all_success_arrival_latencies
+        and len(arrivals) != len(success)
+    ):
+        health_reasons.append("incomplete_success_arrival_latencies")
+    if max_p95_ttft_seconds is not None:
+        if p95_ttft is None:
+            health_reasons.append("p95_ttft_not_estimable_for_comparison")
+        elif p95_ttft > max_p95_ttft_seconds:
+            health_reasons.append("p95_ttft_above_baseline_policy")
+    if max_p95_total_seconds is not None:
+        if p95_total is None:
+            health_reasons.append("p95_total_latency_not_estimable_for_comparison")
+        elif p95_total > max_p95_total_seconds:
+            health_reasons.append("p95_total_latency_above_baseline_policy")
+    healthy = not health_reasons
     return EpochSummary(
         epoch_id=epoch_id,
         route_id=route.id,
@@ -470,6 +579,8 @@ def _build_epoch_summary(
         launch_guard_reason=stop_reason,
         controller_eligible=scientific_censor_reason is None,
         scientific_censor_reason=scientific_censor_reason,
+        acceptance_policy_sha256=acceptance_policy.identity_hash,
+        health_reasons=tuple(health_reasons),
     )
 
 
@@ -549,12 +660,14 @@ async def run_open_loop_epoch(
     deterministic_scheduled_count: int | None = None,
     max_p95_ttft_seconds: float | None = None,
     max_p95_total_seconds: float | None = None,
+    acceptance_policy: AcceptancePolicy | None = None,
 ) -> EpochSummary:
     """Open-loop arrivals with a separate concurrency ceiling.
 
     Every arrival is scheduled from the epoch clock before any request completes. When the ceiling
     is busy, the arrival waits and its queue delay is retained rather than omitted.
     """
+    acceptance_policy = acceptance_policy or AcceptancePolicy()
     event_key = f"load_epoch:{epoch_id}"
     existing_summary = engine.ledger.event_by_key(event_key)
     if existing_summary is not None:
@@ -563,6 +676,10 @@ async def run_open_loop_epoch(
         stored_payload = json.loads(str(existing_summary["payload_json"]))
         stored_payload.setdefault("controller_eligible", True)
         stored_payload.setdefault("scientific_censor_reason", None)
+        stored_payload.setdefault("acceptance_policy_sha256", AcceptancePolicy().identity_hash)
+        stored_payload.setdefault("health_reasons", ())
+        if isinstance(stored_payload.get("health_reasons"), list):
+            stored_payload["health_reasons"] = tuple(stored_payload["health_reasons"])
         restored = EpochSummary(**stored_payload)
         expected_identity = (
             route.id,
@@ -584,6 +701,12 @@ async def run_open_loop_epoch(
             raise ValueError(
                 f"epoch identity changed for {epoch_id}: "
                 f"stored={restored_identity!r}, requested={expected_identity!r}"
+            )
+        if restored.acceptance_policy_sha256 != acceptance_policy.identity_hash:
+            raise ValueError(
+                f"acceptance policy changed for {epoch_id}: "
+                f"stored={restored.acceptance_policy_sha256}, "
+                f"requested={acceptance_policy.identity_hash}"
             )
         try:
             restored_state = (
@@ -663,6 +786,7 @@ async def run_open_loop_epoch(
             scientific_censor_reason=scientific_censor_reason,
             max_p95_ttft_seconds=max_p95_ttft_seconds,
             max_p95_total_seconds=max_p95_total_seconds,
+            acceptance_policy=acceptance_policy,
         )
         _record_epoch_summary(engine, reconstructed)
         return reconstructed
@@ -799,6 +923,7 @@ async def run_open_loop_epoch(
         scientific_censor_reason=None,
         max_p95_ttft_seconds=max_p95_ttft_seconds,
         max_p95_total_seconds=max_p95_total_seconds,
+        acceptance_policy=acceptance_policy,
     )
     _record_epoch_summary(engine, summary)
     return summary
@@ -850,9 +975,10 @@ async def _run_adaptive_baselines(
     samples, initial_duration, initial_rate = baseline_design(
         config, nominal_duration, default_rps=default_rps
     )
-    attempts = int(config.get("baseline_attempts", 3))
+    acceptance_policy = AcceptancePolicy.from_suite(config)
     decrease = float(config.get("baseline_multiplicative_decrease", 0.5))
     minimum_rps = float(config.get("minimum_rps", 0.01))
+    attempts = baseline_attempt_count(config, initial_rate, field_prefix=controller)
     summaries: list[EpochSummary] = []
     for attempt in range(attempts):
         rate = max(minimum_rps, initial_rate * decrease**attempt)
@@ -878,9 +1004,12 @@ async def _run_adaptive_baselines(
             seed=seed - 1 - attempt,
             shape_config=config,
             deterministic_scheduled_count=samples,
+            acceptance_policy=acceptance_policy,
         )
         summaries.append(summary)
         if summary.launch_guard_triggered:
+            break
+        if _controller_route_fatal(summary):
             break
         if summary.controller_eligible and summary.healthy:
             for unused_attempt in range(attempt + 1, attempts):
@@ -907,6 +1036,7 @@ async def run_aimd(
     not_after_monotonic: float | None = None,
 ) -> LoadRunResult:
     validate_aimd_config(config, engine.config.concurrency)
+    acceptance_policy = AcceptancePolicy.from_suite(config)
     epochs = int(config.get("epochs", 12))
     duration = float(config.get("epoch_seconds", 20))
     rate = float(config.get("initial_rps", 0.25))
@@ -1037,8 +1167,8 @@ async def run_aimd(
     baseline_rate = baseline.offered_rps
     separator_samples = int(config.get("confirmation_separator_samples", baseline_samples))
     separator_duration = max(duration, separator_samples / baseline_rate)
-    ttft_limit = None if baseline.p95_ttft_seconds is None else 2 * baseline.p95_ttft_seconds
-    total_limit = None if baseline.p95_total_seconds is None else 2 * baseline.p95_total_seconds
+    ttft_limit = acceptance_policy.baseline_latency_limit(baseline.p95_ttft_seconds)
+    total_limit = acceptance_policy.baseline_latency_limit(baseline.p95_total_seconds)
     unhealthy_streak = 0
     best_healthy = 0.0
     overload_observed = False
@@ -1068,9 +1198,10 @@ async def run_aimd(
             shape_config=config,
             max_p95_ttft_seconds=ttft_limit,
             max_p95_total_seconds=total_limit,
+            acceptance_policy=acceptance_policy,
         )
         results.append(summary)
-        if summary.launch_guard_triggered:
+        if summary.launch_guard_triggered or _controller_route_fatal(summary):
             break
         if not summary.controller_eligible:
             # A pre-crash partial epoch is preserved as censored evidence but is neither healthy
@@ -1106,12 +1237,23 @@ async def run_aimd(
                 else:
                     unhealthy_upper_bound_rps = None
                     nonmonotonic_overload_observed = True
-                rate = max(0.01, rate * decrease)
+                rate = max(minimum_rps, rate * decrease)
                 unhealthy_streak = 0
 
-    ramp_guard = next((epoch for epoch in results if epoch.launch_guard_triggered), None)
+    ramp_guard = next(
+        (
+            epoch
+            for epoch in results
+            if epoch.launch_guard_triggered or _controller_route_fatal(epoch)
+        ),
+        None,
+    )
     if ramp_guard is not None:
-        reason = ramp_guard.launch_guard_reason or "launch_guard"
+        reason = (
+            ramp_guard.launch_guard_reason
+            or ramp_guard.scientific_censor_reason
+            or "launch_guard"
+        )
         downstream = [
             aimd_confirmation_epoch_id(route.id, shape, stage, confirmation)
             for stage in range(confirmation_max_stages)
@@ -1190,10 +1332,11 @@ async def run_aimd(
                 shape_config=config,
                 max_p95_ttft_seconds=ttft_limit,
                 max_p95_total_seconds=total_limit,
+                acceptance_policy=acceptance_policy,
             )
             results.append(summary)
             stage_confirmations.append(summary)
-            if summary.launch_guard_triggered:
+            if summary.launch_guard_triggered or _controller_route_fatal(summary):
                 guarded = summary
                 break
             if confirmation < 2:
@@ -1222,9 +1365,10 @@ async def run_aimd(
                     deterministic_scheduled_count=separator_samples,
                     max_p95_ttft_seconds=ttft_limit,
                     max_p95_total_seconds=total_limit,
+                    acceptance_policy=acceptance_policy,
                 )
                 results.append(separator)
-                if separator.launch_guard_triggered:
+                if separator.launch_guard_triggered or _controller_route_fatal(separator):
                     guarded = separator
                     break
         eligible = [
@@ -1304,10 +1448,11 @@ async def run_aimd(
             shape_config=config,
             max_p95_ttft_seconds=ttft_limit,
             max_p95_total_seconds=total_limit,
+            acceptance_policy=acceptance_policy,
         )
         results.append(recovery)
         recovery_epochs.append(recovery)
-        if recovery.launch_guard_triggered:
+        if recovery.launch_guard_triggered or _controller_route_fatal(recovery):
             guarded = recovery
     else:
         with suppress(KeyError):
@@ -1364,7 +1509,13 @@ async def run_aimd(
             "capacity_bound_state": capacity_bound_state,
             "controller_completion_state": controller_completion_state,
             "censor_reason": (
-                guarded.launch_guard_reason or "launch_guard" if guarded is not None else None
+                (
+                    guarded.launch_guard_reason
+                    or guarded.scientific_censor_reason
+                    or "launch_guard"
+                )
+                if guarded is not None
+                else None
             ),
             "confirmations_required": 3,
             "confirmation_stage": selected_confirmation_stage,
@@ -1423,6 +1574,7 @@ async def run_soak(
     not_after_monotonic: float | None = None,
 ) -> LoadRunResult:
     validate_soak_config(config, engine.config.concurrency)
+    acceptance_policy = AcceptancePolicy.from_suite(config)
     rate = soak_rate_rps(config, route.id, shape)
     if rate <= 0:
         raise ValueError(f"soak rate must be positive for {route.id}/{shape}")
@@ -1520,14 +1672,14 @@ async def run_soak(
                 "controller_completion_state": (
                     "completed_no_healthy_at_lowest_tested_rate"
                     if all_measured_unhealthy
-                    else "baseline_attempts_inconclusive"
+                    else "campaign_guard_censored"
                 ),
                 "censor_reason": None if all_measured_unhealthy else reason,
             },
         )
         return results
-    ttft_limit = None if baseline.p95_ttft_seconds is None else 2 * baseline.p95_ttft_seconds
-    total_limit = None if baseline.p95_total_seconds is None else 2 * baseline.p95_total_seconds
+    ttft_limit = acceptance_policy.baseline_latency_limit(baseline.p95_ttft_seconds)
+    total_limit = acceptance_policy.baseline_latency_limit(baseline.p95_total_seconds)
     rate_decrease = float(config.get("rate_multiplicative_decrease", 0.5))
     minimum_rps = float(config.get("minimum_rps", 0.01))
     candidate_rate = max(minimum_rps, rate)
@@ -1562,10 +1714,11 @@ async def run_soak(
                 shape_config=config,
                 max_p95_ttft_seconds=ttft_limit,
                 max_p95_total_seconds=total_limit,
+                acceptance_policy=acceptance_policy,
             )
             results.append(summary)
             stage_blocks.append(summary)
-            if summary.launch_guard_triggered:
+            if summary.launch_guard_triggered or _controller_route_fatal(summary):
                 guarded = summary
                 break
         eligible = [
@@ -1655,7 +1808,13 @@ async def run_soak(
             "all_blocks_healthy": all_blocks_healthy,
             "controller_completion_state": controller_completion_state,
             "censor_reason": (
-                guarded.launch_guard_reason or "launch_guard" if guarded is not None else None
+                (
+                    guarded.launch_guard_reason
+                    or guarded.scientific_censor_reason
+                    or "launch_guard"
+                )
+                if guarded is not None
+                else None
             ),
         },
     )

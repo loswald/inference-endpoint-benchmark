@@ -9,8 +9,21 @@ from typing import Any
 from .models import RequestSpec, RouteConfig, canonical_json
 from .workloads import materialize_messages
 
-PAYLOAD_GENERATOR_VERSION = "openai-compatible-synthetic/v3"
-RESPONSES_PAYLOAD_GENERATOR_VERSION = "openai-responses-synthetic/v1"
+PAYLOAD_GENERATOR_VERSION = "openai-compatible-synthetic/v4"
+RESPONSES_PAYLOAD_GENERATOR_VERSION = "openai-responses-synthetic/v2"
+_PAYLOAD_BINDING_PREFIX = b"materialized-payload/v2\0"
+
+
+def payload_binding_sha256(body: bytes, generator_version: str) -> str:
+    """Bind an adapter's exact wire bytes to its declared materializer version."""
+
+    if not isinstance(body, bytes):
+        raise TypeError("materialized request body must be bytes")
+    if not isinstance(generator_version, str) or not generator_version:
+        raise ValueError("payload generator version must be a nonempty string")
+    return hashlib.sha256(
+        _PAYLOAD_BINDING_PREFIX + generator_version.encode("utf-8") + b"\0" + body
+    ).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +34,22 @@ class MaterializedPayload:
     bound_payload_sha256: str
     input_token_upper_bound: int
     generator_version: str = PAYLOAD_GENERATOR_VERSION
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.value, dict):
+            raise TypeError("materialized payload value must be a mapping")
+        if not isinstance(self.body, bytes):
+            raise TypeError("materialized request body must be bytes")
+        if hashlib.sha256(self.body).hexdigest() != self.wire_body_sha256:
+            raise ValueError("wire_body_sha256 does not match the exact prepared bytes")
+        if payload_binding_sha256(self.body, self.generator_version) != self.bound_payload_sha256:
+            raise ValueError("bound_payload_sha256 does not match the prepared bytes and version")
+        if (
+            isinstance(self.input_token_upper_bound, bool)
+            or not isinstance(self.input_token_upper_bound, int)
+            or self.input_token_upper_bound <= 0
+        ):
+            raise ValueError("materialized input-token upper bound must be a positive integer")
 
 
 def build_openai_compatible_payload(route: RouteConfig, request: RequestSpec) -> dict[str, Any]:
@@ -54,6 +83,9 @@ def build_openai_compatible_payload(route: RouteConfig, request: RequestSpec) ->
         payload["stop"] = list(request.stop)
     if request.tools:
         payload["tools"] = list(request.tools)
+    # Chat controls are emitted only from this route's exact named mapping. The explicit
+    # provider_default state resolves to an empty mapping and therefore stays off the wire.
+    payload.update(route.reasoning_control(request.reasoning_budget))
     if request.stream:
         if route.stream_usage_mode in {"required", "try"}:
             payload["stream_options"] = {"include_usage": True}
@@ -77,9 +109,7 @@ def materialize_openai_compatible(route: RouteConfig, request: RequestSpec) -> M
     # second serializer changing whitespace, escaping, or key order after the claim is written.
     body = canonical_json(value).encode("utf-8")
     wire_hash = hashlib.sha256(body).hexdigest()
-    bound_hash = hashlib.sha256(
-        b"materialized-payload/v2\0" + PAYLOAD_GENERATOR_VERSION.encode("utf-8") + b"\0" + body
-    ).hexdigest()
+    bound_hash = payload_binding_sha256(body, PAYLOAD_GENERATOR_VERSION)
     # For text JSON transports, UTF-8 bytes are a tokenizer-independent conservative upper bound
     # on subword pieces. The explicit route overhead covers provider framing/tool/image accounting
     # that is not present in the user text. The campaign factor is applied separately at claim.
@@ -186,6 +216,11 @@ def build_responses_payload(route: RouteConfig, request: RequestSpec) -> dict[st
                 **response_format["json_schema"],
             }
         payload["text"] = {"format": response_format}
+    controls = route.reasoning_control(request.reasoning_budget)
+    if effort := controls.get("reasoning.effort"):
+        payload["reasoning"] = {"effort": effort}
+    if verbosity := controls.get("text.verbosity"):
+        payload.setdefault("text", {})["verbosity"] = verbosity
     return payload
 
 
@@ -193,12 +228,7 @@ def materialize_responses(route: RouteConfig, request: RequestSpec) -> Materiali
     value = build_responses_payload(route, request)
     body = canonical_json(value).encode("utf-8")
     wire_hash = hashlib.sha256(body).hexdigest()
-    bound_hash = hashlib.sha256(
-        b"materialized-payload/v2\0"
-        + RESPONSES_PAYLOAD_GENERATOR_VERSION.encode("utf-8")
-        + b"\0"
-        + body
-    ).hexdigest()
+    bound_hash = payload_binding_sha256(body, RESPONSES_PAYLOAD_GENERATOR_VERSION)
     upper = len(body) + route.input_token_reservation_overhead
     if json.loads(body) != value:
         raise ValueError("materialized Responses payload failed canonical JSON round trip")
@@ -215,7 +245,11 @@ def materialize_responses(route: RouteConfig, request: RequestSpec) -> Materiali
 def reserved_input_tokens(
     route: RouteConfig, request: RequestSpec, reservation_factor: float
 ) -> int:
-    materialized = materialize_openai_compatible(route, request)
+    materialized = (
+        materialize_responses(route, request)
+        if route.api_family == "responses"
+        else materialize_openai_compatible(route, request)
+    )
     return math.ceil(
         max(request.planned_input_tokens, materialized.input_token_upper_bound) * reservation_factor
     )

@@ -1,0 +1,105 @@
+schema: provider-evidence-bundle/v1
+provider: amazon-bedrock
+retrieved_at_utc: 2026-08-29T23:00:00Z
+source_role: provider_primary_documentation_plus_sanitized_live_canary
+rights_posture: public_provider_documentation_for_internal_r_and_d
+runnable_in_library: true
+provider_profile_path: examples/provider-profiles/amazon-bedrock-mantle-us-east-1.yaml
+
+route_contract:
+  exact_model_id: zai.glm-4.7-flash
+  exact_region: us-east-1
+  endpoint_family: bedrock-mantle
+  api_family: chat_completions
+  exact_url: https://bedrock-mantle.us-east-1.api.aws/v1/chat/completions
+  authentication: amazon_bedrock_api_key_as_authorization_bearer
+  billing_channel: standard_on_demand
+  service_tier_request_field: omitted_or_default
+  cross_region_routing: false
+
+documented_model:
+  lifecycle: active
+  launch_date: 2026-01-19
+  input_modalities: [text]
+  output_modalities: [text]
+  context_window_as_published: 203K_tokens
+  max_output_as_published: 4K_tokens
+  # AWS publishes rounded K labels rather than finer-grained raw integers. These are safe decimal
+  # request guards, not a claim that AWS disclosed a more precise binary-token limit.
+  conservative_profile_context_tokens: 203000
+  conservative_profile_max_output_tokens: 4000
+
+documented_capabilities_for_exact_mantle_chat_route:
+  chat_completions: true
+  streaming: true
+  client_side_tool_calling: true
+  image_input: false
+  audio_input: false
+  video_input: false
+  embeddings: false
+  responses_api_for_exact_model: false
+  server_side_tool_calling: false
+  structured_output_on_mantle_chat: not_documented
+  prompt_caching_on_exact_model_and_api: not_documented
+  batch_for_model: documented_through_separate_bedrock_batch_api_not_this_chat_route
+
+pricing:
+  currency: USD
+  region: us-east-1
+  service_tier: standard
+  unit: one_million_tokens
+  input: 0.07
+  output: 0.40
+  cached_input: not_published_for_exact_model
+  priority_multiplier: 1.75
+  flex_and_batch_multiplier: 0.50
+
+quota_contract:
+  scope: aws_account_plus_model_plus_region_plus_bedrock_mantle_endpoint
+  shared_across_apis_for_same_model_on_mantle: true
+  requests_per_minute_quota: not_enforced
+  published_numeric_input_tpm_for_exact_model: null
+  published_numeric_output_tpm_for_exact_model: null
+  exact_model_state: internal_service_capacity_without_exposed_per_account_tpm
+  admission_reservation: input_tokens_plus_requested_max_tokens
+  unused_output_reservation_replenished_after_response: true
+  additional_internal_throttling_possible: true
+
+live_proof:
+  exact_route_proven: true
+  observed_at_utc: 2026-08-22T23:25:51.5394475Z
+  status: success
+  receipt_path: receipts/amazon-bedrock-glm47-flash-us-east-1-canary-20260822.json
+  receipt_sha256: 19622f767aab83f3019f10f461e2f6375268f558c003bb66a33ef770f0ed69ee
+  source_canary_sha256: ec1936ca9483edcdb809e854d28cf619a19fd6a3251d2e1112d35fddf7dddafe
+  evidence_scope: reachability_only
+
+explicit_nonclaims:
+  - no other Amazon Bedrock model, API family, or region is admitted by this bundle
+  - no throughput, latency distribution, quality, or production-sustainability claim
+  - no numeric quota is inferred for GLM 4.7 Flash where AWS publishes none
+  - the separate Bedrock batch API is not implemented by this chat adapter
+
+sources:
+  - https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-zai-glm-4-7-flash.html
+  - https://docs.aws.amazon.com/bedrock/latest/userguide/inference-chat-completions-mantle.html
+  - https://docs.aws.amazon.com/bedrock/latest/userguide/models-api-compatibility.html
+  - https://docs.aws.amazon.com/bedrock/latest/userguide/quotas-mantle.html
+  - https://docs.aws.amazon.com/bedrock/latest/userguide/scaling-throughput-best-practices.html
+  - https://docs.aws.amazon.com/bedrock/latest/userguide/batch-inference-supported.html
+  - https://aws.amazon.com/bedrock/pricing/
+
+source_bindings:
+  model_identity_limits_modalities_capabilities_and_region:
+    - https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-zai-glm-4-7-flash.html
+  endpoint_authentication_and_streaming:
+    - https://docs.aws.amazon.com/bedrock/latest/userguide/inference-chat-completions-mantle.html
+  api_compatibility:
+    - https://docs.aws.amazon.com/bedrock/latest/userguide/models-api-compatibility.html
+  quota_scope_and_unknown_numeric_limits:
+    - https://docs.aws.amazon.com/bedrock/latest/userguide/quotas-mantle.html
+    - https://docs.aws.amazon.com/bedrock/latest/userguide/scaling-throughput-best-practices.html
+  batch_is_a_separate_api:
+    - https://docs.aws.amazon.com/bedrock/latest/userguide/batch-inference-supported.html
+  regional_standard_price:
+    - https://aws.amazon.com/bedrock/pricing/

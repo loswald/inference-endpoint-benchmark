@@ -1,0 +1,26 @@
+schema: benchmark-experiment/v1
+
+campaign:
+  name: six-hour-within-run-variation-example
+  seed: 20260829
+  max_wall_seconds: 22500
+  max_cost_usd: 100
+  launch_reserve_seconds: 300
+  launch_reserve_usd: 5
+  concurrency: 16
+  retries: 0
+  input_token_reservation_factor: 1.5
+  client_location: replace-with-exact-client-region
+
+# This experiment selects every route in the provider profile. It must run by itself so capacity
+# or capability traffic cannot contaminate the matched low-load panels.
+suites:
+  time_variation:
+    enabled: true
+    panels: 7
+    interval_minutes: 60
+    samples_per_route_shape: 4
+    stable_exact_prompt_repeats: 2
+    panel_unique_cache_cold_repeats: 2
+    shapes: [short_short, long_short, short_long, mixed]
+    offered_rps: 1

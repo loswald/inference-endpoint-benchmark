@@ -1,0 +1,22 @@
+{
+  "schema": "public-provider-inference-receipt/v1",
+  "provider": "alibaba_model_studio",
+  "region": "ap-southeast-1",
+  "api_family": "openai_chat_completions",
+  "model": "qwen3.8-flash",
+  "endpoint_host_redacted": true,
+  "started_at_utc": "2026-08-29T21:56:47.6082769Z",
+  "ended_at_utc": "2026-08-29T21:56:50.1769847Z",
+  "total_seconds": 2.567228,
+  "status": "success",
+  "http_status": 200,
+  "finish_reason": "stop",
+  "prompt_tokens": 70,
+  "completion_tokens": 30,
+  "total_tokens": 100,
+  "cached_tokens": 0,
+  "payload_sha256": "deb1312f173e023b2183c14ae8d569426bd94c4eb2cc53b0af8d48a5cc596bb2",
+  "output_sha256": "2689367b205c16ce32ed4200942b8b8b1e262dfc70d9bc9fbc77c49699a4f1df",
+  "provider_request_id_sha256": "4d3b1e2ac4856e63862d1b5b2e0dece41ea7a99b3a0e4d982f67230085800069",
+  "private_source_receipt_file_sha256": "34da262efcc59d8a9fea99684eeaacf8c2e12cd5a6074ea96f1b15ed4c07cf12"
+}

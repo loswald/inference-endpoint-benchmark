@@ -1,0 +1,33 @@
+schema: embedding-source-bundle/v1
+retrieved_at_utc: "2026-08-30T00:00:00Z"
+source_role: provider_documentation
+rights_posture: public_provider_documentation_used_for_internal_R_and_D_contracts
+sources:
+  - provider: azure-ai-foundry
+    model: text-embedding-3-large
+    documentation_url: https://learn.microsoft.com/en-us/rest/api/microsoft-foundry/azureopenai/embeddings
+    model_url: https://learn.microsoft.com/en-us/azure/ai-foundry/foundry-models/concepts/models-sold-directly-by-azure
+    pricing_url: https://azure.microsoft.com/en-us/pricing/details/azure-openai/
+    facts:
+      api_family: embeddings
+      max_input_tokens_per_item: 8192
+      max_batch_inputs: 2048
+      max_total_tokens_per_request: 300000
+      default_dimensions: 3072
+      dimensions_parameter_supported: true
+      empty_input: documented_invalid
+  - provider: alibaba-model-studio
+    model: text-embedding-v4
+    documentation_url: https://www.alibabacloud.com/help/en/model-studio/embedding-interfaces-compatible-with-openai
+    pricing_url: https://www.alibabacloud.com/help/en/model-studio/model-pricing
+    quota_url: https://www.alibabacloud.com/help/en/model-studio/rate-limit
+    facts:
+      deployment_scope: international_singapore
+      api_family: embeddings
+      max_input_tokens_per_item: 8192
+      max_batch_inputs: 10
+      default_dimensions: 1024
+      supported_dimensions: [64, 128, 256, 512, 768, 1024, 1536, 2048]
+      input_usd_per_million: 0.07
+      rpm: 1800
+      tpm: 1000000

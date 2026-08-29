@@ -9,9 +9,9 @@ import httpx
 from ..json_contract import StrictJSONError, strict_json_loads
 from ..models import InferenceResult, RequestSpec, RouteConfig, normalize_finish_reason
 from ..payload import materialize_responses
+from .base import PreparedRequest
 from .openai_compatible import (
     OpenAICompatibleAdapter,
-    PreparedTransport,
     _parse_usage,
     _retained,
     _utc_now,
@@ -60,12 +60,39 @@ def _finish(data: dict[str, Any]) -> str | None:
     return None
 
 
+_KNOWN_RESPONSE_STATUSES = frozenset(
+    {"completed", "failed", "in_progress", "cancelled", "queued", "incomplete"}
+)
+_TERMINAL_SUCCESS_RESPONSE_STATUSES = frozenset({"completed", "incomplete"})
+
+
+def _response_status_error(data: dict[str, Any]) -> str | None:
+    status = data.get("status")
+    if not isinstance(status, str):
+        return "missing_or_invalid_response_status"
+    if status in _TERMINAL_SUCCESS_RESPONSE_STATUSES:
+        return None
+    if status not in _KNOWN_RESPONSE_STATUSES:
+        return "unknown_response_status"
+    if status == "failed":
+        return "provider_reported_failed_response"
+    return "nonterminal_response_status"
+
+
+def _required_usage_error(route: RouteConfig, usage: Any) -> str | None:
+    if route.stream_usage_mode != "required":
+        return None
+    if usage.input_tokens is None or usage.output_tokens is None or usage.errors:
+        return "required_response_usage_missing_or_invalid"
+    return None
+
+
 class ResponsesAdapter(OpenAICompatibleAdapter):
     """OpenAI Responses API transport with token-level SSE timing."""
 
-    def prepare(self, route: RouteConfig, request: RequestSpec) -> PreparedTransport:
+    def prepare(self, route: RouteConfig, request: RequestSpec) -> PreparedRequest:
         self.preflight(route)
-        return PreparedTransport(
+        return PreparedRequest(
             payload=materialize_responses(route, request), headers=self.headers(route)
         )
 
@@ -74,7 +101,7 @@ class ResponsesAdapter(OpenAICompatibleAdapter):
         client: httpx.AsyncClient,
         route: RouteConfig,
         request: RequestSpec,
-        prepared: PreparedTransport,
+        prepared: PreparedRequest,
         started_utc: str,
         started: float,
     ) -> InferenceResult:
@@ -109,7 +136,33 @@ class ResponsesAdapter(OpenAICompatibleAdapter):
                     ended,
                     "invalid_responses_success_body",
                 )
+            status_error = _response_status_error(data)
+            if status_error is not None:
+                return self._protocol_error(
+                    route,
+                    request,
+                    response,
+                    raw,
+                    started_utc,
+                    started,
+                    headers_at,
+                    ended,
+                    status_error,
+                )
             usage = _parse_usage(data.get("usage"))
+            usage_error = _required_usage_error(route, usage)
+            if usage_error is not None:
+                return self._protocol_error(
+                    route,
+                    request,
+                    response,
+                    raw,
+                    started_utc,
+                    started,
+                    headers_at,
+                    ended,
+                    usage_error,
+                )
             retained = _retained(response.headers, route)
             return InferenceResult(
                 logical_id=request.logical_id,
@@ -137,7 +190,7 @@ class ResponsesAdapter(OpenAICompatibleAdapter):
         client: httpx.AsyncClient,
         route: RouteConfig,
         request: RequestSpec,
-        prepared: PreparedTransport,
+        prepared: PreparedRequest,
         started_utc: str,
         started: float,
     ) -> InferenceResult:
@@ -149,6 +202,8 @@ class ResponsesAdapter(OpenAICompatibleAdapter):
         headers_at: float | None = None
         wire_digest = hashlib.sha256()
         protocol_errors: list[str] = []
+        expected_sequence_number = 0
+        terminal_event_type: str | None = None
         async with client.stream(
             "POST",
             route.base_url,
@@ -179,7 +234,19 @@ class ResponsesAdapter(OpenAICompatibleAdapter):
                 if not isinstance(event, dict) or not isinstance(event.get("type"), str):
                     protocol_errors.append("invalid_responses_event")
                     continue
+                sequence_number = event.get("sequence_number")
+                if (
+                    isinstance(sequence_number, bool)
+                    or not isinstance(sequence_number, int)
+                    or sequence_number != expected_sequence_number
+                ):
+                    protocol_errors.append("invalid_or_noncontiguous_sequence_number")
+                else:
+                    expected_sequence_number += 1
                 event_type = event["type"]
+                if terminal_event_type is not None:
+                    protocol_errors.append("responses_event_after_terminal_event")
+                    continue
                 event_response_id = event.get("response_id")
                 if isinstance(event_response_id, str):
                     response_id = response_id or event_response_id
@@ -193,6 +260,7 @@ class ResponsesAdapter(OpenAICompatibleAdapter):
                     event_offsets.append(now - started)
                     pieces.append(delta)
                 elif event_type in {"response.completed", "response.incomplete"}:
+                    terminal_event_type = event_type
                     value = event.get("response")
                     if not isinstance(value, dict):
                         protocol_errors.append("terminal_event_missing_response")
@@ -208,12 +276,27 @@ class ResponsesAdapter(OpenAICompatibleAdapter):
         tools: tuple[dict[str, Any], ...] = ()
         final_text = "".join(pieces)
         if final_response is not None:
+            status_error = _response_status_error(final_response)
+            if status_error is not None:
+                protocol_errors.append(status_error)
+            expected_terminal_type = (
+                f"response.{final_response.get('status')}"
+                if final_response.get("status") in _TERMINAL_SUCCESS_RESPONSE_STATUSES
+                else None
+            )
+            if expected_terminal_type is not None and terminal_event_type != expected_terminal_type:
+                protocol_errors.append("terminal_event_response_status_mismatch")
             try:
                 reconstructed_text, tools = _response_content(final_response)
                 if reconstructed_text and reconstructed_text != final_text:
                     final_text = reconstructed_text
             except ValueError:
                 protocol_errors.append("invalid_terminal_response_output")
+        usage = _parse_usage(final_response.get("usage")) if final_response is not None else None
+        if usage is not None:
+            usage_error = _required_usage_error(route, usage)
+            if usage_error is not None:
+                protocol_errors.append(usage_error)
         if protocol_errors:
             return InferenceResult(
                 logical_id=request.logical_id,
@@ -231,7 +314,7 @@ class ResponsesAdapter(OpenAICompatibleAdapter):
                 error_body_sha256=wire_digest.hexdigest(),
             )
         assert final_response is not None
-        usage = _parse_usage(final_response.get("usage"))
+        assert usage is not None
         ttft = None if first_visible_at is None else first_visible_at - started
         return InferenceResult(
             logical_id=request.logical_id,

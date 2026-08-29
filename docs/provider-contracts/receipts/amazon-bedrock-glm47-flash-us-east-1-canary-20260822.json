@@ -1,0 +1,21 @@
+{
+  "schema": "public-provider-inference-receipt/v1",
+  "provider": "amazon-bedrock",
+  "region": "us-east-1",
+  "endpoint_family": "bedrock-mantle",
+  "api_family": "chat_completions",
+  "model": "zai.glm-4.7-flash",
+  "observed_at_utc": "2026-08-22T23:25:51.5394475Z",
+  "status": "success",
+  "finish_reason": "stop",
+  "prompt_tokens": 10,
+  "completion_tokens": 2,
+  "total_tokens": 12,
+  "evidence_class": "executable_verified",
+  "source_canary_sha256": "ec1936ca9483edcdb809e854d28cf619a19fd6a3251d2e1112d35fddf7dddafe",
+  "credential_included": false,
+  "prompt_or_output_included": false,
+  "response_body_included": false,
+  "raw_headers_included": false,
+  "claim_scope": "Reachability for this exact model, API family, and region only; not throughput, quality, quota, or another route."
+}

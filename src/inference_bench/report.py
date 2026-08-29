@@ -6,13 +6,17 @@ import math
 import platform
 import re
 import shutil
-import subprocess
 from collections import Counter, defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .environment import locked_distribution_versions, validate_run_directory_separation
+from .environment import (
+    find_source_root,
+    locked_distribution_versions,
+    resolve_build_identity,
+    validate_run_directory_separation,
+)
 from .json_contract import StrictJSONError, strict_json_loads
 from .ledger import LEDGER_PRODUCER_SCHEMA_VERSION, Ledger
 from .load import soak_rate_rps
@@ -890,6 +894,7 @@ _CONTROLLER_CENSOR_REASONS = frozenset(
         "interrupted_epoch_unknown_provider_outcomes_no_replay",
         "interrupted_epoch_incomplete_no_replay",
         "no_healthy_capacity_candidate_observed",
+        "route_fatal_provider_or_configuration_error",
         "plan_completed",
         "other_controller_censor_reason",
     }
@@ -1718,81 +1723,27 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _report_source_snapshot(run_dir: Path) -> dict[str, Any]:
-    """Bind the report generator's source tree without exposing local path names."""
+def _report_source_snapshot(
+    run_dir: Path,
+    *,
+    source_root: Path | None = None,
+) -> dict[str, Any]:
+    """Bind the report generator build without exposing local path names."""
 
-    root: Path | None = None
-    module_path = Path(__file__).resolve()
-    for candidate in module_path.parents:
-        if not (candidate / "pyproject.toml").is_file():
-            continue
-        try:
-            resolved = Path(
-                subprocess.run(
-                    ["git", "rev-parse", "--show-toplevel"],
-                    cwd=candidate,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="surrogateescape",
-                ).stdout.strip()
-            ).resolve()
-        except (OSError, subprocess.CalledProcessError):
-            continue
-        if resolved == candidate.resolve():
-            root = resolved
-            break
-    if root is None:
-        raise ValueError("report generation requires an accessible git source identity")
-
-    def git(*arguments: str) -> str | None:
-        try:
-            return subprocess.run(
-                ["git", *arguments],
-                cwd=root,
-                check=True,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="surrogateescape",
-            ).stdout.strip()
-        except (OSError, subprocess.CalledProcessError):
-            return None
-
-    tracked = git("ls-files")
-    if tracked is None:
-        raise ValueError("report generation requires a complete tracked-source inventory")
-    validate_run_directory_separation(root, run_dir, tracked.splitlines())
-    pathspec = ["--", "."]
+    root = (source_root or find_source_root(Path(__file__))).resolve()
     try:
-        run_relative = run_dir.resolve().relative_to(root).as_posix()
-    except ValueError:
-        run_relative = None
-    if run_relative and run_relative != ".":
-        pathspec.append(f":(exclude){run_relative}/**")
-    commit = git("rev-parse", "HEAD")
-    status = git("status", "--porcelain=v1", "--untracked-files=all", *pathspec)
-    diff = git("diff", "--binary", "HEAD", *pathspec)
-    untracked = git("ls-files", "--others", "--exclude-standard", *pathspec)
-    if None in {commit, status, diff, untracked}:
-        raise ValueError("report generation could not bind the source tree state")
-    if status:
-        raise ValueError("report generation requires clean committed source")
-    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", commit):
-        raise ValueError("report generator source revision is invalid")
-    # Reuse the source-state verification hash contract captured at inference time. Dirty source
-    # was already refused, so this binds the observed clean state without replacing the commit.
-    from .cli import _dirty_tree_hash
-
-    dirty_hash = _dirty_tree_hash(root, status, diff, untracked)
-    if dirty_hash is None or not re.fullmatch(r"[0-9a-f]{64}", dirty_hash):
-        raise ValueError("report generator source tree hash is unavailable")
+        identity = resolve_build_identity(root, output_dir=run_dir)
+    except RuntimeError as exc:
+        raise ValueError(f"report generation cannot bind its build identity: {exc}") from exc
+    validate_run_directory_separation(
+        identity.source_root, run_dir, list(identity.tracked_files)
+    )
     return {
-        "source_revision": commit,
-        "source_tree_state": "dirty" if status else "clean",
-        "source_dirty_tree_sha256": dirty_hash,
-        "distributions": locked_distribution_versions(root / "requirements.lock"),
+        "source_revision": identity.revision,
+        "source_identity_kind": identity.kind,
+        "source_tree_state": identity.tree_state,
+        "source_dirty_tree_sha256": identity.tree_sha256,
+        "distributions": locked_distribution_versions(identity.dependency_lock),
     }
 
 

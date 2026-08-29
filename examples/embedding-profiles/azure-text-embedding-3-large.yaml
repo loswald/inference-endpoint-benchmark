@@ -1,0 +1,47 @@
+schema: embedding-benchmark/v1
+campaign:
+  name: azure-text-embedding-3-large-contract-suite
+  max_cost_usd: 10
+  concurrency: 8
+  retries: 1
+route:
+  id: azure-text-embedding-3-large
+  provider: azure-ai-foundry
+  adapter: openai_compatible_embeddings
+  model: text-embedding-3-large
+  # Replace the resource label only. No credential or tenant identity belongs in this file.
+  base_url: https://replace-with-resource.openai.azure.com/openai/v1/embeddings
+  auth:
+    env: AZURE_AI_FOUNDRY_API_KEY
+    header: api-key
+    prefix: ""
+  region: exact_deployment_region_required_before_live_run
+  api_family: embeddings
+  billing_channel: startup_credits_pay_as_you_go
+  api_version: openai-v1
+  model_version: text-embedding-3-large
+  quota_scope: exact_deployment_quota_required_before_capacity_run
+  capabilities:
+    max_input_tokens_per_item: 8192
+    max_batch_inputs: 2048
+    max_total_tokens_per_request: 300000
+    default_dimensions: 3072
+    # Registered boundary probes. The v1 API documents an integer dimensions parameter with
+    # minimum 1; this list is not a claim that intermediate values are unsupported.
+    supported_dimensions: [1, 3072]
+    empty_input: documented_invalid
+    unicode_input: unknown
+    repeatability_cosine_minimum: 0.999999
+    long_input_fraction: 0.90
+  # Rough PAYG estimate used only for the pre-send guard; reconcile against the exact deployment.
+  input_usd_per_million: 0.13
+  request_timeout_seconds: 180
+  input_token_reservation_overhead: 128
+  http2: true
+  connection_reuse: true
+  transport_max_connections: 64
+  documentation_source_url: https://learn.microsoft.com/en-us/rest/api/microsoft-foundry/azureopenai/embeddings
+  pricing_source_url: https://azure.microsoft.com/en-us/pricing/details/azure-openai/
+  evidence_retrieved_at_utc: "2026-08-30T00:00:00Z"
+  evidence_bundle_sha256: 31f4dbe05725631f392bdd32345af45bbc22b902c346576d260a1673d396de15
+

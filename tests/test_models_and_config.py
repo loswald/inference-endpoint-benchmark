@@ -4,6 +4,7 @@ from dataclasses import replace
 
 import pytest
 
+from inference_bench.config import CampaignConfig
 from inference_bench.models import AuthConfig, RouteConfig
 
 
@@ -39,6 +40,29 @@ def test_route_identity_changes_with_api_version(route: RouteConfig) -> None:
         output_usd_per_million=2,
     )
     assert changed.identity_hash != route.identity_hash
+
+
+def test_route_identity_binds_billing_channel(route: RouteConfig) -> None:
+    assert replace(route, billing_channel="pay_as_you_go").identity_hash != route.identity_hash
+
+
+def test_public_config_redacts_alibaba_workspace_hostname(campaign: CampaignConfig) -> None:
+    private_host = "private-workspace-id.ap-southeast-1.maas.aliyuncs.com"
+    alibaba = replace(
+        campaign.routes[0],
+        provider="alibaba-model-studio",
+        adapter="alibaba_model_studio",
+        base_url=f"https://{private_host}/compatible-mode/v1/chat/completions",
+        region="ap-southeast-1",
+        billing_channel="pay_as_you_go",
+    )
+    public = replace(campaign, routes=(alibaba,)).public_dict()["routes"][0]
+
+    assert private_host not in public["base_url"]
+    assert public["base_url"].startswith(
+        "https://workspace-redacted.ap-southeast-1.maas.aliyuncs.com/"
+    )
+    assert "base_url_workspace_identifier" in public["omitted_operational_fields"]
 
 
 def test_route_identity_binds_safe_request_defaults(route: RouteConfig) -> None:
@@ -98,6 +122,10 @@ def test_retained_headers_are_restricted_to_fixed_safe_names(route: RouteConfig)
         "tools",
         "response_format",
         "parallel_tool_calls",
+        "reasoning",
+        "reasoning_effort",
+        "text",
+        "verbosity",
     ],
 )
 def test_request_defaults_cannot_override_identity_or_cost_fields(
@@ -159,6 +187,23 @@ def test_credentials_cannot_be_extra_headers(route: RouteConfig) -> None:
             input_usd_per_million=1,
             output_usd_per_million=1,
         )
+
+
+def test_route_reasoning_control_identity_and_exact_api_family_fields(route: RouteConfig) -> None:
+    controlled = replace(
+        route,
+        reasoning_controls={"fast": {"reasoning_effort": "minimal", "verbosity": "low"}},
+    )
+    assert controlled.identity_hash != route.identity_hash
+    assert controlled.reasoning_control("fast") == {
+        "reasoning_effort": "minimal",
+        "verbosity": "low",
+    }
+    assert controlled.reasoning_control("provider_default") == {}
+    with pytest.raises(ValueError, match="does not declare reasoning budget"):
+        route.reasoning_control("fast")
+    with pytest.raises(ValueError, match="unsupported chat_completions wire fields"):
+        replace(route, reasoning_controls={"bad": {"reasoning.effort": "low"}})
 
 
 def test_extra_headers_reject_case_insensitive_duplicates(route: RouteConfig) -> None:

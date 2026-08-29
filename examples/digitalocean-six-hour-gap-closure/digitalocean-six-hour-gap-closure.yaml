@@ -11,7 +11,7 @@ campaign:
   client_location: gcp-europe-west2
 route_defaults:
   provider: digitalocean
-  adapter: digitalocean
+  adapter: openai_compatible
   base_url: https://inference.do-ai.run/v1/chat/completions
   auth:
     env: DIGITALOCEAN_INFERENCE_API_KEY
@@ -41,7 +41,7 @@ route_defaults:
 routes:
 - id: deepseek-v4-flash-0731
   provider: digitalocean
-  adapter: digitalocean
+  adapter: openai_compatible
   model: deepseek-v4-flash-0731
   base_url: https://inference.do-ai.run/v1/chat/completions
   auth:
@@ -242,9 +242,9 @@ suites:
     concurrency: 128
     baseline_rps: 0.5
     baseline_samples: 20
-    baseline_attempts: 1
+    baseline_attempts: 5
     baseline_multiplicative_decrease: 0.5
-    confirmation_max_stages: 1
+    confirmation_max_stages: 12
     confirmation_multiplicative_decrease: 0.5
     confirmation_separator_samples: 5
     minimum_rps: 0.03125

@@ -7,7 +7,6 @@ import json
 import platform
 import random
 import sqlite3
-import subprocess
 import sys
 from contextlib import suppress
 from dataclasses import replace
@@ -15,16 +14,24 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .atlas import generate_atlas
+from .capacity_closure import build_capacity_closure_package_from_files
 from .config import CampaignConfig, load_config, selected_capacity_cells
 from .digitalocean_atlas import generate_digitalocean_atlas
 from .digitalocean_closure import build_digitalocean_closure_package
 from .engine import BenchmarkEngine, PaymentRequiredLatched, ReservationOverrunLatched
-from .environment import locked_distribution_versions, validate_run_directory_separation
+from .environment import (
+    find_source_root,
+    locked_distribution_versions,
+    resolve_build_identity,
+    source_tree_state_hash,
+    validate_run_directory_separation,
+)
 from .ledger import BudgetExceeded, Ledger, TimeLimitReached
-from .load import run_aimd, run_soak
+from .load import baseline_attempt_count, baseline_design, run_aimd, run_soak
 from .matrix import load_matrix, matrix_plan, run_matrix
 from .models import TRANSPORT_HEADER_PROFILE, RequestSpec, RouteConfig, canonical_json
 from .plan import build_plan
+from .profile_config import compile_profile_files
 from .report import generate_report
 from .soak_config import derive_soak_config
 from .workloads import plan_static_suites
@@ -381,15 +388,21 @@ def _capacity_job_seconds(config: CampaignConfig, suite_name: str) -> float:
 
     suite = config.suites[suite_name]
     minimum = float(suite.get("minimum_rps", 0.01))
-    baseline_rate = float(suite.get("baseline_rps", minimum))
     baseline_samples = int(suite.get("baseline_samples", 5))
-    baseline_attempts = int(suite.get("baseline_attempts", 3))
     baseline_decrease = float(suite.get("baseline_multiplicative_decrease", 0.5))
     timeout = max(route.request_timeout_seconds for route in config.routes)
     baseline_nominal = float(
         suite.get("block_seconds", 30)
         if suite_name == "soak"
         else suite.get("epoch_seconds", 20)
+    )
+    _, _, baseline_rate = baseline_design(
+        suite,
+        baseline_nominal,
+        default_rps=float(suite.get("rate_rps", suite.get("initial_rps", minimum))),
+    )
+    baseline_attempts = baseline_attempt_count(
+        suite, baseline_rate, field_prefix=suite_name
     )
     baseline_seconds = sum(
         max(
@@ -878,50 +891,12 @@ def _runtime_manifest(
     output_dir: Path | None = None,
 ) -> dict[str, object]:
     root = _source_root()
-
-    def git(*arguments: str) -> str | None:
-        try:
-            return subprocess.run(
-                ["git", *arguments],
-                cwd=root,
-                check=True,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="surrogateescape",
-            ).stdout.strip()
-        except (OSError, subprocess.CalledProcessError):
-            return None
-
-    pathspec = ["--", "."]
+    identity = resolve_build_identity(root, output_dir=output_dir)
     if output_dir is not None:
-        try:
-            output_relative = output_dir.resolve().relative_to(root.resolve()).as_posix()
-        except ValueError:
-            output_relative = None
-        if output_relative and output_relative != ".":
-            pathspec.append(f":(exclude){output_relative}/**")
-    status = git("status", "--porcelain=v1", "--untracked-files=all", *pathspec)
-    diff = git("diff", "--binary", "HEAD", *pathspec)
-    untracked = git("ls-files", "--others", "--exclude-standard", *pathspec)
-    lock = root / "requirements.lock"
-    source_commit = git("rev-parse", "HEAD")
-    if source_commit is None or status is None or diff is None or untracked is None:
-        raise RuntimeError(
-            "live runs require an accessible git source identity and dirty-tree state"
+        validate_run_directory_separation(
+            identity.source_root, output_dir, list(identity.tracked_files)
         )
-    if not lock.is_file():
-        raise RuntimeError("live runs require the repository requirements.lock")
-    if status:
-        raise RuntimeError("live runs require clean committed source")
-    tracked = git("ls-files")
-    if tracked is None:
-        raise RuntimeError("live runs require a complete tracked-source inventory")
-    if output_dir is not None:
-        validate_run_directory_separation(root, output_dir, tracked.splitlines())
-    dirty_tree_sha256 = _dirty_tree_hash(root, status, diff, untracked)
-    if dirty_tree_sha256 is None:
-        raise RuntimeError("live runs require a hash-bound source tree state")
+    lock = identity.dependency_lock
     normalized_invocation = _normalize_live_invocation(invocation)
     return {
         "schema_version": "run-manifest/v2",
@@ -941,6 +916,7 @@ def _runtime_manifest(
         "request_timeout_seconds_by_route": {
             route.id: route.request_timeout_seconds for route in config.routes
         },
+        "adapter_plugins": list(config.adapter_plugin_identities()),
         "provider_documentation_declarations": [
             {
                 "route_id": route.id,
@@ -953,9 +929,10 @@ def _runtime_manifest(
             for route in config.routes
         ],
         "transport_trust_env": False,
-        "source_commit": source_commit,
-        "source_dirty": bool(status),
-        "source_dirty_tree_sha256": dirty_tree_sha256,
+        "source_commit": identity.revision,
+        "source_identity_kind": identity.kind,
+        "source_dirty": False,
+        "source_dirty_tree_sha256": identity.tree_sha256,
         "dependency_lock_sha256": hashlib.sha256(lock.read_bytes()).hexdigest(),
         "dependency_lock_file": "requirements.lock",
         "execution_environment": {
@@ -1002,25 +979,7 @@ def _normalize_live_invocation(invocation: tuple[str, ...]) -> list[str]:
 
 
 def _source_root() -> Path:
-    module_path = Path(__file__).resolve()
-    for candidate in module_path.parents:
-        if not (candidate / "pyproject.toml").is_file():
-            continue
-        try:
-            root = Path(
-                subprocess.run(
-                    ["git", "rev-parse", "--show-toplevel"],
-                    cwd=candidate,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                ).stdout.strip()
-            ).resolve()
-        except (OSError, subprocess.CalledProcessError):
-            continue
-        if root == candidate.resolve():
-            return root
-    raise RuntimeError("cannot resolve the benchmark source git root")
+    return find_source_root(Path(__file__))
 
 
 def _dirty_tree_hash(
@@ -1029,36 +988,7 @@ def _dirty_tree_hash(
     diff: str | None,
     untracked: str | None,
 ) -> str | None:
-    """Bind tracked changes and untracked bytes without publishing local paths."""
-
-    if status is None or diff is None or untracked is None:
-        return None
-    untracked_digests: list[dict[str, str]] = []
-    for relative in sorted(line for line in untracked.splitlines() if line):
-        candidate = (root / relative).resolve()
-        try:
-            candidate.relative_to(root.resolve())
-            digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
-        except (OSError, ValueError):
-            digest = "unreadable"
-        untracked_digests.append(
-            {
-                "path_sha256": hashlib.sha256(
-                    relative.encode("utf-8", errors="surrogateescape")
-                ).hexdigest(),
-                "content_sha256": digest,
-            }
-        )
-    material = {
-        "status_sha256": hashlib.sha256(
-            status.encode("utf-8", errors="surrogateescape")
-        ).hexdigest(),
-        "tracked_diff_sha256": hashlib.sha256(
-            diff.encode("utf-8", errors="surrogateescape")
-        ).hexdigest(),
-        "untracked": untracked_digests,
-    }
-    return hashlib.sha256(canonical_json(material).encode("utf-8")).hexdigest()
+    return source_tree_state_hash(root, status, diff, untracked)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -1141,6 +1071,21 @@ def _parser() -> argparse.ArgumentParser:
     closure.add_argument(
         "--fixed-rate-source", default="do-direct-soak-20260823-r1"
     )
+    capacity_closure = sub.add_parser(
+        "plan-capacity-closure",
+        help="compile a provider-neutral capacity-closure plan from evidence and a profile",
+    )
+    capacity_closure.add_argument("base_config", type=Path)
+    capacity_closure.add_argument("capacity_csv", type=Path)
+    capacity_closure.add_argument("profile", type=Path)
+    capacity_closure.add_argument("--output", type=Path, required=True)
+    compile_profile = sub.add_parser(
+        "compile-profile",
+        help="compile a provider profile and experiment profile into canonical campaign YAML",
+    )
+    compile_profile.add_argument("provider_profile", type=Path)
+    compile_profile.add_argument("experiment_profile", type=Path)
+    compile_profile.add_argument("--output", type=Path, required=True)
     return parser
 
 
@@ -1235,6 +1180,34 @@ def main(argv: list[str] | None = None) -> int:
             fixed_rate_source=args.fixed_rate_source,
         )
         print(json.dumps({"config": str(config_path), "plan": str(manifest_path)}))
+        return 0
+    if args.command == "plan-capacity-closure":
+        config_path, manifest_path = build_capacity_closure_package_from_files(
+            args.base_config,
+            args.capacity_csv,
+            args.profile,
+            args.output,
+        )
+        print(json.dumps({"config": str(config_path), "plan": str(manifest_path)}))
+        return 0
+    if args.command == "compile-profile":
+        compilation = compile_profile_files(
+            args.provider_profile,
+            args.experiment_profile,
+            args.output,
+        )
+        print(
+            json.dumps(
+                {
+                    "config": str(args.output),
+                    "config_identity_sha256": compilation.config.identity_hash,
+                    "compiled_sha256": compilation.compiled_sha256,
+                    "experiment_profile_sha256": compilation.experiment_profile_sha256,
+                    "provider_profile_sha256": compilation.provider_profile_sha256,
+                },
+                sort_keys=True,
+            )
+        )
         return 0
     raise AssertionError("unreachable")
 

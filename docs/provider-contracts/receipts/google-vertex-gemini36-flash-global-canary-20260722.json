@@ -1,0 +1,20 @@
+{
+  "schema": "public-provider-inference-receipt/v1",
+  "provider": "google-vertex-ai",
+  "region": "global",
+  "endpoint_family": "aiplatform.googleapis.com",
+  "api_family": "native_generate_content_v1",
+  "model": "gemini-3.6-flash",
+  "observed_at_utc": "2026-07-22T12:53:00Z",
+  "status": "success",
+  "http_status": 200,
+  "evidence_class": "executable_verified",
+  "independent_reproduction_count": 2,
+  "source_proof_card_sha256": "6469aa9ae119650fa32958d04e91ffefc8a9297c5d51de28d75fcf9be948a965",
+  "source_spend_receipt_sha256": "219e8fb8983714e6f0e0783bc33e3494173b588b8bb345f81767ee71e6f905fb",
+  "credential_included": false,
+  "prompt_or_output_included": false,
+  "response_body_included": false,
+  "raw_headers_included": false,
+  "claim_scope": "Availability, authentication, and native generateContent request-shape reachability only; not quality, throughput, or a benchmark-library adapter proof."
+}

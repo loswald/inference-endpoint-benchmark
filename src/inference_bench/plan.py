@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .adapters import validate_adapter_route
 from .config import (
     NATIVE_PLACEHOLDER_ADAPTERS,
     CampaignConfig,
@@ -14,6 +15,7 @@ from .load import (
     aimd_confirmation_epoch_id,
     aimd_max_rps,
     aimd_separator_epoch_id,
+    baseline_attempt_count,
     baseline_design,
     next_healthy_aimd_rate,
     scheduled_offsets,
@@ -70,6 +72,10 @@ class PlanSummary:
 
 
 def build_plan(config: CampaignConfig) -> PlanSummary:
+    # Adapter discovery and API-family compatibility are credential-free structural checks. They
+    # must fail before suite planning or any live command creates an output directory.
+    for route in config.routes:
+        validate_adapter_route(route)
     static_specs = plan_static_suites(config.routes, config.suites, seed=config.seed)
     route_by_id = {route.id: route for route in config.routes}
     attempts_per_logical = config.retries + 1
@@ -161,7 +167,9 @@ def build_plan(config: CampaignConfig) -> PlanSummary:
                 baseline_samples, baseline_seconds, _baseline_rate = baseline_design(
                     aimd, seconds, default_rps=min(rate, 0.1)
                 )
-                baseline_attempts = int(aimd.get("baseline_attempts", 3))
+                baseline_attempts = baseline_attempt_count(
+                    aimd, _baseline_rate, field_prefix="aimd"
+                )
                 baseline_decrease = float(aimd.get("baseline_multiplicative_decrease", 0.5))
                 minimum_rps = float(aimd.get("minimum_rps", 0.01))
                 for attempt in range(baseline_attempts):
@@ -323,7 +331,9 @@ def build_plan(config: CampaignConfig) -> PlanSummary:
                 baseline_samples, baseline_seconds, _baseline_rate = baseline_design(
                     soak, seconds, default_rps=min(rate, 0.1)
                 )
-                baseline_attempts = int(soak.get("baseline_attempts", 3))
+                baseline_attempts = baseline_attempt_count(
+                    soak, _baseline_rate, field_prefix="soak"
+                )
                 baseline_decrease = float(soak.get("baseline_multiplicative_decrease", 0.5))
                 minimum_rps = float(soak.get("minimum_rps", 0.01))
                 for attempt in range(baseline_attempts):

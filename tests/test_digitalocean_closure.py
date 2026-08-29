@@ -72,7 +72,7 @@ def test_digitalocean_six_hour_closure_compiles_exact_registered_gaps(tmp_path: 
         "core_worst_case_usd": 174.757096752,
         "global_offered_rps": 1.0,
         "guaranteed_core": "seven matched low-load panels",
-        "load_arrival_window_seconds_sequential_upper_path": 3125.0,
+        "load_arrival_window_seconds_sequential_upper_path": 42750.0,
         "maximum_request_timeout_seconds": 360.0,
         "maximum_panel_in_flight": 176,
         "observations_per_endpoint_shape": 28,
@@ -109,7 +109,7 @@ def test_digitalocean_six_hour_closure_compiles_exact_registered_gaps(tmp_path: 
     assert config.concurrency == 128
     assert config.retries == 0
     assert config.suites["time_variation"]["interleave_gap_work"] is True
-    assert _capacity_job_seconds(config, "aimd") == 5_895.0
+    assert _capacity_job_seconds(config, "aimd") == 28_720.0
 
 
 def test_suite_route_and_capability_probe_selectors_do_not_replay_resolved_cells(

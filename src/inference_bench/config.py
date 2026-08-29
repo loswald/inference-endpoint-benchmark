@@ -12,11 +12,19 @@ from urllib.parse import urlsplit, urlunsplit
 import yaml
 
 from .models import TRANSPORT_HEADER_PROFILE, AuthConfig, RouteConfig, sha256_json
+from .suite_registry import suite_applies_to_route, suite_plugins
 
 _PUBLIC_CAPABILITY_KEYS = {
+    "batch_chat",
+    "batch_embeddings",
     "batch_inference",
     "caching",
     "documentation_checked_utc",
+    "embeddings",
+    "explicit_ephemeral_cache",
+    "function_calling",
+    "implicit_exact_prefix_cache",
+    "json_object",
     "json_schema",
     "logprobs",
     "parallel_tool_calls",
@@ -24,10 +32,28 @@ _PUBLIC_CAPABILITY_KEYS = {
     "stop",
     "streaming",
     "structured_output",
+    "thinking",
     "tool_calling",
     "tools",
     "vision",
+    "rerank",
 }
+_PUBLIC_CAPABILITY_STATES = frozenset(
+    {
+        "supported",
+        "unsupported",
+        "unknown",
+        "partial",
+        "automatic_best_effort",
+        "documented_supported_runner_not_implemented",
+        "documented_unsupported_for_exact_route",
+        "singapore_live_test_required",
+        "exact_api_family_live_test_required",
+        "region_and_model_specific",
+        "model_specific",
+        "exact_path_and_region_live_test_required",
+    }
+)
 _PUBLIC_SUITE_KEYS = {
     "static": {"enabled", "offered_rps", "route_ids"},
     "warmup": {
@@ -61,6 +87,8 @@ _PUBLIC_SUITE_KEYS = {
         "route_ids",
         "probe_groups",
         "probe_groups_by_route",
+        "reasoning_budgets",
+        "reasoning_budgets_by_route",
     },
     "interactions": {
         "enabled",
@@ -68,6 +96,8 @@ _PUBLIC_SUITE_KEYS = {
         "top_ps",
         "stream",
         "output_tokens",
+        "reasoning_budgets",
+        "reasoning_budgets_by_route",
     },
     "context": {"enabled", "percentages", "fixed_tokens", "route_ids"},
     "output": {
@@ -129,6 +159,7 @@ _PUBLIC_SUITE_KEYS = {
         "long_output_overflow",
         "route_ids",
         "cells",
+        "acceptance_policy",
     },
     "soak": {
         "enabled",
@@ -154,6 +185,7 @@ _PUBLIC_SUITE_KEYS = {
         "long_output_overflow",
         "route_ids",
         "cells",
+        "acceptance_policy",
     },
 }
 
@@ -179,6 +211,7 @@ _ROUTE_KEYS = {
     "auth",
     "region",
     "api_family",
+    "billing_channel",
     "api_version",
     "model_version",
     "upstream_provider",
@@ -203,7 +236,9 @@ _ROUTE_KEYS = {
     "extra_headers",
     "retained_header_names",
     "request_defaults",
+    "reasoning_controls",
 }
+ROUTE_CONFIG_KEYS = frozenset(_ROUTE_KEYS)
 _AUTH_KEYS = {"env", "header", "prefix"}
 _SHAPES = {"short_short", "long_short", "short_long", "mixed"}
 _CAPABILITY_PROBE_GROUPS = {
@@ -213,17 +248,6 @@ _CAPABILITY_PROBE_GROUPS = {
     "vision",
     "parameter_validation",
 }
-
-
-def suite_applies_to_route(values: dict[str, Any], route_id: str) -> bool:
-    """Return whether a suite explicitly includes an endpoint.
-
-    ``route_ids`` is a plan-level selector. It never changes route identity and therefore keeps
-    one immutable campaign manifest while avoiding duplicate requests for already-settled cells.
-    """
-
-    selected = values.get("route_ids")
-    return selected is None or route_id in selected
 
 
 def selected_capacity_cells(
@@ -294,12 +318,26 @@ _StrictSafeLoader.add_constructor(
 )
 
 
+_ALIBABA_WORKSPACE_HOST = re.compile(
+    r"^[a-z0-9][a-z0-9-]*\."
+    r"(?P<region>cn-beijing|ap-southeast-1|ap-northeast-1|eu-central-1|"
+    r"cn-hongkong|us-east-1)\.maas\.aliyuncs\.com$",
+    re.IGNORECASE,
+)
+
+
 def _safe_public_url(value: str) -> str:
-    """Remove credentials, queries, and fragments from an endpoint descriptor."""
+    """Remove endpoint credentials and private account/workspace identifiers."""
     parsed = urlsplit(value)
     if not parsed.scheme or not parsed.netloc:
         return value
     hostname = parsed.hostname or ""
+    workspace_match = _ALIBABA_WORKSPACE_HOST.fullmatch(hostname)
+    if workspace_match is not None:
+        hostname = (
+            "workspace-redacted."
+            f"{workspace_match.group('region').casefold()}.maas.aliyuncs.com"
+        )
     try:
         parsed_port = parsed.port
     except ValueError:
@@ -316,7 +354,7 @@ def _safe_capabilities(values: dict[str, bool | str]) -> dict[str, bool | str]:
             public[key] = value
         elif key == "documentation_checked_utc":
             public[key] = str(value)
-        elif str(value).lower() in {"supported", "unsupported", "unknown", "partial"}:
+        elif str(value).lower() in _PUBLIC_CAPABILITY_STATES:
             public[key] = str(value).lower()
     return public
 
@@ -330,6 +368,17 @@ def _safe_suites(values: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]
         public[suite] = {
             key: copy.deepcopy(config[key])
             for key in sorted(allowed & config.keys())
+            if isinstance(config[key], (bool, int, float, str, list, tuple, dict))
+        }
+    for suite, plugin in suite_plugins().items():
+        if suite in public or suite in _PUBLIC_SUITE_KEYS:
+            continue
+        config = values.get(suite)
+        if not isinstance(config, dict):
+            continue
+        public[suite] = {
+            key: copy.deepcopy(config[key])
+            for key in sorted(plugin.public_keys & config.keys())
             if isinstance(config[key], (bool, int, float, str, list, tuple, dict))
         }
     return public
@@ -423,9 +472,21 @@ class CampaignConfig:
                 "routes": [
                     {"id": route.id, "identity_hash": route.identity_hash} for route in self.routes
                 ],
+                "adapter_plugins": list(self.adapter_plugin_identities()),
                 "suites": self.suites,
             }
         )
+
+    def adapter_plugin_identities(self) -> tuple[dict[str, Any], ...]:
+        """Resolve and bind each executable adapter without touching credentials or networking."""
+
+        from .adapters import validate_adapter_route
+
+        by_name = {
+            plugin.name: plugin.public_identity()
+            for plugin in (validate_adapter_route(route) for route in self.routes)
+        }
+        return tuple(by_name[name] for name in sorted(by_name))
 
     def public_dict(self) -> dict[str, Any]:
         return {
@@ -453,6 +514,7 @@ class CampaignConfig:
                     },
                     "region": route.region,
                     "api_family": route.api_family,
+                    "billing_channel": route.billing_channel,
                     "api_version": route.api_version,
                     "model_version": route.model_version,
                     "upstream_provider": route.upstream_provider,
@@ -475,6 +537,7 @@ class CampaignConfig:
                     "evidence_retrieved_at_utc": route.evidence_retrieved_at_utc,
                     "evidence_bundle_sha256": route.evidence_bundle_sha256,
                     "capabilities": _safe_capabilities(route.capabilities),
+                    "reasoning_controls": route.reasoning_controls,
                     "retained_header_names": list(route.retained_header_names),
                     "omitted_operational_fields": sorted(
                         name
@@ -483,7 +546,18 @@ class CampaignConfig:
                             "extra_headers": bool(route.extra_headers),
                             "request_defaults": bool(route.request_defaults),
                             "base_url_query_or_credentials": (
-                                _safe_public_url(route.base_url) != route.base_url
+                                bool(
+                                    urlsplit(route.base_url).query
+                                    or urlsplit(route.base_url).fragment
+                                    or urlsplit(route.base_url).username
+                                    or urlsplit(route.base_url).password
+                                )
+                            ),
+                            "base_url_workspace_identifier": (
+                                _ALIBABA_WORKSPACE_HOST.fullmatch(
+                                    urlsplit(route.base_url).hostname or ""
+                                )
+                                is not None
                             ),
                         }.items()
                         if present
@@ -492,9 +566,10 @@ class CampaignConfig:
                 }
                 for route in self.routes
             ],
+            "adapter_plugins": list(self.adapter_plugin_identities()),
             "suites": _safe_suites(self.suites),
             "public_serialization": {
-                "schema_version": "campaign-public/v1",
+                "schema_version": "campaign-public/v2",
                 "policy": "explicit-allowlist",
                 "note": (
                     "Operational auth transport, arbitrary headers, request defaults, URL query "
@@ -592,11 +667,13 @@ def _route(raw: dict[str, Any]) -> RouteConfig:
     capabilities = raw.get("capabilities") or {}
     extra_headers = raw.get("extra_headers") or {}
     request_defaults = raw.get("request_defaults") or {}
+    reasoning_controls = raw.get("reasoning_controls") or {}
     retained_header_names = raw.get("retained_header_names")
     for field_name, value in (
         ("route.capabilities", capabilities),
         ("route.extra_headers", extra_headers),
         ("route.request_defaults", request_defaults),
+        ("route.reasoning_controls", reasoning_controls),
     ):
         if not isinstance(value, dict):
             raise ValueError(f"{field_name} must be a mapping")
@@ -617,6 +694,9 @@ def _route(raw: dict[str, Any]) -> RouteConfig:
         ),
         region=_string(raw.get("region", "not_reported"), "route.region"),
         api_family=_string(raw.get("api_family", "chat_completions"), "route.api_family"),
+        billing_channel=_string(
+            raw.get("billing_channel", "not_reported"), "route.billing_channel"
+        ),
         api_version=_string(raw.get("api_version", "not_reported"), "route.api_version"),
         model_version=_string(raw.get("model_version", "not_reported"), "route.model_version"),
         upstream_provider=raw.get("upstream_provider"),
@@ -671,19 +751,51 @@ def _route(raw: dict[str, Any]) -> RouteConfig:
             )
         ),
         request_defaults=dict(request_defaults),
+        reasoning_controls={
+            str(budget): dict(controls) if isinstance(controls, dict) else controls
+            for budget, controls in reasoning_controls.items()
+        },
     )
 
 
-def load_config(path: str | Path) -> CampaignConfig:
+def route_config_from_mapping(raw: dict[str, Any]) -> RouteConfig:
+    """Validate and construct one fully resolved route mapping."""
+
+    if not isinstance(raw, dict):
+        raise ValueError("route configuration must be a mapping")
+    return _route(copy.deepcopy(raw))
+
+
+def load_yaml_mapping(path: str | Path, *, document_name: str) -> dict[str, Any]:
+    """Load one strict YAML mapping while rejecting duplicate keys.
+
+    Profile composition reuses this parser so campaign, provider-profile, and experiment
+    documents have the same duplicate-key behavior.  The helper performs no interpolation and
+    never resolves environment variables; credential fields remain environment-variable names.
+    """
+
     try:
         raw = yaml.load(
             Path(path).read_text(encoding="utf-8"),
             Loader=_StrictSafeLoader,
         )
     except yaml.YAMLError as exc:
-        raise ValueError(f"invalid campaign YAML: {exc}") from exc
+        raise ValueError(f"invalid {document_name} YAML: {exc}") from exc
     if not isinstance(raw, dict):
-        raise ValueError("campaign file must contain a mapping")
+        raise ValueError(f"{document_name} file must contain a mapping")
+    return raw
+
+
+def campaign_config_from_mapping(raw: dict[str, Any]) -> CampaignConfig:
+    """Validate an already-parsed canonical campaign mapping.
+
+    This is the single construction boundary used by direct campaign YAML and composed profiles.
+    Keeping both paths here prevents profile compilation from silently accepting fields that a
+    normal campaign file would reject.
+    """
+
+    if not isinstance(raw, dict):
+        raise ValueError("campaign configuration must be a mapping")
     _reject_unknown("top level", raw, _TOP_LEVEL_KEYS)
     campaign = raw.get("campaign") or {}
     if not isinstance(campaign, dict):
@@ -735,6 +847,12 @@ def load_config(path: str | Path) -> CampaignConfig:
         ),
         routes=tuple(_route(item) for item in merged_routes),
         suites=dict(suites),
+    )
+
+
+def load_config(path: str | Path) -> CampaignConfig:
+    return campaign_config_from_mapping(
+        load_yaml_mapping(path, document_name="campaign")
     )
 
 
@@ -799,7 +917,8 @@ def _validate_suites(
     *,
     retries: int,
 ) -> None:
-    unknown_suites = sorted(set(suites) - set(_PUBLIC_SUITE_KEYS))
+    plugins = suite_plugins()
+    unknown_suites = sorted(set(suites) - set(plugins) - {"static", "aimd", "soak"})
     if unknown_suites:
         raise ValueError(f"unknown suite(s): {', '.join(unknown_suites)}")
     if not suites or not any(values.get("enabled", True) for values in suites.values()):
@@ -817,10 +936,19 @@ def _validate_suites(
                 "capacity or capability suites requires explicit interleave_gap_work scheduling"
             )
     for name, values in suites.items():
-        _reject_unknown(f"suites.{name}", values, _PUBLIC_SUITE_KEYS[name])
+        allowed = _PUBLIC_SUITE_KEYS.get(name)
+        if allowed is None:
+            plugin = plugins[name]
+            allowed = set(plugin.public_keys)
+        _reject_unknown(f"suites.{name}", values, allowed)
         if "enabled" in values:
             _strict_bool(values["enabled"], f"suites.{name}.enabled")
         if not values.get("enabled", True):
+            continue
+        if name not in _PUBLIC_SUITE_KEYS:
+            plugin = plugins[name]
+            if plugin.validator is not None:
+                plugin.validator(values)
             continue
         if "route_ids" in values:
             selected_routes = values["route_ids"]
@@ -1004,6 +1132,38 @@ def _validate_suites(
                     _number(value, f"suites.{name}.{key}[{index}]")
                     if not math.isfinite(float(value)):
                         raise ValueError(f"suites.{name}.{key}[{index}] must be finite")
+            if "reasoning_budgets" in values:
+                budgets = values["reasoning_budgets"]
+                if (
+                    not isinstance(budgets, list)
+                    or not budgets
+                    or any(not isinstance(value, str) or not value for value in budgets)
+                ):
+                    raise ValueError(
+                        f"suites.{name}.reasoning_budgets must be a nonempty string list"
+                    )
+                _require_unique(budgets, f"suites.{name}.reasoning_budgets")
+            budgets_by_route = values.get("reasoning_budgets_by_route")
+            if budgets_by_route is not None:
+                if not isinstance(budgets_by_route, dict) or not budgets_by_route:
+                    raise ValueError(
+                        f"suites.{name}.reasoning_budgets_by_route must be a nonempty mapping"
+                    )
+                for route_id, budgets in budgets_by_route.items():
+                    if route_id not in route_ids:
+                        raise ValueError(f"unknown reasoning-budget route ID: {route_id}")
+                    if (
+                        not isinstance(budgets, list)
+                        or not budgets
+                        or any(not isinstance(value, str) or not value for value in budgets)
+                    ):
+                        raise ValueError(
+                            f"suites.{name}.reasoning_budgets_by_route.{route_id} must be a "
+                            "nonempty string list"
+                        )
+                    _require_unique(
+                        budgets, f"suites.{name}.reasoning_budgets_by_route.{route_id}"
+                    )
         if name == "capability":
             groups = values.get("probe_groups")
             if groups is not None:
