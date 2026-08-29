@@ -274,16 +274,19 @@ def build_digitalocean_closure_package(
         for spec in plan_static_suites(validated.routes, validated.suites, seed=validated.seed)
         if spec.suite == "time_variation"
     ]
-    panel_worst_case_usd = sum(
-        route_by_id[spec.route_id].worst_case_cost(
-            reserved_input_tokens(
-                route_by_id[spec.route_id],
-                spec,
-                validated.input_token_reservation_factor,
-            ),
-            spec.max_output_tokens,
-        )
-        for spec in panel_specs
+    panel_worst_case_usd = round(
+        sum(
+            route_by_id[spec.route_id].worst_case_cost(
+                reserved_input_tokens(
+                    route_by_id[spec.route_id],
+                    spec,
+                    validated.input_token_reservation_factor,
+                ),
+                spec.max_output_tokens,
+            )
+            for spec in panel_specs
+        ),
+        12,
     )
     panel_count = 7
     panel_samples_per_route_shape = 4
