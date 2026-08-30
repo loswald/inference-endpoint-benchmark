@@ -12,6 +12,7 @@ from inference_bench.capacity_closure import (
     build_capacity_closure_package,
     build_capacity_closure_package_from_files,
     capacity_workload_identity,
+    export_controller_capacity_evidence,
     validate_capacity_closure_profile,
 )
 from inference_bench.cli import main
@@ -106,6 +107,35 @@ def _base_config() -> CampaignConfig:
             },
         },
     )
+
+
+def _base_config_mapping() -> dict[str, object]:
+    config = _base_config()
+    return {
+        "campaign": {
+            field: getattr(config, field)
+            for field in (
+                "name",
+                "seed",
+                "max_wall_seconds",
+                "max_cost_usd",
+                "launch_reserve_seconds",
+                "launch_reserve_usd",
+                "concurrency",
+                "retries",
+                "input_token_reservation_factor",
+                "client_location",
+            )
+        },
+        "routes": [
+            {
+                **asdict(route),
+                "retained_header_names": list(route.retained_header_names),
+            }
+            for route in config.routes
+        ],
+        "suites": config.suites,
+    }
 
 
 def _profile(*, expected_cells: int = 2) -> dict[str, object]:
@@ -267,6 +297,94 @@ def test_provider_neutral_closure_uses_evidence_mapping_and_exact_cells(tmp_path
     assert "relay-network" not in combined
 
 
+def test_controller_summary_export_is_terminal_identity_bound_and_secret_free(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.yaml"
+    source.write_text(yaml.safe_dump(_base_config_mapping(), sort_keys=False), encoding="utf-8")
+    loaded = load_config(source)
+    summary = tmp_path / "controller-summary.csv"
+    with summary.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "suite",
+                "route_id",
+                "shape",
+                "controller_completion_state",
+                "capacity_bound_state",
+            ],
+            lineterminator="\n",
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "suite": "aimd",
+                "route_id": "nebula-a",
+                "shape": "short_short",
+                "controller_completion_state": "campaign_guard_censored",
+                "capacity_bound_state": "campaign_guard_censored_before_confirmation",
+            }
+        )
+    report = tmp_path / "reproducibility-manifest.json"
+    report.write_text(
+        json.dumps(
+            {
+                "campaign": {
+                    "identity_hash": loaded.identity_hash,
+                    "ended_at_utc": "2030-01-01T01:00:00Z",
+                    "terminal_event": {"reason": "budget_guard"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    output, manifest_path = export_controller_capacity_evidence(
+        source, summary, report, tmp_path / "bound.csv"
+    )
+
+    rows = list(csv.DictReader(output.read_text(encoding="utf-8").splitlines()))
+    assert len(rows) == 1
+    assert rows[0]["source_campaign_identity_sha256"] == loaded.identity_hash
+    assert len(rows[0]["route_identity_sha256"]) == 64
+    assert len(rows[0]["workload_recipe_sha256"]) == 64
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["schema"] == "capacity-controller-evidence/v1"
+    assert manifest["cell_count"] == 1
+    assert manifest["live_traffic_sent"] is False
+    combined = output.read_text(encoding="utf-8") + manifest_path.read_text(encoding="utf-8")
+    assert "Bearer fixture-secret" not in combined
+    assert "https://" not in combined
+
+
+def test_controller_summary_export_rejects_cross_campaign_manifest(tmp_path: Path) -> None:
+    source = tmp_path / "source.yaml"
+    source.write_text(yaml.safe_dump(_base_config_mapping(), sort_keys=False), encoding="utf-8")
+    summary = tmp_path / "controller-summary.csv"
+    summary.write_text(
+        "suite,route_id,shape,controller_completion_state\n"
+        "aimd,nebula-a,short_short,campaign_guard_censored\n",
+        encoding="utf-8",
+    )
+    report = tmp_path / "reproducibility-manifest.json"
+    report.write_text(
+        json.dumps(
+            {
+                "campaign": {
+                    "identity_hash": "0" * 64,
+                    "ended_at_utc": "2030-01-01T01:00:00Z",
+                    "terminal_event": {"reason": "budget_guard"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="does not match"):
+        export_controller_capacity_evidence(source, summary, report, tmp_path / "blocked.csv")
+
+
 def test_capacity_closure_rejects_selected_pass_through_route(tmp_path: Path) -> None:
     evidence = tmp_path / "capacity.csv"
     _write_evidence(
@@ -347,31 +465,7 @@ def test_capacity_closure_file_wrapper_cli_and_output_are_byte_stable(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     base_path = tmp_path / "base.yaml"
-    base_document = {
-        "campaign": {
-            field: getattr(_base_config(), field)
-            for field in (
-                "name",
-                "seed",
-                "max_wall_seconds",
-                "max_cost_usd",
-                "launch_reserve_seconds",
-                "launch_reserve_usd",
-                "concurrency",
-                "retries",
-                "input_token_reservation_factor",
-                "client_location",
-            )
-        },
-        "routes": [
-            {
-                **asdict(route),
-                "retained_header_names": list(route.retained_header_names),
-            }
-            for route in _base_config().routes
-        ],
-        "suites": _base_config().suites,
-    }
+    base_document = _base_config_mapping()
     base_path.write_text(yaml.safe_dump(base_document, sort_keys=False), encoding="utf-8")
     evidence = tmp_path / "capacity.csv"
     _write_evidence(evidence, _valid_rows(), source_config=load_config(base_path))

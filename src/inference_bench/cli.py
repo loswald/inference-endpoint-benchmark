@@ -14,7 +14,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .atlas import generate_atlas
-from .capacity_closure import build_capacity_closure_package_from_files
+from .capacity_closure import (
+    build_capacity_closure_package_from_files,
+    export_controller_capacity_evidence,
+)
 from .config import CampaignConfig, load_config, selected_capacity_cells
 from .digitalocean_atlas import generate_digitalocean_atlas
 from .digitalocean_closure import build_digitalocean_closure_package
@@ -1208,6 +1211,14 @@ def _parser() -> argparse.ArgumentParser:
     capacity_closure.add_argument("capacity_csv", type=Path)
     capacity_closure.add_argument("profile", type=Path)
     capacity_closure.add_argument("--output", type=Path, required=True)
+    closure_evidence = sub.add_parser(
+        "export-capacity-closure-evidence",
+        help="identity-bind a terminal controller summary for portable closure planning",
+    )
+    closure_evidence.add_argument("source_config", type=Path)
+    closure_evidence.add_argument("controller_summary", type=Path)
+    closure_evidence.add_argument("report_manifest", type=Path)
+    closure_evidence.add_argument("--output", type=Path, required=True)
     compile_profile = sub.add_parser(
         "compile-profile",
         help="compile a provider profile and experiment profile into canonical campaign YAML",
@@ -1320,6 +1331,15 @@ def main(argv: list[str] | None = None) -> int:
             args.output,
         )
         print(json.dumps({"config": str(config_path), "plan": str(manifest_path)}))
+        return 0
+    if args.command == "export-capacity-closure-evidence":
+        evidence_path, manifest_path = export_controller_capacity_evidence(
+            args.source_config,
+            args.controller_summary,
+            args.report_manifest,
+            args.output,
+        )
+        print(json.dumps({"evidence": str(evidence_path), "manifest": str(manifest_path)}))
         return 0
     if args.command == "compile-profile":
         compilation = compile_profile_files(

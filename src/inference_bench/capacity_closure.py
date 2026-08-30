@@ -7,6 +7,7 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import asdict
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ from .workloads import shape_spec
 
 PROFILE_SCHEMA = "capacity-closure-profile/v1"
 MANIFEST_SCHEMA = "capacity-closure-plan/v1"
+CONTROLLER_EVIDENCE_MANIFEST_SCHEMA = "capacity-controller-evidence/v1"
 
 _CAPACITY_SUITES = frozenset({"aimd", "soak"})
 _IDENTITY_COLUMN_KEYS = frozenset(
@@ -399,6 +401,110 @@ def capacity_workload_identity(
         "input_target": input_target,
         "output_target": output_target,
     }
+
+
+def export_controller_capacity_evidence(
+    source_config_path: str | Path,
+    controller_summary_path: str | Path,
+    report_manifest_path: str | Path,
+    output_path: str | Path,
+) -> tuple[Path, Path]:
+    """Bind a terminal controller summary to its exact campaign and workload identities.
+
+    The report deliberately contains no endpoint configuration.  This export joins it to the
+    immutable source configuration without copying endpoint URLs, credentials, or headers into
+    the closure evidence.  The adjacent manifest proves which terminal report and source config
+    were used, so a later closure planner can reject stale or cross-campaign rows.
+    """
+
+    source_path = Path(source_config_path)
+    summary_path = Path(controller_summary_path)
+    report_path = Path(report_manifest_path)
+    target = Path(output_path)
+    source = load_config(source_path)
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    if not isinstance(report, dict) or not isinstance(report.get("campaign"), dict):
+        raise ValueError("report manifest must contain a campaign mapping")
+    campaign = report["campaign"]
+    if campaign.get("identity_hash") != source.identity_hash:
+        raise ValueError("report manifest campaign identity does not match source configuration")
+    if not campaign.get("terminal_event") or not campaign.get("ended_at_utc"):
+        raise ValueError("controller evidence requires a terminal report manifest")
+
+    with summary_path.open(encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = list(reader.fieldnames or ())
+        rows = list(reader)
+    required = {"suite", "route_id", "shape", "controller_completion_state"}
+    missing_columns = sorted(required - set(fieldnames))
+    if missing_columns:
+        raise ValueError(
+            "controller summary is missing required columns: " + ", ".join(missing_columns)
+        )
+    if any(field in fieldnames for field in _IDENTITY_COLUMN_KEYS):
+        raise ValueError("controller summary already contains reserved identity columns")
+
+    routes = {route.id: route for route in source.routes}
+    seen: set[tuple[str, str, str]] = set()
+    bound_rows: list[dict[str, str]] = []
+    for row in rows:
+        suite = str(row.get("suite") or "")
+        route_id = str(row.get("route_id") or "")
+        shape = str(row.get("shape") or "")
+        key = (suite, route_id, shape)
+        if key in seen:
+            raise ValueError(f"duplicate controller summary cell: {suite}:{route_id}:{shape}")
+        seen.add(key)
+        if suite not in _CAPACITY_SUITES or suite not in source.suites:
+            raise ValueError(f"controller summary names an unknown capacity suite: {suite}")
+        route = routes.get(route_id)
+        if route is None:
+            raise ValueError(f"controller summary names an unknown route: {route_id}")
+        try:
+            shape_spec(
+                route,
+                shape,
+                f"controller-evidence:{route_id}:{suite}:{shape}",
+                suite=suite,
+                shape_config=dict(source.suites[suite]),
+            )
+        except (AssertionError, KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"controller summary names an invalid workload shape: {shape}"
+            ) from exc
+        identity = capacity_workload_identity(route, suite, source.suites[suite], shape)
+        bound_rows.append(
+            {
+                **{field: str(row.get(field) or "") for field in fieldnames},
+                **identity,
+                "source_campaign_identity_sha256": source.identity_hash,
+            }
+        )
+    if not bound_rows:
+        raise ValueError("controller summary contains no capacity cells")
+    bound_rows.sort(key=lambda row: (row["suite"], row["route_id"], row["shape"]))
+
+    output_fields = [*fieldnames, *sorted(_IDENTITY_COLUMN_KEYS)]
+    buffer = StringIO(newline="")
+    writer = csv.DictWriter(buffer, fieldnames=output_fields, lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(bound_rows)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    _write_text_atomic(target, buffer.getvalue())
+
+    manifest_path = target.with_suffix(".manifest.json")
+    manifest = {
+        "schema": CONTROLLER_EVIDENCE_MANIFEST_SCHEMA,
+        "source_config_sha256": _canonical_text_sha256(source_path),
+        "source_campaign_identity_sha256": source.identity_hash,
+        "controller_summary_sha256": _canonical_text_sha256(summary_path),
+        "report_manifest_sha256": _canonical_text_sha256(report_path),
+        "output_sha256": _canonical_text_sha256(target),
+        "cell_count": len(bound_rows),
+        "live_traffic_sent": False,
+    }
+    _write_text_atomic(manifest_path, json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    return target, manifest_path
 
 
 def _route_values(route: RouteConfig) -> dict[str, Any]:
