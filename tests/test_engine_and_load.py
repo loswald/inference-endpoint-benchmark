@@ -1570,6 +1570,76 @@ def test_provider_output_beyond_route_limit_tolerance_is_rejected(tmp_path, camp
     assert row["validity_class"] == "invalid"
 
 
+def test_visible_text_limit_excludes_reasoning_but_costs_and_reserves_total_output(
+    tmp_path, campaign
+) -> None:
+    class VisibleTextUsageAdapter(SequenceAdapter):
+        async def infer(self, route, request):
+            result = _result(request.logical_id)
+            result.output_tokens = request.max_output_tokens + 100
+            result.reasoning_tokens = 100
+            return result
+
+    async def run():
+        visible_route = replace(
+            campaign.routes[0],
+            output_limit_scope="visible_text",
+            reasoning_reservation_tokens=100,
+        )
+        visible_campaign = replace(campaign, routes=(visible_route,), retries=0)
+        engine, ledger = _engine(tmp_path, visible_campaign, VisibleTextUsageAdapter())
+        result = await engine.execute(_spec("visible-text-with-reasoning"))
+        row = ledger.rows()[0]
+        claimed = next(
+            event for event in ledger.event_rows() if event["kind"] == "request_claimed"
+        )
+        await engine.close()
+        ledger.close()
+        return visible_route, result, row, json.loads(claimed["payload_json"])
+
+    visible_route, result, row, claimed_payload = asyncio.run(run())
+    assert result is not None
+    assert "provider_output_tokens_exceed_request_limit" not in result.usage_parse_errors
+    assert row["usage_eligible"] == 1
+    assert result.cost_usd == pytest.approx(visible_route.actual_cost(8, 108))
+    assert claimed_payload["reserved_usd"] == pytest.approx(
+        visible_route.worst_case_cost(row["reserved_input_tokens"], 108)
+    )
+
+
+def test_visible_text_limit_without_reasoning_usage_is_explicitly_unobservable(
+    tmp_path, campaign
+) -> None:
+    class MissingReasoningUsageAdapter(SequenceAdapter):
+        async def infer(self, route, request):
+            result = _result(request.logical_id)
+            result.reasoning_tokens = None
+            return result
+
+    async def run():
+        visible_route = replace(
+            campaign.routes[0],
+            output_limit_scope="visible_text",
+            reasoning_reservation_tokens=100,
+        )
+        visible_campaign = replace(campaign, routes=(visible_route,), retries=0)
+        engine, ledger = _engine(tmp_path, visible_campaign, MissingReasoningUsageAdapter())
+        result = await engine.execute(_spec("visible-text-reasoning-missing"))
+        row = ledger.rows()[0]
+        await engine.close()
+        ledger.close()
+        return visible_route, result, row
+
+    visible_route, result, row = asyncio.run(run())
+    assert result is not None
+    assert (
+        "provider_visible_text_limit_unobservable_reasoning_tokens_missing"
+        in result.usage_parse_errors
+    )
+    assert row["usage_eligible"] == 0
+    assert result.cost_usd == pytest.approx(visible_route.actual_cost(8, 8))
+
+
 def test_reasoning_tokens_cannot_exceed_billed_output_tokens(tmp_path, campaign) -> None:
     class ImpossibleReasoningUsageAdapter(SequenceAdapter):
         async def infer(self, route, request):

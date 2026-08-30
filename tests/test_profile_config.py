@@ -232,6 +232,18 @@ def test_public_alibaba_profile_compiles_without_resolving_credentials(tmp_path:
     assert all(route.billing_channel == "pay_as_you_go" for route in routes.values())
     assert all(route.auth.env == "DASHSCOPE_API_KEY" for route in routes.values())
     assert all(route.output_limit_tolerance_tokens == 10 for route in routes.values())
+    kimi = routes["alibaba-sg-kimi-k2.7-code"]
+    assert kimi.context_tokens == 262_144
+    assert kimi.max_output_tokens == 262_144
+    assert kimi.output_limit_scope == "visible_text"
+    assert kimi.reasoning_reservation_tokens == 262_144
+    assert kimi.capabilities["vision"] is True
+    assert all(
+        route.output_limit_scope == "total_output"
+        and route.reasoning_reservation_tokens == 0
+        for route_id, route in routes.items()
+        if route_id != kimi.id
+    )
 
     contract_path = (
         ROOT / "docs" / "provider-contracts" / "alibaba-model-studio-2026-08-29.yaml"

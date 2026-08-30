@@ -102,6 +102,39 @@ def test_output_limit_tolerance_is_nonnegative_identity_bound_and_public(
             replace(route, output_limit_tolerance_tokens=invalid)
 
 
+def test_output_limit_scope_and_reasoning_reservation_are_validated_identity_bound_and_public(
+    route: RouteConfig, campaign: CampaignConfig
+) -> None:
+    assert route.output_limit_scope == "total_output"
+    assert route.reasoning_reservation_tokens == 0
+    assert route.reserved_output_tokens(8) == 8
+
+    visible = replace(
+        route,
+        output_limit_scope="visible_text",
+        reasoning_reservation_tokens=256,
+    )
+    assert visible.reserved_output_tokens(8) == 264
+    assert visible.identity_hash != route.identity_hash
+    public = replace(campaign, routes=(visible,)).public_dict()["routes"][0]
+    assert public["output_limit_scope"] == "visible_text"
+    assert public["reasoning_reservation_tokens"] == 256
+
+    with pytest.raises(ValueError, match="must be total_output or visible_text"):
+        replace(route, output_limit_scope="answer")
+    with pytest.raises(ValueError, match="requires a positive"):
+        replace(route, output_limit_scope="visible_text")
+    with pytest.raises(ValueError, match="requires reasoning_reservation_tokens=0"):
+        replace(route, reasoning_reservation_tokens=1)
+    for invalid in (-1, True, 1.5):
+        with pytest.raises(ValueError, match="nonnegative integer"):
+            replace(
+                route,
+                output_limit_scope="visible_text",
+                reasoning_reservation_tokens=invalid,
+            )
+
+
 def test_route_identity_binds_timeout_and_documentation_evidence(route: RouteConfig) -> None:
     assert replace(route, request_timeout_seconds=900).identity_hash != route.identity_hash
     assert replace(route, evidence_bundle_sha256="b" * 64).identity_hash != route.identity_hash

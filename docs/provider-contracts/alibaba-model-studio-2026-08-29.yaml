@@ -76,12 +76,14 @@ flat_price_chat_admission:
       singapore_default_tpm: 1200000
     - model: kimi-k2.7-code
       catalog_present: true
-      context_window_tokens: not_bound
-      maximum_output_tokens: not_bound
+      context_window_tokens: 262144
+      maximum_output_tokens: 262144
+      maximum_chain_of_thought_tokens: 262144
       input_usd_per_million: 0.95
       output_usd_per_million: 4.00
       singapore_default_rpm: 500
       singapore_default_tpm: 1000000
+      documented_input_modalities: [text, image, video]
     - model: kimi-k3
       catalog_present: true
       context_window_tokens: 1000000
@@ -110,6 +112,16 @@ provider_contracts:
       Alibaba documents that the actual output-token count can differ from the requested
       max_completion_tokens value by up to 10 tokens. Counts above request plus 10 remain an
       invalid usage-bound violation.
+    route_specific_accounting:
+      kimi-k2.7-code:
+        output_limit_scope: visible_text
+        reasoning_reservation_tokens: 262144
+        rationale: >-
+          The exact route is thinking-only and reports its chain of thought separately as
+          reasoning_content while billing chain-of-thought tokens as output. The benchmark
+          therefore audits the requested limit against visible answer tokens and separately
+          reserves the documented maximum chain-of-thought length. Missing reasoning-token
+          accounting makes the visible-text limit unobservable and usage-ineligible.
   caching:
     implicit: automatic_best_effort_exact_prefix
     implicit_minimum_prefix_tokens: 256
@@ -183,6 +195,8 @@ sources:
   - https://www.alibabacloud.com/help/en/model-studio/qwen-api-reference
   - https://www.alibabacloud.com/help/en/model-studio/qwen-api-via-openai-chat-completions
   - https://www.alibabacloud.com/help/en/model-studio/qwen-api-via-openai-responses
+  - https://www.alibabacloud.com/help/en/model-studio/kimi-k2-7-code
+  - https://www.alibabacloud.com/help/en/model-studio/kimi-api
   - https://www.alibabacloud.com/help/en/model-studio/model-pricing
   - https://www.alibabacloud.com/help/en/model-studio/rate-limit
   - https://www.alibabacloud.com/help/en/model-studio/rate-limiting-best-practices
@@ -207,6 +221,9 @@ source_bindings:
     - https://www.alibabacloud.com/help/en/model-studio/qwen-api-via-openai-responses
   output_limit_tolerance:
     - https://www.alibabacloud.com/help/en/model-studio/qwen-api-via-openai-chat-completions
+  kimi_k2_7_output_accounting_and_vision:
+    - https://www.alibabacloud.com/help/en/model-studio/kimi-k2-7-code
+    - https://www.alibabacloud.com/help/en/model-studio/kimi-api
   price_and_quota:
     - https://www.alibabacloud.com/help/en/model-studio/model-pricing
     - https://www.alibabacloud.com/help/en/model-studio/rate-limit

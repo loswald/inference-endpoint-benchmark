@@ -220,6 +220,8 @@ _ROUTE_KEYS = {
     "max_output_tokens",
     "output_limit_field",
     "output_limit_tolerance_tokens",
+    "output_limit_scope",
+    "reasoning_reservation_tokens",
     "stream_usage_mode",
     "request_timeout_seconds",
     "http2",
@@ -524,6 +526,8 @@ class CampaignConfig:
                     "max_output_tokens": route.max_output_tokens,
                     "output_limit_field": route.output_limit_field,
                     "output_limit_tolerance_tokens": route.output_limit_tolerance_tokens,
+                    "output_limit_scope": route.output_limit_scope,
+                    "reasoning_reservation_tokens": route.reasoning_reservation_tokens,
                     "stream_usage_mode": route.stream_usage_mode,
                     "request_timeout_seconds": route.request_timeout_seconds,
                     "http2": route.http2,
@@ -711,6 +715,13 @@ def _route(raw: dict[str, Any]) -> RouteConfig:
         output_limit_tolerance_tokens=_integer(
             raw.get("output_limit_tolerance_tokens", 0),
             "route.output_limit_tolerance_tokens",
+        ),
+        output_limit_scope=_string(
+            raw.get("output_limit_scope", "total_output"), "route.output_limit_scope"
+        ),  # type: ignore[arg-type]
+        reasoning_reservation_tokens=_integer(
+            raw.get("reasoning_reservation_tokens", 0),
+            "route.reasoning_reservation_tokens",
         ),
         stream_usage_mode=_string(raw.get("stream_usage_mode", "omit"), "route.stream_usage_mode"),  # type: ignore[arg-type]
         request_timeout_seconds=_number(

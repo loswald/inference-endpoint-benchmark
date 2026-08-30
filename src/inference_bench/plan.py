@@ -127,8 +127,7 @@ def build_plan(config: CampaignConfig) -> PlanSummary:
             reserved_input_tokens(
                 route_by_id[spec.route_id], spec, config.input_token_reservation_factor
             ),
-            spec.max_output_tokens
-            + route_by_id[spec.route_id].output_limit_tolerance_tokens,
+            route_by_id[spec.route_id].reserved_output_tokens(spec.max_output_tokens),
         )
         for spec in static_specs
     )
@@ -498,7 +497,7 @@ def _shape_cost(
         )
         structured = route.worst_case_cost(
             reserved_input_tokens(route, structured_spec, input_factor),
-            structured_spec.max_output_tokens + route.output_limit_tolerance_tokens,
+            route.reserved_output_tokens(structured_spec.max_output_tokens),
         )
         return max(*named, structured)
     spec = shape_spec(
@@ -511,7 +510,7 @@ def _shape_cost(
     )
     return route.worst_case_cost(
         reserved_input_tokens(route, spec, input_factor),
-        spec.max_output_tokens + route.output_limit_tolerance_tokens,
+        route.reserved_output_tokens(spec.max_output_tokens),
     )
 
 

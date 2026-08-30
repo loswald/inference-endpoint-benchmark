@@ -73,6 +73,7 @@ SAFE_RETAINED_HEADER_NAMES = frozenset(
 )
 TRANSPORT_HEADER_PROFILE = "openai-json-accept-encoding-identity/v1"
 OUTPUT_LIMIT_FIELDS = frozenset({"max_tokens", "max_completion_tokens", "max_output_tokens"})
+OUTPUT_LIMIT_SCOPES = frozenset({"total_output", "visible_text"})
 PUBLIC_FINISH_REASONS = frozenset(
     {
         "stop",
@@ -132,6 +133,7 @@ PUBLIC_USAGE_PARSE_ERRORS = frozenset(
         "provider_output_tokens_zero_for_nonempty_response",
         "provider_input_tokens_exceed_reservation",
         "provider_output_tokens_exceed_request_limit",
+        "provider_visible_text_limit_unobservable_reasoning_tokens_missing",
         "other_usage_parse_error",
         *(f"{field}_wrong_json_type" for field in _USAGE_COUNT_FIELDS),
         *(f"{field}_nonintegral_or_negative" for field in _USAGE_COUNT_FIELDS),
@@ -352,6 +354,8 @@ class RouteConfig:
     max_output_tokens: int | None = None
     output_limit_field: str = "max_tokens"
     output_limit_tolerance_tokens: int = 0
+    output_limit_scope: Literal["total_output", "visible_text"] = "total_output"
+    reasoning_reservation_tokens: int = 0
     stream_usage_mode: Literal["required", "try", "omit"] = "omit"
     request_timeout_seconds: float = 180.0
     http2: bool = False
@@ -482,6 +486,24 @@ class RouteConfig:
             or self.output_limit_tolerance_tokens < 0
         ):
             raise ValueError("output_limit_tolerance_tokens must be a nonnegative integer")
+        if self.output_limit_scope not in OUTPUT_LIMIT_SCOPES:
+            raise ValueError("output_limit_scope must be total_output or visible_text")
+        if (
+            isinstance(self.reasoning_reservation_tokens, bool)
+            or not isinstance(self.reasoning_reservation_tokens, int)
+            or self.reasoning_reservation_tokens < 0
+        ):
+            raise ValueError("reasoning_reservation_tokens must be a nonnegative integer")
+        if self.output_limit_scope == "visible_text":
+            if self.reasoning_reservation_tokens <= 0:
+                raise ValueError(
+                    "visible_text output_limit_scope requires a positive "
+                    "reasoning_reservation_tokens value"
+                )
+        elif self.reasoning_reservation_tokens != 0:
+            raise ValueError(
+                "total_output output_limit_scope requires reasoning_reservation_tokens=0"
+            )
         if self.stream_usage_mode not in {"required", "try", "omit"}:
             raise ValueError("stream_usage_mode must be required, try, or omit")
         if (
@@ -682,6 +704,8 @@ class RouteConfig:
                 "max_output_tokens": self.max_output_tokens,
                 "output_limit_field": self.output_limit_field,
                 "output_limit_tolerance_tokens": self.output_limit_tolerance_tokens,
+                "output_limit_scope": self.output_limit_scope,
+                "reasoning_reservation_tokens": self.reasoning_reservation_tokens,
                 "stream_usage_mode": self.stream_usage_mode,
                 "request_timeout_seconds": self.request_timeout_seconds,
                 "http2": self.http2,
@@ -721,6 +745,26 @@ class RouteConfig:
         return (
             input_tokens * conservative_input_price + output_tokens * self.output_usd_per_million
         ) / 1_000_000
+
+    def reserved_output_tokens(self, requested_output_tokens: int) -> int:
+        """Return the route-bound total output-token ceiling for a pre-send reservation."""
+
+        if (
+            isinstance(requested_output_tokens, bool)
+            or not isinstance(requested_output_tokens, int)
+            or requested_output_tokens < 0
+        ):
+            raise ValueError("requested_output_tokens must be a nonnegative integer")
+        reasoning_reservation = (
+            self.reasoning_reservation_tokens
+            if self.output_limit_scope == "visible_text"
+            else 0
+        )
+        return (
+            requested_output_tokens
+            + self.output_limit_tolerance_tokens
+            + reasoning_reservation
+        )
 
     def usage_cost_with_unknown_cache(self, input_tokens: int, output_tokens: int) -> float:
         """Conservative provider-usage cost when cached-token count was not reported."""

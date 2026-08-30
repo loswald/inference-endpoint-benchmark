@@ -307,7 +307,7 @@ class BenchmarkEngine:
         )
         reservation = route.worst_case_cost(
             reserved_input_tokens,
-            spec.max_output_tokens + route.output_limit_tolerance_tokens,
+            route.reserved_output_tokens(spec.max_output_tokens),
         )
         last: InferenceResult | None = None
         for attempt in range(start_attempt, self.config.retries + 2):
@@ -460,7 +460,18 @@ class BenchmarkEngine:
                     usage_bound_errors = list(result.usage_parse_errors)
                     if int(result.input_tokens or 0) > reserved_input_tokens:
                         usage_bound_errors.append("provider_input_tokens_exceed_reservation")
-                    if int(result.output_tokens or 0) > (
+                    if route.output_limit_scope == "visible_text":
+                        if result.reasoning_tokens is None:
+                            usage_bound_errors.append(
+                                "provider_visible_text_limit_unobservable_reasoning_tokens_missing"
+                            )
+                        elif int(result.output_tokens or 0) - result.reasoning_tokens > (
+                            spec.max_output_tokens + route.output_limit_tolerance_tokens
+                        ):
+                            usage_bound_errors.append(
+                                "provider_output_tokens_exceed_request_limit"
+                            )
+                    elif int(result.output_tokens or 0) > (
                         spec.max_output_tokens + route.output_limit_tolerance_tokens
                     ):
                         usage_bound_errors.append("provider_output_tokens_exceed_request_limit")

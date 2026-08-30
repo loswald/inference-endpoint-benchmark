@@ -180,6 +180,22 @@ def test_mixed_plan_cost_is_worst_subtype(route) -> None:
     )
 
 
+def test_plan_cost_reserves_reasoning_separately_for_visible_text_limits(route) -> None:
+    total_output = replace(route, output_limit_tolerance_tokens=10)
+    visible_text = replace(
+        route,
+        output_limit_tolerance_tokens=10,
+        output_limit_scope="visible_text",
+        reasoning_reservation_tokens=256,
+    )
+
+    total_cost = _shape_cost(total_output, "short_short", 1.5)
+    visible_cost = _shape_cost(visible_text, "short_short", 1.5)
+    assert visible_cost - total_cost == pytest.approx(
+        256 * route.output_usd_per_million / 1_000_000
+    )
+
+
 def test_plan_identity_and_reservation_include_100k_load_target(route) -> None:
     large = replace(route, context_tokens=131_072, max_output_tokens=65_536)
     aimd = {
