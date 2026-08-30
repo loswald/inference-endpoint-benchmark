@@ -280,8 +280,6 @@ def selected_capacity_cells(
     ]
 NATIVE_PLACEHOLDER_ADAPTERS = frozenset(
     {
-        "bedrock_native",
-        "vertex_native",
         "azure_model_inference_native",
     }
 )

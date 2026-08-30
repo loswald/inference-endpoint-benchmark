@@ -16,12 +16,12 @@ from inference_bench.workloads import plan_static_suites
 
 def test_native_stub_is_honestly_labelled(route) -> None:
     stub = RouteConfig(
-        id="bedrock",
-        provider="amazon-bedrock",
-        adapter="bedrock_native",
+        id="azure",
+        provider="azure-ai-foundry",
+        adapter="azure_model_inference_native",
         model="exact-model",
         base_url="native-sdk",
-        auth=AuthConfig(env="AWS_ACCESS_KEY_ID"),
+        auth=AuthConfig(env="AZURE_INFERENCE_CREDENTIAL"),
         input_usd_per_million=1,
         output_usd_per_million=1,
     )
@@ -37,8 +37,8 @@ def test_native_stub_is_honestly_labelled(route) -> None:
         routes=(stub,),
         suites={"latency": {"enabled": True, "repeats": 1, "shapes": ["short_short"]}},
     )
-    assert build_plan(config).native_placeholder_routes == ("bedrock",)
-    assert isinstance(adapter_for("bedrock_native"), FailClosedAdapter)
+    assert build_plan(config).native_placeholder_routes == ("azure",)
+    assert isinstance(adapter_for("azure_model_inference_native"), FailClosedAdapter)
 
 
 def test_vertex_openai_uses_refreshable_oauth_adapter(route) -> None:

@@ -10,6 +10,7 @@ from .base import (
     register_adapter,
     validate_adapter_route,
 )
+from .bedrock_converse import BedrockConverseAdapter
 from .openai_compatible import OpenAICompatibleAdapter
 from .providers import (
     AlibabaModelStudioAdapter,
@@ -21,6 +22,7 @@ from .providers import (
     OpenRouterAdapter,
     VertexOpenAIAdapter,
 )
+from .vertex_native import VertexNativeAdapter
 
 __all__ = [
     "AlibabaModelStudioAdapter",
@@ -33,10 +35,12 @@ __all__ = [
     "AzureResponsesAdapter",
     "BedrockMantleAdapter",
     "BedrockMantleResponsesAdapter",
+    "BedrockConverseAdapter",
     "OpenAICompatibleAdapter",
     "OpenRouterAdapter",
     "PreparedRequest",
     "VertexOpenAIAdapter",
+    "VertexNativeAdapter",
     "adapter_for",
     "adapter_plugin",
     "available_adapters",

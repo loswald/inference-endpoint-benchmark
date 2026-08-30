@@ -138,6 +138,7 @@ def _register_builtins() -> None:
     global _BUILTINS_REGISTERED
     if _BUILTINS_REGISTERED:
         return
+    from .bedrock_converse import BedrockConverseAdapter
     from .openai_compatible import OpenAICompatibleAdapter
     from .providers import (
         AlibabaModelStudioAdapter,
@@ -149,6 +150,7 @@ def _register_builtins() -> None:
         OpenRouterAdapter,
         VertexOpenAIAdapter,
     )
+    from .vertex_native import VertexNativeAdapter
 
     version = "0.1.0"
     builtins: tuple[AdapterPlugin, ...] = (
@@ -203,18 +205,25 @@ def _register_builtins() -> None:
             "vertex_openai", version, ("chat_completions",), "http_json", VertexOpenAIAdapter
         ),
         AdapterPlugin(
+            "bedrock_converse",
+            version,
+            ("converse",),
+            "native",
+            BedrockConverseAdapter,
+        ),
+        AdapterPlugin(
             "bedrock_native",
             version,
-            ("chat_completions",),
+            ("converse",),
             "native",
-            lambda **_: FailClosedAdapter("bedrock_native"),
+            BedrockConverseAdapter,
         ),
         AdapterPlugin(
             "vertex_native",
             version,
-            ("chat_completions",),
+            ("chat_completions", "generate_content"),
             "native",
-            lambda **_: FailClosedAdapter("vertex_native"),
+            VertexNativeAdapter,
         ),
         AdapterPlugin(
             "azure_model_inference_native",

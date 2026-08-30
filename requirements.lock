@@ -1,6 +1,7 @@
 # Enforced, hash-bound runtime dependency closure. Live runs and reports fail unless every listed
 # distribution is installed at this exact version. Regenerate deliberately after dependency review.
 anyio==4.14.1
+botocore==1.43.78
 certifi==2026.6.17
 charset-normalizer==3.4.9
 cffi==2.1.0
@@ -16,6 +17,7 @@ httpcore==1.0.9
 httpx==0.28.1
 hyperframe==6.1.0
 idna==3.18
+jmespath==1.1.0
 kiwisolver==1.5.0
 matplotlib==3.11.0
 numpy==2.4.6

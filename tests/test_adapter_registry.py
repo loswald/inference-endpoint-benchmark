@@ -89,9 +89,11 @@ def test_builtin_registry_contains_every_supported_provider_transport() -> None:
         "openai_compatible",
         "bedrock_mantle",
         "bedrock_mantle_responses",
+        "bedrock_converse",
         "azure_model_inference",
         "azure_responses",
         "vertex_openai",
+        "vertex_native",
         "openrouter",
     } <= set(available_adapters())
 

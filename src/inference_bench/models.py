@@ -170,6 +170,8 @@ PROVIDER_DEFAULT_REASONING_BUDGET = "provider_default"
 _REASONING_CONTROL_FIELDS_BY_API_FAMILY = {
     "chat_completions": frozenset({"reasoning_effort", "verbosity"}),
     "responses": frozenset({"reasoning.effort", "text.verbosity"}),
+    "converse": frozenset({"outputConfig.effort"}),
+    "generate_content": frozenset({"thinkingConfig.thinkingLevel"}),
 }
 
 
