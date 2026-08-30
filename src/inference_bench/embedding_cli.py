@@ -26,9 +26,19 @@ def _parser() -> argparse.ArgumentParser:
     plan = commands.add_parser("plan", help="compile a credential-free embedding request plan")
     plan.add_argument("profile", type=Path)
     plan.add_argument("--output", type=Path, required=True)
+    canary_plan = commands.add_parser(
+        "plan-canary", help="compile an exact one-request route-admission plan"
+    )
+    canary_plan.add_argument("profile", type=Path)
+    canary_plan.add_argument("--output", type=Path, required=True)
     run = commands.add_parser("run", help="run or safely resume an embedding benchmark")
     run.add_argument("profile", type=Path)
     run.add_argument("--output-dir", type=Path, required=True)
+    canary = commands.add_parser(
+        "canary", help="run or safely resume one exact route-admission request"
+    )
+    canary.add_argument("profile", type=Path)
+    canary.add_argument("--output-dir", type=Path, required=True)
     report = commands.add_parser("report", help="rebuild reports from plan and receipt journal")
     report.add_argument("output_dir", type=Path)
     return parser
@@ -36,15 +46,17 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    if args.command == "plan":
+    if args.command in {"plan", "plan-canary"}:
         config = load_embedding_config(args.profile)
-        plan = write_embedding_plan(config, args.output)
+        plan_kind = "canary" if args.command == "plan-canary" else "benchmark"
+        plan = write_embedding_plan(config, args.output, plan_kind=plan_kind)
         print(
             json.dumps(
                 {
                     "plan": str(args.output),
                     "campaign_identity_sha256": plan.campaign_identity_sha256,
                     "route_identity_sha256": plan.route_identity_sha256,
+                    "plan_kind": plan.plan_kind,
                     "request_count": len(plan.requests),
                     "worst_case_cost_usd": plan.worst_case_cost_usd,
                 },
@@ -52,9 +64,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         )
         return 0
-    if args.command == "run":
+    if args.command in {"run", "canary"}:
+        plan_kind = "canary" if args.command == "canary" else "benchmark"
         report = asyncio.run(
-            run_embedding_campaign(load_embedding_config(args.profile), args.output_dir)
+            run_embedding_campaign(
+                load_embedding_config(args.profile),
+                args.output_dir,
+                plan_kind=plan_kind,
+            )
         )
     else:
         report = write_embedding_report(args.output_dir)

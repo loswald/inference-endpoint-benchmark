@@ -10,7 +10,7 @@ import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
@@ -71,6 +71,7 @@ _CAPABILITY_KEYS = {
     "repeatability_cosine_minimum",
     "long_input_fraction",
 }
+EmbeddingPlanKind = Literal["benchmark", "canary"]
 
 
 def _utc_now() -> str:
@@ -352,8 +353,38 @@ def plan_embedding_requests(route: EmbeddingRouteConfig) -> tuple[EmbeddingReque
     return tuple(specs)
 
 
+def plan_embedding_canary(route: EmbeddingRouteConfig) -> tuple[EmbeddingRequestSpec, ...]:
+    """Plan one receipt-backed, privacy-safe route-admission request.
+
+    Admission is deliberately a distinct cell and logical ID from the full benchmark. A canary
+    therefore cannot be mistaken for benchmark coverage or replayed later as a suite request.
+    """
+
+    short = "Portable embedding admission canary: verify this exact governed native route."
+    return (
+        _spec(
+            route,
+            "admission-canary",
+            (short,),
+            16,
+            dimensions=route.capabilities.default_dimensions,
+        ),
+    )
+
+
+def _embedding_request_specs(
+    route: EmbeddingRouteConfig, plan_kind: EmbeddingPlanKind
+) -> tuple[EmbeddingRequestSpec, ...]:
+    if plan_kind == "benchmark":
+        return plan_embedding_requests(route)
+    if plan_kind == "canary":
+        return plan_embedding_canary(route)
+    raise ValueError("embedding plan kind must be 'benchmark' or 'canary'")
+
+
 @dataclass(frozen=True, slots=True)
 class EmbeddingPlan:
+    plan_kind: EmbeddingPlanKind
     campaign_identity_sha256: str
     route_identity_sha256: str
     adapter_identity: dict[str, Any]
@@ -365,6 +396,7 @@ class EmbeddingPlan:
     def public_dict(self) -> dict[str, Any]:
         return {
             "schema": "embedding-plan/v1",
+            "plan_kind": self.plan_kind,
             "campaign_identity_sha256": self.campaign_identity_sha256,
             "route_identity_sha256": self.route_identity_sha256,
             "adapter_identity": self.adapter_identity,
@@ -382,8 +414,10 @@ class EmbeddingPlan:
         }
 
 
-def build_embedding_plan(config: EmbeddingCampaignConfig) -> EmbeddingPlan:
-    specs = plan_embedding_requests(config.route)
+def build_embedding_plan(
+    config: EmbeddingCampaignConfig, *, plan_kind: EmbeddingPlanKind = "benchmark"
+) -> EmbeddingPlan:
+    specs = _embedding_request_specs(config.route, plan_kind)
     rows: list[dict[str, Any]] = []
     cost = 0.0
     for spec in specs:
@@ -422,6 +456,7 @@ def build_embedding_plan(config: EmbeddingCampaignConfig) -> EmbeddingPlan:
             f"embedding plan worst-case cost ${cost:.6f} exceeds cap ${config.max_cost_usd:.6f}"
         )
     return EmbeddingPlan(
+        plan_kind=plan_kind,
         campaign_identity_sha256=config.identity_hash,
         route_identity_sha256=config.route.identity_hash,
         adapter_identity=embedding_adapter_plugin(config.route.adapter).public_identity(),
@@ -498,9 +533,11 @@ async def run_embedding_campaign(
     output_dir: str | Path,
     *,
     adapter: EmbeddingAdapter | None = None,
+    plan_kind: EmbeddingPlanKind = "benchmark",
 ) -> dict[str, Any]:
     output = Path(output_dir)
-    plan = build_embedding_plan(config)
+    specs = _embedding_request_specs(config.route, plan_kind)
+    plan = build_embedding_plan(config, plan_kind=plan_kind)
     output.mkdir(parents=True, exist_ok=True)
     plan_path = output / "embedding-plan.json"
     if plan_path.exists():
@@ -591,7 +628,7 @@ async def run_embedding_campaign(
             if not explicitly_retryable:
                 return
 
-    await asyncio.gather(*(execute(spec) for spec in plan_embedding_requests(config.route)))
+    await asyncio.gather(*(execute(spec) for spec in specs))
     await implementation.close()
     report = build_embedding_report(plan.public_dict(), journal.rows())
     _atomic_json(output / "embedding-report.json", report)
@@ -705,6 +742,7 @@ def build_embedding_report(
         state_counts[row["state"]] = state_counts.get(row["state"], 0) + 1
     return {
         "schema": "embedding-report/v1",
+        "plan_kind": plan.get("plan_kind", "benchmark"),
         "campaign_identity_sha256": plan.get("campaign_identity_sha256"),
         "route_identity_sha256": plan.get("route_identity_sha256"),
         "generated_at_utc": _utc_now(),
@@ -719,12 +757,21 @@ def build_embedding_report(
 
 
 def render_embedding_report_markdown(report: dict[str, Any]) -> str:
+    canary = report.get("plan_kind") == "canary"
     lines = [
-        "# Text-embedding endpoint benchmark",
+        "# Text-embedding route admission canary"
+        if canary
+        else "# Text-embedding endpoint benchmark",
         "",
-        "This report tests the embedding API itself: accepted input shapes, documented limits, "
-        "returned vector dimensions and norms, usage accounting, and same-request repeatability. "
-        "It stores neither input text nor embedding vectors.",
+        (
+            "This one-request report admits only the exact model, API family, location, and "
+            "transport named by its hash-bound profile. It is not benchmark coverage. It stores "
+            "neither input text nor embedding vectors."
+            if canary
+            else "This report tests the embedding API itself: accepted input shapes, documented "
+            "limits, returned vector dimensions and norms, usage accounting, and same-request "
+            "repeatability. It stores neither input text nor embedding vectors."
+        ),
         "",
         f"Planned cells: {report['planned_cells']}. Conservative settled exposure: "
         f"${report['settled_cost_usd']:.6f}.",
@@ -764,8 +811,13 @@ def render_embedding_report_markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def write_embedding_plan(config: EmbeddingCampaignConfig, path: str | Path) -> EmbeddingPlan:
-    plan = build_embedding_plan(config)
+def write_embedding_plan(
+    config: EmbeddingCampaignConfig,
+    path: str | Path,
+    *,
+    plan_kind: EmbeddingPlanKind = "benchmark",
+) -> EmbeddingPlan:
+    plan = build_embedding_plan(config, plan_kind=plan_kind)
     _atomic_json(Path(path), plan.public_dict())
     return plan
 
@@ -799,6 +851,7 @@ __all__ = [
     "embedding_config_from_mapping",
     "embedding_request_id",
     "load_embedding_config",
+    "plan_embedding_canary",
     "plan_embedding_requests",
     "render_embedding_report_markdown",
     "run_embedding_campaign",

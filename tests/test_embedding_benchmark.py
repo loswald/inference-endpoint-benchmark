@@ -14,6 +14,7 @@ from inference_bench.embedding_benchmark import (
     build_embedding_plan,
     embedding_config_from_mapping,
     load_embedding_config,
+    plan_embedding_canary,
     plan_embedding_requests,
     run_embedding_campaign,
 )
@@ -145,6 +146,21 @@ def test_embedding_plan_covers_limits_batches_unicode_invalids_and_privacy() -> 
     }
     assert all(len(row["wire_body_sha256"]) == 64 for row in plan["requests"])
     assert all(len(row["bound_payload_sha256"]) == 64 for row in plan["requests"])
+
+
+def test_embedding_canary_is_one_distinct_privacy_safe_admission_request() -> None:
+    config = embedding_config_from_mapping(_profile())
+    specs = plan_embedding_canary(config.route)
+    assert len(specs) == 1
+    assert specs[0].cell_id == "admission-canary"
+    assert specs[0].logical_id not in {
+        spec.logical_id for spec in plan_embedding_requests(config.route)
+    }
+    plan = build_embedding_plan(config, plan_kind="canary").public_dict()
+    assert plan["plan_kind"] == "canary"
+    assert plan["request_count"] == 1
+    assert plan["requests"][0]["cell_id"] == "admission-canary"
+    assert "Portable embedding admission canary" not in json.dumps(plan)
 
 
 def test_adapter_sends_exact_prepared_bytes_and_retains_no_vectors_or_text(
@@ -292,3 +308,40 @@ def test_plan_run_receipts_report_and_resume_are_complete_and_privacy_safe(
     assert "test-only-secret" not in public_artifacts
     assert '"embedding":[' not in public_artifacts
     assert "not_run" not in first["state_counts"]
+
+
+def test_canary_run_sends_exactly_one_request_and_resumes_without_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = embedding_config_from_mapping(_profile())
+    monkeypatch.setenv("FICTIONAL_EMBEDDING_API_KEY", "test-only-secret")
+    sends = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal sends
+        sends += 1
+        return httpx.Response(
+            200,
+            json={
+                "data": [{"index": 0, "embedding": [1.0, 0.0, 0.0]}],
+                "usage": {"prompt_tokens": 8, "total_tokens": 8},
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    adapter = OpenAICompatibleEmbeddingsAdapter(client=client)
+    first = asyncio.run(
+        run_embedding_campaign(config, tmp_path, adapter=adapter, plan_kind="canary")
+    )
+    second = asyncio.run(
+        run_embedding_campaign(config, tmp_path, adapter=adapter, plan_kind="canary")
+    )
+    asyncio.run(client.aclose())
+
+    assert sends == 1
+    assert first["plan_kind"] == second["plan_kind"] == "canary"
+    assert first["planned_cells"] == 1
+    assert first["state_counts"] == {"passed": 1}
+    assert "not benchmark coverage" in (tmp_path / "embedding-report.md").read_text(
+        encoding="utf-8"
+    )
