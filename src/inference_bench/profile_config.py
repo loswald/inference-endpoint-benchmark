@@ -8,13 +8,20 @@ The layer deliberately has two small, strict YAML contracts:
     (the provider's route catalog).  Catalog rows require ``id`` and may override defaults.
     ``provider`` is injected uniformly and therefore cannot be repeated in route mappings.
 
+``provider-profile/v2``
+    Retains the v1 route configuration and adds a strict catalog freshness declaration plus
+    per-route lifecycle, benchmark-role, and live-admission metadata.  A selected v2 route must
+    be current, released, not retired or superseded, explicitly admitted by live evidence, and
+    drawn from a catalog that is fresh at the experiment's deterministic ``as_of_utc``.
+
 ``benchmark-experiment/v1``
     ``schema`` (exact string), ``campaign`` (the normal campaign mapping), ``suites`` (the
     normal suite mapping), optional ``route_selection`` with ``include``/``exclude`` ID lists,
-    optional ``provider_route_overrides`` keyed by provider identity, and optional
-    ``route_overrides`` keyed by catalog route ID.  Overrides cannot change route identity fields
-    ``id`` or ``provider``.  Provider-scoped overrides let one portable experiment tighten a
-    transport timeout without mutating the reusable provider catalog.
+    optional ``provider_route_overrides`` keyed by provider identity, optional
+    ``route_overrides`` keyed by catalog route ID, and optional UTC-aware ``as_of_utc`` (required
+    for provider-profile/v2).  Overrides cannot change route identity fields ``id`` or
+    ``provider``.  Provider-scoped overrides let one portable experiment tighten a transport
+    timeout without mutating the reusable provider catalog.
 
 Composition uses the precedence ``profile defaults < catalog row < provider experiment override
 < exact-route experiment override``.
@@ -31,6 +38,7 @@ import copy
 import hashlib
 import os
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -46,11 +54,14 @@ from .config import (
 from .models import sha256_json
 
 PROVIDER_PROFILE_SCHEMA = "provider-profile/v1"
+PROVIDER_PROFILE_SCHEMA_V2 = "provider-profile/v2"
 EXPERIMENT_PROFILE_SCHEMA = "benchmark-experiment/v1"
 
-_PROVIDER_PROFILE_KEYS = {"schema", "provider", "route_defaults", "routes"}
+_PROVIDER_PROFILE_V1_KEYS = {"schema", "provider", "route_defaults", "routes"}
+_PROVIDER_PROFILE_V2_KEYS = _PROVIDER_PROFILE_V1_KEYS | {"catalog"}
 _EXPERIMENT_PROFILE_KEYS = {
     "schema",
+    "as_of_utc",
     "campaign",
     "route_selection",
     "provider_route_overrides",
@@ -66,6 +77,50 @@ _NESTED_ROUTE_FIELDS = {
     "reasoning_controls",
 }
 _PROFILE_CONTROLLED_ROUTE_FIELDS = {"id", "provider"}
+_V2_ROUTE_METADATA_FIELDS = {"lifecycle", "role", "live_admission"}
+_CATALOG_KEYS = {
+    "documentation_checked_at_utc",
+    "revalidated_at_utc",
+    "freshness_window_days",
+}
+_LIFECYCLE_KEYS = {
+    "stage",
+    "status",
+    "released_at_utc",
+    "retirement_at_utc",
+    "superseded_by",
+}
+_LIVE_ADMISSION_KEYS = {
+    "status",
+    "verified_at_utc",
+    "evidence_sha256",
+    "reason",
+}
+_LIFECYCLE_STAGES = frozenset({"ga", "preview", "private_preview", "experimental"})
+_LIFECYCLE_STATUSES = frozenset({"current", "superseded", "retired"})
+_ROUTE_ROLES = frozenset({"primary", "preview", "control"})
+_LIVE_ADMISSION_STATUSES = frozenset(
+    {"live_proved", "unverified", "live_failed", "excluded"}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _CatalogFreshness:
+    documentation_checked_at_utc: datetime
+    revalidated_at_utc: datetime
+    freshness_window_days: int
+
+
+@dataclass(frozen=True, slots=True)
+class _RouteAdmission:
+    stage: str
+    lifecycle_status: str
+    released_at_utc: datetime
+    retirement_at_utc: datetime | None
+    superseded_by: str | None
+    role: str
+    live_status: str
+    live_verified_at_utc: datetime | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,8 +151,18 @@ def compose_profile_config(
 ) -> ProfileCompilation:
     """Compile two parsed profile mappings into one validated campaign configuration."""
 
-    _reject_unknown("provider profile", provider_profile, _PROVIDER_PROFILE_KEYS)
-    _require_schema(provider_profile, PROVIDER_PROFILE_SCHEMA, "provider profile")
+    provider_schema = provider_profile.get("schema")
+    if provider_schema == PROVIDER_PROFILE_SCHEMA:
+        _reject_unknown("provider profile", provider_profile, _PROVIDER_PROFILE_V1_KEYS)
+        catalog_freshness = None
+    elif provider_schema == PROVIDER_PROFILE_SCHEMA_V2:
+        _reject_unknown("provider profile", provider_profile, _PROVIDER_PROFILE_V2_KEYS)
+        catalog_freshness = _parse_catalog_freshness(provider_profile.get("catalog"))
+    else:
+        raise ValueError(
+            "provider profile.schema must be exactly "
+            f"{PROVIDER_PROFILE_SCHEMA!r} or {PROVIDER_PROFILE_SCHEMA_V2!r}"
+        )
     provider = _nonempty_string(provider_profile.get("provider"), "provider profile.provider")
 
     route_defaults = _mapping(
@@ -113,17 +178,34 @@ def compose_profile_config(
         raise ValueError("provider profile.routes must be a nonempty list")
 
     catalog: dict[str, dict[str, Any]] = {}
+    route_admissions: dict[str, _RouteAdmission] = {}
     for index, raw_route in enumerate(raw_routes):
-        route = _mapping(raw_route, f"provider profile.routes[{index}]")
+        route_scope = f"provider profile.routes[{index}]"
+        route = _mapping(raw_route, route_scope)
+        if provider_schema == PROVIDER_PROFILE_SCHEMA_V2:
+            _reject_unknown(
+                route_scope,
+                route,
+                set(ROUTE_CONFIG_KEYS) | _V2_ROUTE_METADATA_FIELDS,
+            )
+            route_config = {
+                key: value for key, value in route.items() if key not in _V2_ROUTE_METADATA_FIELDS
+            }
+            admission = _parse_route_admission(route, route_scope)
+        else:
+            route_config = route
+            admission = None
         _validate_route_fields(
-            route,
-            f"provider profile.routes[{index}]",
+            route_config,
+            route_scope,
             forbidden={"provider"},
         )
-        route_id = _nonempty_string(route.get("id"), f"provider profile.routes[{index}].id")
+        route_id = _nonempty_string(route_config.get("id"), f"{route_scope}.id")
         if route_id in catalog:
             raise ValueError(f"duplicate provider profile route ID: {route_id}")
-        catalog[route_id] = route
+        catalog[route_id] = route_config
+        if admission is not None:
+            route_admissions[route_id] = admission
 
     # A provider profile is an admitted catalog, not a bag of fragments.  Validate every route,
     # including routes that a particular experiment does not select, so stale or malformed catalog
@@ -136,6 +218,17 @@ def compose_profile_config(
 
     _reject_unknown("experiment profile", experiment_profile, _EXPERIMENT_PROFILE_KEYS)
     _require_schema(experiment_profile, EXPERIMENT_PROFILE_SCHEMA, "experiment profile")
+    raw_as_of_utc = experiment_profile.get("as_of_utc")
+    as_of_utc = (
+        None
+        if raw_as_of_utc is None
+        else _utc_datetime(raw_as_of_utc, "experiment profile.as_of_utc")
+    )
+    if provider_schema == PROVIDER_PROFILE_SCHEMA_V2:
+        if as_of_utc is None:
+            raise ValueError("experiment profile.as_of_utc is required for provider-profile/v2")
+        assert catalog_freshness is not None
+        _require_fresh_catalog(catalog_freshness, as_of_utc)
     campaign = _mapping(experiment_profile.get("campaign"), "experiment profile.campaign")
     suites = _mapping(experiment_profile.get("suites"), "experiment profile.suites")
     if not suites:
@@ -163,6 +256,10 @@ def compose_profile_config(
     selected_ids = sorted(include_set - exclude_set)
     if not selected_ids:
         raise ValueError("route selection produced no routes")
+    if provider_schema == PROVIDER_PROFILE_SCHEMA_V2:
+        assert as_of_utc is not None
+        for route_id in selected_ids:
+            _require_route_admitted(route_id, route_admissions[route_id], as_of_utc)
 
     overrides = _mapping(
         experiment_profile.get("route_overrides", {}),
@@ -271,6 +368,154 @@ def compile_profile_files(
     return compilation
 
 
+def _parse_catalog_freshness(value: Any) -> _CatalogFreshness:
+    scope = "provider profile.catalog"
+    catalog = _mapping(value, scope)
+    _reject_unknown(scope, catalog, _CATALOG_KEYS)
+    documentation_checked_at_utc = _utc_datetime(
+        catalog.get("documentation_checked_at_utc"),
+        f"{scope}.documentation_checked_at_utc",
+    )
+    revalidated_at_utc = _utc_datetime(
+        catalog.get("revalidated_at_utc"),
+        f"{scope}.revalidated_at_utc",
+    )
+    freshness_window_days = catalog.get("freshness_window_days")
+    if (
+        isinstance(freshness_window_days, bool)
+        or not isinstance(freshness_window_days, int)
+        or freshness_window_days <= 0
+    ):
+        raise ValueError(f"{scope}.freshness_window_days must be a positive integer")
+    if revalidated_at_utc < documentation_checked_at_utc:
+        raise ValueError(
+            f"{scope}.revalidated_at_utc cannot precede documentation_checked_at_utc"
+        )
+    return _CatalogFreshness(
+        documentation_checked_at_utc=documentation_checked_at_utc,
+        revalidated_at_utc=revalidated_at_utc,
+        freshness_window_days=freshness_window_days,
+    )
+
+
+def _parse_route_admission(route: dict[str, Any], scope: str) -> _RouteAdmission:
+    lifecycle_scope = f"{scope}.lifecycle"
+    lifecycle = _mapping(route.get("lifecycle"), lifecycle_scope)
+    _reject_unknown(lifecycle_scope, lifecycle, _LIFECYCLE_KEYS)
+    stage = _enum_string(
+        lifecycle.get("stage"), f"{lifecycle_scope}.stage", _LIFECYCLE_STAGES
+    )
+    lifecycle_status = _enum_string(
+        lifecycle.get("status"),
+        f"{lifecycle_scope}.status",
+        _LIFECYCLE_STATUSES,
+    )
+    released_at_utc = _utc_datetime(
+        lifecycle.get("released_at_utc"), f"{lifecycle_scope}.released_at_utc"
+    )
+    retirement_value = lifecycle.get("retirement_at_utc")
+    retirement_at_utc = (
+        None
+        if retirement_value is None
+        else _utc_datetime(retirement_value, f"{lifecycle_scope}.retirement_at_utc")
+    )
+    if retirement_at_utc is not None and retirement_at_utc <= released_at_utc:
+        raise ValueError(f"{lifecycle_scope}.retirement_at_utc must follow released_at_utc")
+
+    superseded_value = lifecycle.get("superseded_by")
+    superseded_by = (
+        None
+        if superseded_value is None
+        else _nonempty_string(superseded_value, f"{lifecycle_scope}.superseded_by")
+    )
+    if lifecycle_status == "superseded" and superseded_by is None:
+        raise ValueError(f"{lifecycle_scope}.superseded_by is required when status is superseded")
+    if lifecycle_status != "superseded" and superseded_by is not None:
+        raise ValueError(
+            f"{lifecycle_scope}.superseded_by is only valid when status is superseded"
+        )
+    if lifecycle_status == "retired" and retirement_at_utc is None:
+        raise ValueError(f"{lifecycle_scope}.retirement_at_utc is required when status is retired")
+
+    role = _enum_string(route.get("role"), f"{scope}.role", _ROUTE_ROLES)
+    live_scope = f"{scope}.live_admission"
+    live = _mapping(route.get("live_admission"), live_scope)
+    _reject_unknown(live_scope, live, _LIVE_ADMISSION_KEYS)
+    live_status = _enum_string(
+        live.get("status"), f"{live_scope}.status", _LIVE_ADMISSION_STATUSES
+    )
+    verified_value = live.get("verified_at_utc")
+    live_verified_at_utc = (
+        None
+        if verified_value is None
+        else _utc_datetime(verified_value, f"{live_scope}.verified_at_utc")
+    )
+    evidence_value = live.get("evidence_sha256")
+    reason_value = live.get("reason")
+    if live_status == "live_proved":
+        if live_verified_at_utc is None:
+            raise ValueError(
+                f"{live_scope}.verified_at_utc is required when status is live_proved"
+            )
+        _sha256(evidence_value, f"{live_scope}.evidence_sha256")
+        if reason_value is not None:
+            _nonempty_string(reason_value, f"{live_scope}.reason")
+    else:
+        if live_verified_at_utc is not None or evidence_value is not None:
+            raise ValueError(
+                f"{live_scope} cannot claim verification evidence when status is {live_status}"
+            )
+        _nonempty_string(reason_value, f"{live_scope}.reason")
+    if live_verified_at_utc is not None and live_verified_at_utc < released_at_utc:
+        raise ValueError(f"{live_scope}.verified_at_utc cannot precede route release")
+
+    return _RouteAdmission(
+        stage=stage,
+        lifecycle_status=lifecycle_status,
+        released_at_utc=released_at_utc,
+        retirement_at_utc=retirement_at_utc,
+        superseded_by=superseded_by,
+        role=role,
+        live_status=live_status,
+        live_verified_at_utc=live_verified_at_utc,
+    )
+
+
+def _require_fresh_catalog(catalog: _CatalogFreshness, as_of_utc: datetime) -> None:
+    if catalog.documentation_checked_at_utc > as_of_utc:
+        raise ValueError("provider profile catalog documentation timestamp is after as_of_utc")
+    if catalog.revalidated_at_utc > as_of_utc:
+        raise ValueError("provider profile catalog revalidation timestamp is after as_of_utc")
+    maximum_age = timedelta(days=catalog.freshness_window_days)
+    if as_of_utc - catalog.revalidated_at_utc > maximum_age:
+        raise ValueError(
+            "stale catalog: provider profile revalidation exceeds its freshness window at "
+            "experiment profile.as_of_utc"
+        )
+
+
+def _require_route_admitted(
+    route_id: str, admission: _RouteAdmission, as_of_utc: datetime
+) -> None:
+    if admission.released_at_utc > as_of_utc:
+        raise ValueError(f"selected route {route_id!r} is not released as of as_of_utc")
+    if admission.lifecycle_status == "retired":
+        raise ValueError(f"selected route {route_id!r} is retired")
+    if admission.lifecycle_status == "superseded":
+        raise ValueError(
+            f"selected route {route_id!r} is superseded by {admission.superseded_by!r}"
+        )
+    if admission.retirement_at_utc is not None and admission.retirement_at_utc <= as_of_utc:
+        raise ValueError(f"selected route {route_id!r} is retired as of as_of_utc")
+    if admission.live_status == "excluded":
+        raise ValueError(f"selected route {route_id!r} is explicitly excluded")
+    if admission.live_status != "live_proved":
+        raise ValueError(f"selected route {route_id!r} is not live-proved")
+    assert admission.live_verified_at_utc is not None
+    if admission.live_verified_at_utc > as_of_utc:
+        raise ValueError(f"selected route {route_id!r} has live proof after as_of_utc")
+
+
 def _merge_route_layers(*layers: dict[str, Any]) -> dict[str, Any]:
     merged: dict[str, Any] = {}
     for layer in layers:
@@ -317,6 +562,32 @@ def _nonempty_string(value: Any, field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field_name} must be a nonempty string")
     return value
+
+
+def _enum_string(value: Any, field_name: str, allowed: frozenset[str]) -> str:
+    parsed = _nonempty_string(value, field_name)
+    if parsed not in allowed:
+        raise ValueError(f"{field_name} must be one of: {', '.join(sorted(allowed))}")
+    return parsed
+
+
+def _utc_datetime(value: Any, field_name: str) -> datetime:
+    raw = _nonempty_string(value, field_name)
+    candidate = f"{raw[:-1]}+00:00" if raw.endswith("Z") else raw
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+        raise ValueError(f"{field_name} must be timezone-aware UTC")
+    return parsed.astimezone(UTC)
+
+
+def _sha256(value: Any, field_name: str) -> str:
+    digest = _nonempty_string(value, field_name)
+    if len(digest) != 64 or any(character not in "0123456789abcdefABCDEF" for character in digest):
+        raise ValueError(f"{field_name} must be a 64-character SHA-256 digest")
+    return digest.lower()
 
 
 def _require_schema(values: dict[str, Any], expected: str, scope: str) -> None:
