@@ -432,11 +432,19 @@ def _parse_usage(value: Any) -> VertexUsage:
     prompt = _count(value.get("promptTokenCount"), "input_tokens", errors)
     tool_prompt = _count(value.get("toolUsePromptTokenCount"), "input_tokens", errors)
     candidates = _count(value.get("candidatesTokenCount"), "output_tokens", errors)
-    thoughts = _count(value.get("thoughtsTokenCount"), "reasoning_tokens", errors)
+    # Vertex omits the output-only field when no thinking tokens were generated.  Treat that
+    # documented absence as zero so visible-output limits remain observable; a present malformed
+    # field still fails closed below.
+    thoughts_present = "thoughtsTokenCount" in value
+    thoughts = (
+        _count(value.get("thoughtsTokenCount"), "reasoning_tokens", errors)
+        if thoughts_present
+        else 0
+    )
     cached = _count(value.get("cachedContentTokenCount"), "cache_read_input_tokens", errors)
     total = _count(value.get("totalTokenCount"), "total_tokens", errors)
     tool_prompt_invalid = value.get("toolUsePromptTokenCount") is not None and tool_prompt is None
-    thoughts_invalid = value.get("thoughtsTokenCount") is not None and thoughts is None
+    thoughts_invalid = thoughts_present and thoughts is None
     input_tokens = (
         None if prompt is None or tool_prompt_invalid else prompt + (tool_prompt or 0)
     )

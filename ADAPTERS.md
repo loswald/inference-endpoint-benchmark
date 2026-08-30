@@ -80,6 +80,12 @@ never loads credentials. `vertex_embed_content` uses one Content per HTTP reques
 the native API; the embedding planner therefore records two separately receipted calls for exact
 cross-request repeatability instead of pretending that a provider-side batch exists.
 
+For native Gemini generation, `maxOutputTokens` limits candidate text while
+`usageMetadata.thoughtsTokenCount` is a separate billed component. Profiles that permit thinking
+therefore declare `output_limit_scope: visible_text`, a conservative
+`reasoning_reservation_tokens`, and a measured provider-token tolerance. When Vertex omits the
+optional thought count, the adapter records zero; a present malformed count still fails closed.
+
 ## Adding a provider-native API
 
 Add a native adapter only when it exposes a workload the compatible API cannot represent. A useful

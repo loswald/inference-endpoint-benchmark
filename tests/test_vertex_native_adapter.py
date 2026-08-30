@@ -12,6 +12,7 @@ from inference_bench.adapters import adapter_for, adapter_plugin
 from inference_bench.adapters.vertex_native import (
     VERTEX_NATIVE_PAYLOAD_GENERATOR_VERSION,
     VertexNativeAdapter,
+    _parse_usage,
 )
 from inference_bench.config import NATIVE_PLACEHOLDER_ADAPTERS
 from inference_bench.models import (
@@ -90,6 +91,22 @@ def _adapter(
         ),
         credentials,
     )
+
+
+def test_vertex_native_absent_thought_count_means_zero_not_unobservable() -> None:
+    usage = _parse_usage(
+        {
+            "promptTokenCount": 8,
+            "candidatesTokenCount": 4,
+            "totalTokenCount": 12,
+        }
+    )
+
+    assert usage.errors == ()
+    assert usage.input_tokens == 8
+    assert usage.output_tokens == 4
+    assert usage.reasoning_tokens == 0
+    assert usage.total_tokens == 12
 
 
 def test_vertex_native_materializes_canonical_multimodal_tool_schema_and_thinking() -> None:
