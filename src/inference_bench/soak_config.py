@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -11,6 +12,14 @@ import yaml
 from .config import load_config
 
 CAPACITY_SHAPES = ("short_short", "long_short", "short_long", "mixed")
+ROUTE_PROFILE_SCHEMA = "inference-bench-route-profile-overrides/v1"
+ROUTE_PROFILE_FIELDS = frozenset(
+    {
+        "output_limit_scope",
+        "output_limit_tolerance_tokens",
+        "reasoning_reservation_tokens",
+    }
+)
 
 
 def _positive_number(value: str | None) -> float | None:
@@ -20,12 +29,58 @@ def _positive_number(value: str | None) -> float | None:
     return number if math.isfinite(number) and number > 0 else None
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _load_route_profile_overrides(
+    path: Path | None, route_ids: set[str]
+) -> dict[str, dict[str, Any]]:
+    if path is None:
+        return {}
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict) or raw.get("schema") != ROUTE_PROFILE_SCHEMA:
+        raise ValueError(f"route profile overrides require schema={ROUTE_PROFILE_SCHEMA}")
+    unknown_top_level = set(raw) - {"schema", "routes"}
+    if unknown_top_level:
+        raise ValueError(
+            "route profile overrides contain unknown top-level fields: "
+            + ", ".join(sorted(unknown_top_level))
+        )
+    routes = raw.get("routes")
+    if not isinstance(routes, dict) or not routes:
+        raise ValueError("route profile overrides require a nonempty routes mapping")
+    unknown_routes = set(routes) - route_ids
+    if unknown_routes:
+        raise ValueError(
+            "route profile overrides name unknown routes: "
+            + ", ".join(sorted(unknown_routes))
+        )
+    overrides: dict[str, dict[str, Any]] = {}
+    for route_id, values in routes.items():
+        if not isinstance(values, dict) or not values:
+            raise ValueError(f"route profile override for {route_id} must be a nonempty mapping")
+        unknown_fields = set(values) - ROUTE_PROFILE_FIELDS
+        if unknown_fields:
+            raise ValueError(
+                f"route profile override for {route_id} contains unsupported fields: "
+                + ", ".join(sorted(unknown_fields))
+            )
+        overrides[str(route_id)] = dict(values)
+    return overrides
+
+
 def derive_soak_config(
     source_config: Path,
     controller_summary: Path,
     output: Path,
     *,
     fallback_rps: float | None = None,
+    route_profile_overrides: Path | None = None,
 ) -> Path:
     """Create a soak-only campaign from observed AIMD endpoint/workload bounds.
 
@@ -41,6 +96,9 @@ def derive_soak_config(
     if not isinstance(raw, dict):
         raise ValueError("source configuration must contain a mapping")
     validated = load_config(source_config)
+    overrides = _load_route_profile_overrides(
+        route_profile_overrides, {route.id for route in validated.routes}
+    )
     aimd = validated.suites.get("aimd")
     if not aimd or not aimd.get("enabled", True):
         raise ValueError("source configuration does not enable AIMD")
@@ -122,16 +180,34 @@ def derive_soak_config(
         raise ValueError("source configuration must contain campaign")
     campaign["name"] = f"{campaign.get('name', 'campaign')}-soak"
 
+    raw_routes = raw.get("routes")
+    if not isinstance(raw_routes, list):
+        raise ValueError("source configuration must contain a routes list")
+    for route in raw_routes:
+        if not isinstance(route, dict) or not isinstance(route.get("id"), str):
+            raise ValueError("source configuration contains an invalid route mapping")
+        route.update(overrides.get(route["id"], {}))
+
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
-    load_config(output)
+    derived = load_config(output)
     provenance_path = output.with_suffix(".rates.json")
     provenance_path.write_text(
         json.dumps(
             {
                 "schema": "inference-bench-soak-rates/v1",
                 "source_config": str(source_config),
+                "source_config_sha256": _sha256_file(source_config),
+                "source_campaign_identity_sha256": validated.identity_hash,
                 "controller_summary": str(controller_summary),
+                "controller_summary_sha256": _sha256_file(controller_summary),
+                "route_profile_overrides": overrides,
+                "route_profile_overrides_sha256": (
+                    _sha256_file(route_profile_overrides)
+                    if route_profile_overrides is not None
+                    else None
+                ),
+                "derived_campaign_identity_sha256": derived.identity_hash,
                 "cells": provenance,
             },
             indent=2,

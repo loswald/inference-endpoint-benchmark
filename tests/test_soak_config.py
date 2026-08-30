@@ -107,6 +107,12 @@ def test_derive_soak_config_copies_observed_cell_rate(tmp_path: Path, route) -> 
     assert soak["rate_rps_by_route_shape"][route_id]["mixed"] == 2.5
     provenance = json.loads(output.with_suffix(".rates.json").read_text(encoding="utf-8"))
     assert {cell["basis"] for cell in provenance["cells"]} == {"observed_aimd_healthy_lower_bound"}
+    assert provenance["source_campaign_identity_sha256"] == load_config(source).identity_hash
+    assert len(provenance["source_config_sha256"]) == 64
+    assert len(provenance["controller_summary_sha256"]) == 64
+    assert provenance["route_profile_overrides"] == {}
+    assert provenance["route_profile_overrides_sha256"] is None
+    assert provenance["derived_campaign_identity_sha256"] == loaded.identity_hash
 
 
 def test_derive_soak_requires_explicit_fallback_for_missing_bound(tmp_path: Path, route) -> None:
@@ -126,3 +132,70 @@ def test_derive_soak_requires_explicit_fallback_for_missing_bound(tmp_path: Path
     assert {cell["basis"] for cell in provenance["cells"]} == {
         "explicit_exploratory_fallback_no_healthy_aimd_bound"
     }
+
+
+def test_derive_soak_applies_typed_route_profile_with_identity_provenance(
+    tmp_path: Path, route
+) -> None:
+    source = _write_config(tmp_path, route)
+    source_config = load_config(source)
+    route_id = source_config.routes[0].id
+    summary = tmp_path / "controller-summary.csv"
+    _controller_csv(summary, route_id)
+    profile = tmp_path / "route-profile.yaml"
+    profile.write_text(
+        yaml.safe_dump(
+            {
+                "schema": "inference-bench-route-profile-overrides/v1",
+                "routes": {
+                    route_id: {
+                        "output_limit_scope": "visible_text",
+                        "output_limit_tolerance_tokens": 32,
+                        "reasoning_reservation_tokens": 4096,
+                    }
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "soak-profiled.yaml"
+
+    derive_soak_config(source, summary, output, route_profile_overrides=profile)
+
+    loaded = load_config(output)
+    configured = loaded.routes[0]
+    assert configured.output_limit_scope == "visible_text"
+    assert configured.output_limit_tolerance_tokens == 32
+    assert configured.reasoning_reservation_tokens == 4096
+    provenance = json.loads(output.with_suffix(".rates.json").read_text(encoding="utf-8"))
+    assert provenance["source_campaign_identity_sha256"] == source_config.identity_hash
+    assert provenance["derived_campaign_identity_sha256"] == loaded.identity_hash
+    assert provenance["derived_campaign_identity_sha256"] != source_config.identity_hash
+    assert provenance["route_profile_overrides"][route_id]["output_limit_scope"] == "visible_text"
+    assert len(provenance["route_profile_overrides_sha256"]) == 64
+
+
+def test_derive_soak_rejects_unsupported_route_profile_field(tmp_path: Path, route) -> None:
+    source = _write_config(tmp_path, route)
+    route_id = load_config(source).routes[0].id
+    summary = tmp_path / "controller-summary.csv"
+    _controller_csv(summary, route_id)
+    profile = tmp_path / "route-profile.yaml"
+    profile.write_text(
+        yaml.safe_dump(
+            {
+                "schema": "inference-bench-route-profile-overrides/v1",
+                "routes": {route_id: {"base_url": "https://example.invalid"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="unsupported fields: base_url"):
+        derive_soak_config(
+            source,
+            summary,
+            tmp_path / "blocked.yaml",
+            route_profile_overrides=profile,
+        )

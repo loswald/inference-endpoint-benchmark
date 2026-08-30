@@ -19,6 +19,13 @@ from inference_bench.profile_config import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _canonical_text_sha256(path: Path) -> str:
+    """Hash repository text independently of the checkout's newline convention."""
+
+    normalized = path.read_text(encoding="utf-8").replace("\r\n", "\n")
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
 def _provider_profile() -> dict[str, object]:
     return {
         "schema": "provider-profile/v1",
@@ -249,7 +256,7 @@ def test_public_alibaba_profile_compiles_without_resolving_credentials(tmp_path:
         ROOT / "docs" / "provider-contracts" / "alibaba-model-studio-2026-08-29.yaml"
     )
     assert all(
-        route.evidence_bundle_sha256 == hashlib.sha256(contract_path.read_bytes()).hexdigest()
+        route.evidence_bundle_sha256 == _canonical_text_sha256(contract_path)
         for route in routes.values()
     )
 
@@ -293,7 +300,7 @@ def test_public_azure_foundry_profile_is_exactly_the_five_live_proved_text_route
     assert all("embedding" not in route.model.casefold() for route in routes.values())
 
     evidence = ROOT / "docs" / "provider-contracts" / "azure-ai-foundry-eastus2-2026-08-29.yaml"
-    evidence_sha = hashlib.sha256(evidence.read_bytes()).hexdigest()
+    evidence_sha = _canonical_text_sha256(evidence)
     assert all(route.evidence_bundle_sha256 == evidence_sha for route in routes.values())
 
 
@@ -327,7 +334,7 @@ def test_public_bedrock_profile_is_the_one_exact_live_proved_mantle_route(
     contract_path = (
         ROOT / "docs" / "provider-contracts" / "amazon-bedrock-mantle-glm47-flash-2026-08-29.yaml"
     )
-    assert route.evidence_bundle_sha256 == hashlib.sha256(contract_path.read_bytes()).hexdigest()
+    assert route.evidence_bundle_sha256 == _canonical_text_sha256(contract_path)
 
     provider = yaml.safe_load(provider_path.read_text(encoding="utf-8"))
     experiment = {
@@ -385,7 +392,7 @@ def test_public_vertex_profile_is_the_exact_live_proved_global_openai_route(
     assert route.input_usd_per_million == 0.75
     assert route.cached_input_usd_per_million == 0.075
     assert route.output_usd_per_million == 3.75
-    assert route.evidence_bundle_sha256 == hashlib.sha256(contract_path.read_bytes()).hexdigest()
+    assert route.evidence_bundle_sha256 == _canonical_text_sha256(contract_path)
 
     provider = yaml.safe_load(provider_path.read_text(encoding="utf-8"))
     experiment = {

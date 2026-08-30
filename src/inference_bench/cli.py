@@ -1157,6 +1157,14 @@ def _parser() -> argparse.ArgumentParser:
     derive_soak.add_argument("controller_summary", type=Path)
     derive_soak.add_argument("--output", type=Path, required=True)
     derive_soak.add_argument("--fallback-rps", type=float)
+    derive_soak.add_argument(
+        "--route-profile-overrides",
+        type=Path,
+        help=(
+            "apply a typed, identity-bound route profile while retaining the exact AIMD "
+            "configuration as the rate-evidence source"
+        ),
+    )
     digitalocean = sub.add_parser(
         "report-digitalocean-summary",
         help="render a clean atlas from a sanitized DigitalOcean direct summary package",
@@ -1270,6 +1278,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.controller_summary,
                 args.output,
                 fallback_rps=args.fallback_rps,
+                route_profile_overrides=args.route_profile_overrides,
             )
         )
         return 0
