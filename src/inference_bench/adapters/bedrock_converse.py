@@ -612,8 +612,20 @@ class BedrockConverseAdapter:
                                 status, error_kind = "rate_limited", "provider_rate_limit"
                             elif kind == "validationException":
                                 status, error_kind = "client_error", "provider_route_fatal"
+                            elif kind == "internalServerException":
+                                status, error_kind = "server_error", "provider_internal_error"
+                            elif kind == "modelStreamErrorException":
+                                status, error_kind = (
+                                    "server_error",
+                                    "provider_model_stream_error",
+                                )
+                            elif kind == "serviceUnavailableException":
+                                status, error_kind = (
+                                    "server_error",
+                                    "provider_service_unavailable",
+                                )
                             else:
-                                status, error_kind = "server_error", "protocol_error"
+                                status, error_kind = "server_error", "provider_stream_error"
                             return InferenceResult(
                                 logical_id=request.logical_id,
                                 status=status,  # type: ignore[arg-type]

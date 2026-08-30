@@ -429,6 +429,55 @@ def test_stream_crc_failure_is_protocol_error(monkeypatch) -> None:
     assert "invalid_aws_event_stream" in str(result.error_kind)
 
 
+@pytest.mark.parametrize(
+    ("event_type", "expected_status", "expected_error_kind"),
+    [
+        ("throttlingException", "rate_limited", "provider_rate_limit"),
+        ("validationException", "client_error", "provider_route_fatal"),
+        ("internalServerException", "server_error", "provider_internal_error"),
+        (
+            "modelStreamErrorException",
+            "server_error",
+            "provider_model_stream_error",
+        ),
+        (
+            "serviceUnavailableException",
+            "server_error",
+            "provider_service_unavailable",
+        ),
+    ],
+)
+def test_stream_provider_exceptions_keep_provider_semantics_without_content(
+    monkeypatch,
+    event_type: str,
+    expected_status: str,
+    expected_error_kind: str,
+) -> None:
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "fixture-token")
+    wire = _event(event_type, {"message": "private provider detail"})
+
+    async def handler(incoming: httpx.Request) -> httpx.Response:
+        del incoming
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/vnd.amazon.eventstream"},
+            stream=_Chunks([wire]),
+        )
+
+    async def run() -> object:
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        adapter = BedrockConverseAdapter(client=client)
+        result = await adapter.infer(_route(), _request(stream=True))
+        await client.aclose()
+        return result
+
+    result = asyncio.run(run())
+    assert result.status == expected_status
+    assert result.error_kind == expected_error_kind
+    assert result.error_body_sha256 is not None
+    assert "private provider detail" not in str(result.without_content())
+
+
 def test_stream_timeout_closes_transport_and_cancellation_propagates(monkeypatch) -> None:
     monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "fixture-token")
     route = _route()
