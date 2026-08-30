@@ -1,4 +1,4 @@
-"""OpenAI-compatible text-embedding transport with a privacy-safe result boundary."""
+"""Typed embedding transports with a shared privacy-safe result boundary."""
 
 from __future__ import annotations
 
@@ -6,9 +6,10 @@ import asyncio
 import hashlib
 import math
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import httpx
 
@@ -71,7 +72,14 @@ class EmbeddingAdapterPlugin:
     id: str
     version: str
     api_family: str
+    input_cardinality: Literal["one", "one_or_many"]
     factory: EmbeddingAdapterFactory = field(repr=False, compare=False)
+    materializer: Callable[
+        [EmbeddingRouteConfig, EmbeddingRequestSpec], MaterializedPayload
+    ] = field(repr=False, compare=False)
+    route_validator: Callable[[EmbeddingRouteConfig], None] = field(
+        repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         if not self.id or not self.id.replace("_", "").replace("-", "").isalnum():
@@ -80,8 +88,11 @@ class EmbeddingAdapterPlugin:
             raise ValueError("embedding adapter version is required")
         if self.api_family != EMBEDDING_API_FAMILY:
             raise ValueError("embedding adapter plugins require api_family=embeddings")
-        if not callable(self.factory):
-            raise TypeError("embedding adapter factory must be callable")
+        if self.input_cardinality not in {"one", "one_or_many"}:
+            raise ValueError("embedding adapter input_cardinality must be one or one_or_many")
+        for name in ("factory", "materializer", "route_validator"):
+            if not callable(getattr(self, name)):
+                raise TypeError(f"embedding adapter {name} must be callable")
 
     def public_identity(self) -> dict[str, Any]:
         value = {
@@ -89,8 +100,16 @@ class EmbeddingAdapterPlugin:
             "id": self.id,
             "version": self.version,
             "api_family": self.api_family,
+            "input_cardinality": self.input_cardinality,
         }
         return {**value, "identity_sha256": sha256_json(value)}
+
+    def validate_route(self, route: EmbeddingRouteConfig) -> None:
+        if route.adapter != self.id:
+            raise ValueError("embedding adapter plugin does not match route adapter")
+        if route.api_family != self.api_family:
+            raise ValueError("embedding adapter API family does not match route")
+        self.route_validator(route)
 
 
 _EMBEDDING_ADAPTERS: dict[str, EmbeddingAdapterPlugin] = {}
@@ -116,8 +135,7 @@ def embedding_adapter_plugin(adapter_id: str) -> EmbeddingAdapterPlugin:
 
 def embedding_adapter_for(route: EmbeddingRouteConfig) -> EmbeddingAdapter:
     plugin = embedding_adapter_plugin(route.adapter)
-    if plugin.api_family != route.api_family:
-        raise ValueError("embedding adapter API family does not match route")
+    plugin.validate_route(route)
     adapter = plugin.factory(
         http2=route.http2,
         connection_reuse=route.connection_reuse,
@@ -127,6 +145,14 @@ def embedding_adapter_for(route: EmbeddingRouteConfig) -> EmbeddingAdapter:
         if not callable(getattr(adapter, method, None)):
             raise TypeError(f"embedding adapter is missing required method {method}")
     return adapter
+
+
+def materialize_embedding_request_for(
+    route: EmbeddingRouteConfig, request: EmbeddingRequestSpec
+) -> MaterializedPayload:
+    plugin = embedding_adapter_plugin(route.adapter)
+    plugin.validate_route(route)
+    return plugin.materializer(route, request)
 
 
 def build_embedding_payload(
@@ -169,6 +195,16 @@ def materialize_embedding_request(
     )
 
 
+def validate_openai_compatible_embedding_route(route: EmbeddingRouteConfig) -> None:
+    from urllib.parse import urlsplit
+
+    path = urlsplit(route.base_url).path.rstrip("/").casefold()
+    if not path.endswith("/embeddings"):
+        raise ValueError(
+            "openai_compatible_embeddings requires a canonical /embeddings action URL"
+        )
+
+
 def _count(value: object, field_name: str, errors: list[str]) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         errors.append(f"{field_name}_invalid")
@@ -177,11 +213,108 @@ def _count(value: object, field_name: str, errors: list[str]) -> int | None:
 
 
 def _provider_request_id_sha256(headers: httpx.Headers) -> str | None:
-    for name in ("x-request-id", "request-id", "x-ms-request-id", "openai-request-id"):
+    for name in (
+        "x-request-id",
+        "request-id",
+        "x-ms-request-id",
+        "openai-request-id",
+        "x-goog-request-id",
+    ):
         value = headers.get(name)
         if value:
             return hashlib.sha256(value.encode("utf-8")).hexdigest()
     return None
+
+
+def validate_embedding_vectors(
+    route: EmbeddingRouteConfig,
+    request: EmbeddingRequestSpec,
+    indexed_vectors: list[tuple[object, object]],
+) -> tuple[
+    tuple[EmbeddingVectorObservation, ...],
+    tuple[EmbeddingRepeatabilityObservation, ...],
+    tuple[str, ...],
+]:
+    """Validate vectors without retaining their values beyond the transient call boundary."""
+
+    errors: list[str] = []
+    observations: list[EmbeddingVectorObservation] = []
+    transient_vectors: dict[int, list[float]] = {}
+    seen_indices: set[int] = set()
+    expected_dimensions = request.dimensions or route.capabilities.default_dimensions
+    for raw_index, raw_vector in indexed_vectors:
+        if isinstance(raw_index, bool) or not isinstance(raw_index, int) or raw_index < 0:
+            errors.append("embedding_index_invalid")
+            continue
+        if raw_index in seen_indices:
+            errors.append("embedding_index_duplicate")
+            continue
+        seen_indices.add(raw_index)
+        if not isinstance(raw_vector, list) or not raw_vector:
+            errors.append("embedding_vector_missing_or_empty")
+            continue
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            for value in raw_vector
+        ):
+            errors.append("embedding_vector_nonfinite_or_nonnumeric")
+            continue
+        vector = [float(value) for value in raw_vector]
+        norm = math.sqrt(sum(value * value for value in vector))
+        if not math.isfinite(norm) or norm <= 0:
+            errors.append("embedding_vector_zero_or_invalid_norm")
+        if len(vector) != expected_dimensions:
+            errors.append("embedding_dimension_mismatch")
+        transient_vectors[raw_index] = vector
+        observations.append(
+            EmbeddingVectorObservation(
+                index=raw_index,
+                dimensions=len(vector),
+                l2_norm=norm,
+                vector_sha256=canonical_vector_sha256(vector),
+            )
+        )
+    if seen_indices != set(range(len(request.inputs))):
+        errors.append("embedding_indices_not_contiguous")
+
+    repeatability: list[EmbeddingRepeatabilityObservation] = []
+    for left, right in request.repeatability_pairs:
+        left_vector = transient_vectors.get(left)
+        right_vector = transient_vectors.get(right)
+        if left_vector is None or right_vector is None or len(left_vector) != len(right_vector):
+            errors.append("repeatability_pair_unavailable")
+            continue
+        left_norm = math.sqrt(sum(value * value for value in left_vector))
+        right_norm = math.sqrt(sum(value * value for value in right_vector))
+        if left_norm <= 0 or right_norm <= 0:
+            cosine = 0.0
+        else:
+            cosine = sum(a * b for a, b in zip(left_vector, right_vector, strict=True)) / (
+                left_norm * right_norm
+            )
+            cosine = max(-1.0, min(1.0, cosine))
+        max_difference = max(
+            abs(a - b) for a, b in zip(left_vector, right_vector, strict=True)
+        )
+        passed = cosine >= route.capabilities.repeatability_cosine_minimum
+        if not passed:
+            errors.append("repeatability_cosine_below_contract")
+        repeatability.append(
+            EmbeddingRepeatabilityObservation(
+                left_index=left,
+                right_index=right,
+                cosine_similarity=cosine,
+                max_absolute_difference=max_difference,
+                passed=passed,
+            )
+        )
+    return (
+        tuple(sorted(observations, key=lambda item: item.index)),
+        tuple(repeatability),
+        tuple(dict.fromkeys(errors)),
+    )
 
 
 class OpenAICompatibleEmbeddingsAdapter:
@@ -208,6 +341,7 @@ class OpenAICompatibleEmbeddingsAdapter:
         )
 
     def preflight(self, route: EmbeddingRouteConfig) -> None:
+        validate_openai_compatible_embedding_route(route)
         if not self._provided_client and (
             route.http2 != self.http2
             or route.connection_reuse != self.connection_reuse
@@ -325,84 +459,18 @@ class OpenAICompatibleEmbeddingsAdapter:
             errors.append("data_missing_or_invalid")
         if len(raw_data) != len(request.inputs):
             errors.append("embedding_count_mismatch")
-
-        observations: list[EmbeddingVectorObservation] = []
-        transient_vectors: dict[int, list[float]] = {}
-        seen_indices: set[int] = set()
-        expected_dimensions = request.dimensions or route.capabilities.default_dimensions
+        indexed_vectors: list[tuple[object, object]] = []
         for position, raw_item in enumerate(raw_data):
             if not isinstance(raw_item, dict):
                 errors.append("embedding_item_not_object")
                 continue
-            index = raw_item.get("index", position)
-            if isinstance(index, bool) or not isinstance(index, int) or index < 0:
-                errors.append("embedding_index_invalid")
-                continue
-            if index in seen_indices:
-                errors.append("embedding_index_duplicate")
-                continue
-            seen_indices.add(index)
-            raw_vector = raw_item.get("embedding")
-            if not isinstance(raw_vector, list) or not raw_vector:
-                errors.append("embedding_vector_missing_or_empty")
-                continue
-            if any(
-                isinstance(value, bool)
-                or not isinstance(value, (int, float))
-                or not math.isfinite(float(value))
-                for value in raw_vector
-            ):
-                errors.append("embedding_vector_nonfinite_or_nonnumeric")
-                continue
-            vector = [float(value) for value in raw_vector]
-            norm = math.sqrt(sum(value * value for value in vector))
-            if not math.isfinite(norm) or norm <= 0:
-                errors.append("embedding_vector_zero_or_invalid_norm")
-            if len(vector) != expected_dimensions:
-                errors.append("embedding_dimension_mismatch")
-            transient_vectors[index] = vector
-            observations.append(
-                EmbeddingVectorObservation(
-                    index=index,
-                    dimensions=len(vector),
-                    l2_norm=norm,
-                    vector_sha256=canonical_vector_sha256(vector),
-                )
+            indexed_vectors.append(
+                (raw_item.get("index", position), raw_item.get("embedding"))
             )
-        if seen_indices != set(range(len(request.inputs))):
-            errors.append("embedding_indices_not_contiguous")
-
-        repeatability: list[EmbeddingRepeatabilityObservation] = []
-        for left, right in request.repeatability_pairs:
-            left_vector = transient_vectors.get(left)
-            right_vector = transient_vectors.get(right)
-            if left_vector is None or right_vector is None or len(left_vector) != len(right_vector):
-                errors.append("repeatability_pair_unavailable")
-                continue
-            left_norm = math.sqrt(sum(value * value for value in left_vector))
-            right_norm = math.sqrt(sum(value * value for value in right_vector))
-            if left_norm <= 0 or right_norm <= 0:
-                cosine = 0.0
-            else:
-                cosine = sum(a * b for a, b in zip(left_vector, right_vector, strict=True)) / (
-                    left_norm * right_norm
-                )
-                cosine = max(-1.0, min(1.0, cosine))
-            max_difference = max(
-                abs(a - b) for a, b in zip(left_vector, right_vector, strict=True)
-            )
-            passed = cosine >= route.capabilities.repeatability_cosine_minimum
-            if not passed:
-                errors.append("repeatability_cosine_below_contract")
-            repeatability.append(
-                EmbeddingRepeatabilityObservation(
-                    left_index=left,
-                    right_index=right,
-                    cosine_similarity=cosine,
-                    max_absolute_difference=max_difference,
-                    passed=passed,
-                )
-            )
+        observations, repeatability, vector_errors = validate_embedding_vectors(
+            route, request, indexed_vectors
+        )
+        errors.extend(vector_errors)
 
         return EmbeddingResult(
             logical_id=request.logical_id,
@@ -411,24 +479,45 @@ class OpenAICompatibleEmbeddingsAdapter:
             total_seconds=elapsed,
             prompt_tokens=prompt_tokens,
             total_tokens=total_tokens,
-            vectors=tuple(sorted(observations, key=lambda item: item.index)),
-            repeatability=tuple(repeatability),
+            vectors=observations,
+            repeatability=repeatability,
             validation_errors=tuple(dict.fromkeys(errors)),
             provider_request_id_sha256=provider_id,
         )
 
 
 def _register_builtin() -> None:
-    if EMBEDDING_ADAPTER_ID in _EMBEDDING_ADAPTERS:
-        return
-    register_embedding_adapter(
-        EmbeddingAdapterPlugin(
-            id=EMBEDDING_ADAPTER_ID,
-            version="builtin/v1",
-            api_family=EMBEDDING_API_FAMILY,
-            factory=OpenAICompatibleEmbeddingsAdapter,
+    if EMBEDDING_ADAPTER_ID not in _EMBEDDING_ADAPTERS:
+        register_embedding_adapter(
+            EmbeddingAdapterPlugin(
+                id=EMBEDDING_ADAPTER_ID,
+                version="builtin/v1",
+                api_family=EMBEDDING_API_FAMILY,
+                input_cardinality="one_or_many",
+                factory=OpenAICompatibleEmbeddingsAdapter,
+                materializer=materialize_embedding_request,
+                route_validator=validate_openai_compatible_embedding_route,
+            )
         )
+    from ..embedding_models import VERTEX_EMBED_CONTENT_ADAPTER_ID
+    from .vertex_embeddings import (
+        VertexEmbedContentAdapter,
+        materialize_vertex_embed_content,
+        validate_vertex_embed_content_route,
     )
+
+    if VERTEX_EMBED_CONTENT_ADAPTER_ID not in _EMBEDDING_ADAPTERS:
+        register_embedding_adapter(
+            EmbeddingAdapterPlugin(
+                id=VERTEX_EMBED_CONTENT_ADAPTER_ID,
+                version="builtin/v1",
+                api_family=EMBEDDING_API_FAMILY,
+                input_cardinality="one",
+                factory=VertexEmbedContentAdapter,
+                materializer=materialize_vertex_embed_content,
+                route_validator=validate_vertex_embed_content_route,
+            )
+        )
 
 
 __all__ = [
@@ -440,5 +529,8 @@ __all__ = [
     "embedding_adapter_for",
     "embedding_adapter_plugin",
     "materialize_embedding_request",
+    "materialize_embedding_request_for",
     "register_embedding_adapter",
+    "validate_embedding_vectors",
+    "validate_openai_compatible_embedding_route",
 ]

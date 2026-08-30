@@ -5,15 +5,12 @@ import base64
 import copy
 import hashlib
 import math
-import os
 import re
-import threading
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
@@ -24,9 +21,9 @@ from ..models import InferenceResult, RequestSpec, RouteConfig, canonical_json
 from ..payload import MaterializedPayload, payload_binding_sha256
 from ..workloads import materialize_messages
 from .base import PreparedRequest
+from .google_oauth import GoogleOAuthBearer
 
 VERTEX_NATIVE_PAYLOAD_GENERATOR_VERSION = "vertex-native-generate-content/v1"
-_SCOPES = ("https://www.googleapis.com/auth/cloud-platform",)
 _ACTION_PATH = re.compile(
     r"^/v1/projects/(?P<project>[^/]+)/locations/(?P<location>[^/]+)/"
     r"publishers/google/models/(?P<model>[^/:]+):generateContent$"
@@ -706,11 +703,11 @@ class VertexNativeAdapter:
         self.transport_max_connections = transport_max_connections
         self._provided_client = client is not None
         self.client = client
-        self._injected_credentials = credentials
-        self._credential_loader = credential_loader or self._load_credentials
-        self._auth_request_factory = auth_request_factory
-        self._credentials_by_env: dict[str, Any] = {}
-        self._credential_lock = threading.Lock()
+        self._oauth = GoogleOAuthBearer(
+            credentials=credentials,
+            credential_loader=credential_loader,  # type: ignore[arg-type]
+            auth_request_factory=auth_request_factory,
+        )
         if self.client is None and self.connection_reuse:
             self.client = self._new_client()
 
@@ -728,70 +725,11 @@ class VertexNativeAdapter:
         if self.client is not None and not self._provided_client:
             await self.client.aclose()
 
-    @staticmethod
-    def _load_credentials(route: RouteConfig) -> Any:
-        try:
-            import google.auth
-            from google.oauth2 import service_account
-        except ImportError as exc:  # pragma: no cover - installation preflight
-            raise RuntimeError("Vertex native support requires google-auth") from exc
-        configured = os.environ.get(route.auth.env)
-        if configured:
-            path = Path(configured).expanduser()
-            if not path.is_file():
-                raise RuntimeError(
-                    f"{route.auth.env} must name a readable service-account JSON file"
-                )
-            return service_account.Credentials.from_service_account_file(
-                str(path), scopes=_SCOPES
-            )
-        credentials, _ = google.auth.default(scopes=_SCOPES)
-        return credentials
-
-    def _credentials(self, route: RouteConfig) -> Any:
-        if self._injected_credentials is not None:
-            return self._injected_credentials
-        if route.auth.env not in self._credentials_by_env:
-            self._credentials_by_env[route.auth.env] = self._credential_loader(route)
-        return self._credentials_by_env[route.auth.env]
-
-    def _auth_request(self) -> Any:
-        if self._auth_request_factory is not None:
-            return self._auth_request_factory()
-        try:
-            from google.auth.transport.requests import Request
-        except ImportError as exc:  # pragma: no cover - installation preflight
-            raise RuntimeError("Vertex native support requires google-auth") from exc
-        return Request()
-
     def _headers(self, route: RouteConfig, *, stream: bool) -> dict[str, str]:
-        credentials = self._credentials(route)
-        token = getattr(credentials, "token", None)
-        if not bool(getattr(credentials, "valid", False)) or not token:
-            with self._credential_lock:
-                token = getattr(credentials, "token", None)
-                if not bool(getattr(credentials, "valid", False)) or not token:
-                    credentials.refresh(self._auth_request())
-                    token = getattr(credentials, "token", None)
-        if not isinstance(token, str) or not token:
-            raise RuntimeError("Google OAuth refresh did not produce an access token")
-        headers = {
-            **route.extra_headers,
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "Accept-Encoding": "identity",
-            "Accept": "text/event-stream" if stream else "application/json",
-        }
-        if any(
-            any(character in name or character in value for character in "\r\n\0")
-            for name, value in headers.items()
-        ):
-            raise RuntimeError("constructed Vertex headers contain prohibited control characters")
-        try:
-            httpx.Headers(headers)
-        except (TypeError, ValueError) as exc:
-            raise RuntimeError("constructed Vertex headers are invalid") from exc
-        return headers
+        return self._oauth.headers(
+            route,
+            accept="text/event-stream" if stream else "application/json",
+        )
 
     @staticmethod
     def _validate_action(route: RouteConfig) -> None:

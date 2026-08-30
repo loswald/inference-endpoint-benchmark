@@ -14,6 +14,8 @@ They do not change the workload, retry policy, AIMD controller, statistics, or r
 | `azure_model_inference` / `azure_openai` | Chat Completions | `api-key` or bearer | Azure Foundry/OpenAI host and exact chat path |
 | `azure_responses` | Responses | `api-key` or bearer | Azure host and exact Responses path |
 | `vertex_openai` | Chat Completions | service-account file or ADC | renewable OAuth and Google API host |
+| `vertex_native` | `generateContent` / `streamGenerateContent` | service-account file or ADC | renewable OAuth, exact model/location action, native usage and cache fields |
+| `vertex_embed_content` | `embedContent` | service-account file or ADC | renewable OAuth, singleton Content requests, native dimensions/usage/truncation |
 | `openrouter` | Chat Completions | bearer token | exact upstream pin, fallbacks off, response metadata attested |
 | `openai_compatible` | Chat Completions | configurable header | generic protocol behavior only |
 
@@ -21,9 +23,10 @@ DigitalOcean currently uses `openai_compatible` plus a dated provider profile. A
 need a bespoke adapter unless it has a provider-specific authentication, routing, error, or response
 contract that the generic transport cannot express.
 
-`bedrock_native`, `vertex_native`, and `azure_model_inference_native` are explicit placeholders.
-Live preflight refuses them. The compatible transports above are real provider implementations, not
-aliases that bypass credential refresh or provider routing checks.
+`bedrock_converse` (and its compatibility name `bedrock_native`) plus `vertex_native` are live
+typed transports. `azure_model_inference_native` remains an explicit placeholder whose preflight
+fails closed. Compatible and native transports are real provider implementations, not aliases that
+bypass credential refresh or provider routing checks.
 
 ## Transport behavior
 
@@ -71,6 +74,11 @@ unverified router path.
 variable when present. Otherwise it uses Google Application Default Credentials. Short-lived OAuth
 tokens are refreshed before the request is admitted, so a multi-hour run does not depend on a
 pasted access token.
+
+The same credential component is shared by `vertex_native` and `vertex_embed_content`. Planning
+never loads credentials. `vertex_embed_content` uses one Content per HTTP request, as required by
+the native API; the embedding planner therefore records two separately receipted calls for exact
+cross-request repeatability instead of pretending that a provider-side batch exists.
 
 ## Adding a provider-native API
 

@@ -19,7 +19,10 @@ from .models import AuthConfig, canonical_json, sha256_json
 
 EMBEDDING_PROFILE_SCHEMA = "embedding-benchmark/v1"
 EMBEDDING_API_FAMILY = "embeddings"
-EMBEDDING_ADAPTER_ID = "openai_compatible_embeddings"
+OPENAI_COMPATIBLE_EMBEDDING_ADAPTER_ID = "openai_compatible_embeddings"
+VERTEX_EMBED_CONTENT_ADAPTER_ID = "vertex_embed_content"
+# Historical public name retained for callers that import the original adapter constant.
+EMBEDDING_ADAPTER_ID = OPENAI_COMPATIBLE_EMBEDDING_ADAPTER_ID
 EMBEDDING_GENERATOR_VERSION = "openai-compatible-embeddings/v1"
 
 
@@ -50,6 +53,9 @@ class EmbeddingCapabilityContract:
     max_total_tokens_per_request: int | None = None
     empty_input: Literal["documented_invalid", "supported", "unknown"] = "documented_invalid"
     unicode_input: Literal["documented_supported", "unknown"] = "unknown"
+    over_limit_input: Literal[
+        "documented_client_error", "documented_truncate", "unknown"
+    ] = "documented_client_error"
     repeatability_cosine_minimum: float = 0.999999
     long_input_fraction: float = 0.90
 
@@ -80,6 +86,12 @@ class EmbeddingCapabilityContract:
             raise ValueError("invalid empty_input capability state")
         if self.unicode_input not in {"documented_supported", "unknown"}:
             raise ValueError("invalid unicode_input capability state")
+        if self.over_limit_input not in {
+            "documented_client_error",
+            "documented_truncate",
+            "unknown",
+        }:
+            raise ValueError("invalid over_limit_input capability state")
         cosine = _positive_number(
             self.repeatability_cosine_minimum,
             "repeatability_cosine_minimum",
@@ -100,6 +112,7 @@ class EmbeddingCapabilityContract:
             "supported_dimensions": list(self.supported_dimensions),
             "empty_input": self.empty_input,
             "unicode_input": self.unicode_input,
+            "over_limit_input": self.over_limit_input,
             "repeatability_cosine_minimum": self.repeatability_cosine_minimum,
             "long_input_fraction": self.long_input_fraction,
         }
@@ -153,22 +166,19 @@ class EmbeddingRouteConfig:
                 raise ValueError(f"embedding route {name} is required")
         if self.api_family != EMBEDDING_API_FAMILY:
             raise ValueError("embedding routes require api_family=embeddings")
-        if self.adapter != EMBEDDING_ADAPTER_ID:
-            raise ValueError(
-                "embedding routes require the typed openai_compatible_embeddings adapter"
-            )
         parsed = urlsplit(self.base_url)
         if (
             parsed.scheme != "https"
             or not parsed.hostname
             or parsed.username is not None
             or parsed.password is not None
+            or parsed.port is not None
             or parsed.fragment
             or parsed.query
-            or parsed.path.rstrip("/").casefold().endswith("/embeddings") is False
+            or not parsed.path
         ):
             raise ValueError(
-                "embedding base_url must be an absolute canonical HTTPS /embeddings endpoint"
+                "embedding base_url must be one absolute canonical HTTPS action URL"
             )
         _positive_number(self.request_timeout_seconds, "request_timeout_seconds")
         _positive_int(self.transport_max_connections, "transport_max_connections")
@@ -243,7 +253,7 @@ class EmbeddingRouteConfig:
         return input_tokens * self.input_usd_per_million / 1_000_000
 
 
-EmbeddingExpectation = Literal["success", "client_error"]
+EmbeddingExpectation = Literal["success", "client_error", "success_with_truncation"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,6 +267,8 @@ class EmbeddingRequestSpec:
     expectation: EmbeddingExpectation = "success"
     input_encoding: Literal["single_string", "string_array"] = "single_string"
     repeatability_pairs: tuple[tuple[int, int], ...] = ()
+    repeatability_group: str | None = None
+    repeatability_ordinal: int | None = None
 
     def __post_init__(self) -> None:
         if not self.logical_id or not self.route_id or not self.cell_id:
@@ -277,11 +289,19 @@ class EmbeddingRequestSpec:
             raise ValueError("planned_input_tokens must be nonnegative")
         if self.dimensions is not None:
             _positive_int(self.dimensions, "dimensions")
-        if self.expectation not in {"success", "client_error"}:
+        if self.expectation not in {"success", "client_error", "success_with_truncation"}:
             raise ValueError("invalid embedding expectation")
         for left, right in self.repeatability_pairs:
             if left == right or min(left, right) < 0 or max(left, right) >= len(self.inputs):
                 raise ValueError("repeatability pair indices must name two distinct inputs")
+        if (self.repeatability_group is None) != (self.repeatability_ordinal is None):
+            raise ValueError("repeatability_group and repeatability_ordinal must be paired")
+        if self.repeatability_group is not None:
+            if not self.repeatability_group.strip():
+                raise ValueError("repeatability_group must be nonempty")
+            _positive_int(self.repeatability_ordinal, "repeatability_ordinal")
+            if len(self.inputs) != 1:
+                raise ValueError("cross-request repeatability members require one input")
 
     @property
     def input_sha256(self) -> tuple[str, ...]:
@@ -299,6 +319,8 @@ class EmbeddingRequestSpec:
             "expectation": self.expectation,
             "input_encoding": self.input_encoding,
             "repeatability_pairs": [list(pair) for pair in self.repeatability_pairs],
+            "repeatability_group": self.repeatability_group,
+            "repeatability_ordinal": self.repeatability_ordinal,
         }
 
 
@@ -355,6 +377,7 @@ class EmbeddingResult:
     total_seconds: float
     prompt_tokens: int | None = None
     total_tokens: int | None = None
+    truncated: bool | None = None
     vectors: tuple[EmbeddingVectorObservation, ...] = ()
     repeatability: tuple[EmbeddingRepeatabilityObservation, ...] = ()
     validation_errors: tuple[str, ...] = ()
@@ -373,6 +396,7 @@ class EmbeddingResult:
             "total_seconds": self.total_seconds,
             "prompt_tokens": self.prompt_tokens,
             "total_tokens": self.total_tokens,
+            "truncated": self.truncated,
             "vectors": [value.public_dict() for value in self.vectors],
             "repeatability": [value.public_dict() for value in self.repeatability],
             "validation_errors": list(self.validation_errors),

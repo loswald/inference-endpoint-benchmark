@@ -110,7 +110,7 @@ def test_embedding_api_family_and_adapter_fail_closed_at_plan_boundary() -> None
     route = wrong_adapter["route"]
     assert isinstance(route, dict)
     route["adapter"] = "chat_adapter"
-    with pytest.raises(ValueError, match="openai_compatible_embeddings"):
+    with pytest.raises(ValueError, match="unknown embedding adapter"):
         embedding_config_from_mapping(wrong_adapter)
 
 
@@ -128,7 +128,7 @@ def test_embedding_plan_covers_limits_batches_unicode_invalids_and_privacy() -> 
         "dimensions-2",
         "invalid-empty-input",
         "invalid-batch-over-documented-max",
-        "invalid-item-over-documented-max",
+        "item-over-documented-max",
     } <= cells
     near = next(spec for spec in specs if spec.cell_id == "single-near-documented-limit")
     assert near.planned_input_tokens == 12

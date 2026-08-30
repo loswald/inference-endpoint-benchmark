@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import json
-import os
 import re
-from pathlib import Path
 from urllib.parse import urlsplit
 
 import httpx
 
 from ..models import RouteConfig
+from .google_oauth import GoogleOAuthBearer
 from .openai_compatible import OpenAICompatibleAdapter
 from .responses import ResponsesAdapter
 
@@ -244,54 +243,12 @@ class OpenRouterAdapter(OpenAICompatibleAdapter):
 class VertexOpenAIAdapter(OpenAICompatibleAdapter):
     """Vertex AI's OpenAI-compatible endpoint with refreshable Google OAuth credentials."""
 
-    _SCOPES = ("https://www.googleapis.com/auth/cloud-platform",)
-
     def __init__(self, *args, **kwargs) -> None:  # type: ignore[no-untyped-def]
         super().__init__(*args, **kwargs)
-        self._credentials = None
-
-    def _load_credentials(self, route: RouteConfig):  # type: ignore[no-untyped-def]
-        try:
-            import google.auth
-            from google.oauth2 import service_account
-        except ImportError as exc:  # pragma: no cover - exercised by installation preflight
-            raise RuntimeError(
-                "Vertex support requires the 'vertex' extra: pip install .[vertex]"
-            ) from exc
-
-        configured = os.environ.get(route.auth.env)
-        if configured:
-            path = Path(configured).expanduser()
-            if not path.is_file():
-                raise RuntimeError(
-                    f"{route.auth.env} must name a readable service-account JSON file"
-                )
-            credentials = service_account.Credentials.from_service_account_file(
-                str(path), scopes=self._SCOPES
-            )
-        else:
-            credentials, _ = google.auth.default(scopes=self._SCOPES)
-        return credentials
+        self._oauth = GoogleOAuthBearer()
 
     def headers(self, route: RouteConfig) -> dict[str, str]:
-        try:
-            from google.auth.transport.requests import Request
-        except ImportError as exc:  # pragma: no cover - exercised by installation preflight
-            raise RuntimeError(
-                "Vertex support requires the 'vertex' extra: pip install .[vertex]"
-            ) from exc
-
-        credentials = self._credentials or self._load_credentials(route)
-        if not credentials.valid or not credentials.token:
-            credentials.refresh(Request())
-        self._credentials = credentials
-        headers = {
-            "Authorization": f"Bearer {credentials.token}",
-            "Content-Type": "application/json",
-            "Accept-Encoding": "identity",
-            **route.extra_headers,
-        }
-        return headers
+        return self._oauth.headers(route, accept="application/json")
 
     def preflight(self, route: RouteConfig) -> None:
         _require_host(route, "googleapis.com")

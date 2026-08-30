@@ -18,7 +18,7 @@ from .adapters.embeddings import (
     EmbeddingAdapter,
     embedding_adapter_for,
     embedding_adapter_plugin,
-    materialize_embedding_request,
+    materialize_embedding_request_for,
 )
 from .config import load_yaml_mapping
 from .embedding_models import (
@@ -67,6 +67,7 @@ _CAPABILITY_KEYS = {
     "supported_dimensions",
     "empty_input",
     "unicode_input",
+    "over_limit_input",
     "repeatability_cosine_minimum",
     "long_input_fraction",
 }
@@ -128,6 +129,9 @@ def embedding_config_from_mapping(raw: dict[str, Any]) -> EmbeddingCampaignConfi
             supported_dimensions=tuple(dimensions),
             empty_input=capabilities.get("empty_input", "documented_invalid"),
             unicode_input=capabilities.get("unicode_input", "unknown"),
+            over_limit_input=capabilities.get(
+                "over_limit_input", "documented_client_error"
+            ),
             repeatability_cosine_minimum=capabilities.get(
                 "repeatability_cosine_minimum", 0.999999
             ),
@@ -148,8 +152,7 @@ def embedding_config_from_mapping(raw: dict[str, Any]) -> EmbeddingCampaignConfi
     # Resolve the typed plugin while still credential-free.  Unknown adapters and API-family
     # mismatches therefore fail at plan time, not after an output directory or spend claim exists.
     plugin = embedding_adapter_plugin(route_config.adapter)
-    if plugin.api_family != route_config.api_family:
-        raise ValueError("embedding adapter API family does not match route contract")
+    plugin.validate_route(route_config)
     return EmbeddingCampaignConfig(
         name=campaign.get("name"),
         route=route_config,
@@ -182,6 +185,8 @@ def _spec(
     expectation: str = "success",
     encoding: str | None = None,
     repeatability_pairs: tuple[tuple[int, int], ...] = (),
+    repeatability_group: str | None = None,
+    repeatability_ordinal: int | None = None,
 ) -> EmbeddingRequestSpec:
     material = {
         "route_identity_sha256": route.identity_hash,
@@ -190,6 +195,8 @@ def _spec(
         "planned_tokens": planned_tokens,
         "dimensions": dimensions,
         "expectation": expectation,
+        "repeatability_group": repeatability_group,
+        "repeatability_ordinal": repeatability_ordinal,
     }
     logical_id = f"embedding-{cell}-{sha256_json(material)[:16]}"
     return EmbeddingRequestSpec(
@@ -202,11 +209,14 @@ def _spec(
         expectation=expectation,  # type: ignore[arg-type]
         input_encoding=encoding or ("single_string" if len(inputs) == 1 else "string_array"),  # type: ignore[arg-type]
         repeatability_pairs=repeatability_pairs,
+        repeatability_group=repeatability_group,
+        repeatability_ordinal=repeatability_ordinal,
     )
 
 
 def plan_embedding_requests(route: EmbeddingRouteConfig) -> tuple[EmbeddingRequestSpec, ...]:
     capability = route.capabilities
+    adapter = embedding_adapter_plugin(route.adapter)
     short = "Portable embedding benchmark: semantic retrieval systems need stable vectors."
     specs: list[EmbeddingRequestSpec] = [
         _spec(route, "single-short", (short,), 16, dimensions=capability.default_dimensions),
@@ -217,16 +227,32 @@ def plan_embedding_requests(route: EmbeddingRouteConfig) -> tuple[EmbeddingReque
             24,
             dimensions=capability.default_dimensions,
         ),
-        _spec(
-            route,
-            "repeatability-pair",
-            (short, short),
-            32,
-            dimensions=capability.default_dimensions,
-            encoding="string_array",
-            repeatability_pairs=((0, 1),),
-        ),
     ]
+    if adapter.input_cardinality == "one_or_many":
+        specs.append(
+            _spec(
+                route,
+                "repeatability-pair",
+                (short, short),
+                32,
+                dimensions=capability.default_dimensions,
+                encoding="string_array",
+                repeatability_pairs=((0, 1),),
+            )
+        )
+    else:
+        for ordinal in (1, 2):
+            specs.append(
+                _spec(
+                    route,
+                    f"repeatability-call-{ordinal}",
+                    (short,),
+                    16,
+                    dimensions=capability.default_dimensions,
+                    repeatability_group="repeatability-exact-across-requests",
+                    repeatability_ordinal=ordinal,
+                )
+            )
     long_target = math.floor(
         capability.max_input_tokens_per_item * capability.long_input_fraction
     )
@@ -239,29 +265,30 @@ def plan_embedding_requests(route: EmbeddingRouteConfig) -> tuple[EmbeddingReque
             dimensions=capability.default_dimensions,
         )
     )
-    batch_sizes = sorted(
-        {
-            size
-            for size in (
-                2,
-                max(2, capability.max_batch_inputs // 2),
-                capability.max_batch_inputs,
-            )
-            if size <= capability.max_batch_inputs
-        }
-    )
-    for size in batch_sizes:
-        inputs = tuple(f"batch item {index}" for index in range(size))
-        specs.append(
-            _spec(
-                route,
-                f"batch-{size}",
-                inputs,
-                4 * size,
-                dimensions=capability.default_dimensions,
-                encoding="string_array",
-            )
+    if adapter.input_cardinality == "one_or_many":
+        batch_sizes = sorted(
+            {
+                size
+                for size in (
+                    2,
+                    max(2, capability.max_batch_inputs // 2),
+                    capability.max_batch_inputs,
+                )
+                if size <= capability.max_batch_inputs
+            }
         )
+        for size in batch_sizes:
+            inputs = tuple(f"batch item {index}" for index in range(size))
+            specs.append(
+                _spec(
+                    route,
+                    f"batch-{size}",
+                    inputs,
+                    4 * size,
+                    dimensions=capability.default_dimensions,
+                    encoding="string_array",
+                )
+            )
     minimum_dimensions = min(capability.supported_dimensions)
     if minimum_dimensions != capability.default_dimensions:
         specs.append(
@@ -284,35 +311,41 @@ def plan_embedding_requests(route: EmbeddingRouteConfig) -> tuple[EmbeddingReque
                 expectation="client_error",
             )
         )
-    over_batch = tuple(
-        f"over batch item {index}" for index in range(capability.max_batch_inputs + 1)
-    )
-    specs.append(
-        _spec(
-            route,
-            "invalid-batch-over-documented-max",
-            over_batch,
-            4 * len(over_batch),
-            dimensions=capability.default_dimensions,
-            expectation="client_error",
-            encoding="string_array",
+    if adapter.input_cardinality == "one_or_many":
+        over_batch = tuple(
+            f"over batch item {index}" for index in range(capability.max_batch_inputs + 1)
         )
-    )
-    specs.append(
-        _spec(
-            route,
-            "invalid-item-over-documented-max",
-            (
-                _token_like_text(
-                    capability.max_input_tokens_per_item + 1,
-                    f"{route.identity_hash}:over-limit",
+        specs.append(
+            _spec(
+                route,
+                "invalid-batch-over-documented-max",
+                over_batch,
+                4 * len(over_batch),
+                dimensions=capability.default_dimensions,
+                expectation="client_error",
+                encoding="string_array",
+            )
+        )
+    if capability.over_limit_input != "unknown":
+        specs.append(
+            _spec(
+                route,
+                "item-over-documented-max",
+                (
+                    _token_like_text(
+                        capability.max_input_tokens_per_item + 1,
+                        f"{route.identity_hash}:over-limit",
+                    ),
                 ),
-            ),
-            capability.max_input_tokens_per_item + 1,
-            dimensions=capability.default_dimensions,
-            expectation="client_error",
+                capability.max_input_tokens_per_item + 1,
+                dimensions=capability.default_dimensions,
+                expectation=(
+                    "client_error"
+                    if capability.over_limit_input == "documented_client_error"
+                    else "success_with_truncation"
+                ),
+            )
         )
-    )
     logical_ids = [spec.logical_id for spec in specs]
     if len(set(logical_ids)) != len(logical_ids):
         raise RuntimeError("embedding planner produced duplicate logical IDs")
@@ -325,6 +358,7 @@ class EmbeddingPlan:
     route_identity_sha256: str
     adapter_identity: dict[str, Any]
     requests: tuple[dict[str, Any], ...]
+    derived_cells: tuple[dict[str, Any], ...]
     physical_attempts_upper_bound: int
     worst_case_cost_usd: float
 
@@ -335,9 +369,11 @@ class EmbeddingPlan:
             "route_identity_sha256": self.route_identity_sha256,
             "adapter_identity": self.adapter_identity,
             "request_count": len(self.requests),
+            "derived_cell_count": len(self.derived_cells),
             "physical_attempts_upper_bound": self.physical_attempts_upper_bound,
             "worst_case_cost_usd": self.worst_case_cost_usd,
             "requests": list(self.requests),
+            "derived_cells": list(self.derived_cells),
             "privacy": {
                 "input_text_retained": False,
                 "embedding_vectors_retained": False,
@@ -351,7 +387,7 @@ def build_embedding_plan(config: EmbeddingCampaignConfig) -> EmbeddingPlan:
     rows: list[dict[str, Any]] = []
     cost = 0.0
     for spec in specs:
-        payload = materialize_embedding_request(config.route, spec)
+        payload = materialize_embedding_request_for(config.route, spec)
         reserved_tokens = payload.input_token_upper_bound
         reserved_cost = config.route.reserved_cost(reserved_tokens)
         cost += reserved_cost * (config.retries + 1)
@@ -365,6 +401,22 @@ def build_embedding_plan(config: EmbeddingCampaignConfig) -> EmbeddingPlan:
                 "reserved_cost_usd_per_attempt": reserved_cost,
             }
         )
+    repeatability_groups: dict[str, list[EmbeddingRequestSpec]] = {}
+    for spec in specs:
+        if spec.repeatability_group is not None:
+            repeatability_groups.setdefault(spec.repeatability_group, []).append(spec)
+    derived_cells: list[dict[str, Any]] = []
+    for group, members in sorted(repeatability_groups.items()):
+        ordered = sorted(members, key=lambda item: item.repeatability_ordinal or 0)
+        if len(ordered) != 2 or [item.repeatability_ordinal for item in ordered] != [1, 2]:
+            raise ValueError("cross-request repeatability groups require exactly ordinals 1 and 2")
+        derived_cells.append(
+            {
+                "cell_id": group,
+                "kind": "cross_request_exact_vector_equality",
+                "member_logical_ids": [item.logical_id for item in ordered],
+            }
+        )
     if cost > config.max_cost_usd:
         raise ValueError(
             f"embedding plan worst-case cost ${cost:.6f} exceeds cap ${config.max_cost_usd:.6f}"
@@ -374,6 +426,7 @@ def build_embedding_plan(config: EmbeddingCampaignConfig) -> EmbeddingPlan:
         route_identity_sha256=config.route.identity_hash,
         adapter_identity=embedding_adapter_plugin(config.route.adapter).public_identity(),
         requests=tuple(rows),
+        derived_cells=tuple(derived_cells),
         physical_attempts_upper_bound=len(rows) * (config.retries + 1),
         worst_case_cost_usd=cost,
     )
@@ -591,8 +644,14 @@ def build_embedding_report(
         result = settled["result"]
         if expectation == "success":
             passed = result["status"] == "success" and not result["validation_errors"]
-        else:
+        elif expectation == "client_error":
             passed = result["status"] == "client_error"
+        else:
+            passed = (
+                result["status"] == "success"
+                and not result["validation_errors"]
+                and result.get("truncated") is True
+            )
         coverage.append(
             {
                 "logical_id": logical_id,
@@ -602,6 +661,43 @@ def build_embedding_report(
                 "result": result,
                 "cost_usd": settled["cost_usd"],
                 "cost_basis": settled["cost_basis"],
+            }
+        )
+    for derived in plan.get("derived_cells", []):
+        member_ids = [str(value) for value in derived.get("member_logical_ids", [])]
+        members = [settled_by_logical.get(logical_id) for logical_id in member_ids]
+        if any(member is None for member in members):
+            state = (
+                "ambiguous_unsettled_claim"
+                if any(logical_id in ambiguous_logical for logical_id in member_ids)
+                else "not_run"
+            )
+            result = None
+        else:
+            member_results = [member["result"] for member in members if member is not None]
+            vector_hashes = [
+                result_value["vectors"][0]["vector_sha256"]
+                for result_value in member_results
+                if result_value.get("status") == "success"
+                and not result_value.get("validation_errors")
+                and len(result_value.get("vectors", [])) == 1
+            ]
+            exact_match = len(vector_hashes) == 2 and len(set(vector_hashes)) == 1
+            state = "passed" if exact_match else "measured_nonpass"
+            result = {
+                "comparison_kind": derived.get("kind"),
+                "member_count": len(member_ids),
+                "vector_hashes_equal": exact_match,
+            }
+        coverage.append(
+            {
+                "logical_id": f"derived:{derived['cell_id']}",
+                "cell_id": derived["cell_id"],
+                "expectation": "exact_vector_equality",
+                "state": state,
+                "result": result,
+                "cost_usd": None,
+                "cost_basis": "derived_from_member_requests",
             }
         )
     state_counts: dict[str, int] = {}

@@ -22,6 +22,7 @@ from .providers import (
     OpenRouterAdapter,
     VertexOpenAIAdapter,
 )
+from .vertex_embeddings import VertexEmbedContentAdapter
 from .vertex_native import VertexNativeAdapter
 
 __all__ = [
@@ -41,6 +42,7 @@ __all__ = [
     "PreparedRequest",
     "VertexOpenAIAdapter",
     "VertexNativeAdapter",
+    "VertexEmbedContentAdapter",
     "adapter_for",
     "adapter_plugin",
     "available_adapters",

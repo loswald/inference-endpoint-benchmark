@@ -21,9 +21,9 @@ than promoted to a result.
 |---|---|---|---|---|---|---|---|
 | DigitalOcean hosted open models | implemented | established | partial: 564 / 2,891 planned cells | partial: 24 / 44 repeatedly confirmed; 20 need lower-rate closure | 48 / 48 executed: 3 pass, 38 tested-rate non-pass, 3 no-valid-test | complete: 7 matched panels, 1,232 required observations | withheld pending corrected closure and graphics |
 | Alibaba Cloud Model Studio, Singapore pay-as-you-go | Chat, Responses, and embeddings implemented | established for `qwen3.8-flash` by direct and packaged-library calls; the eight-route load campaign is underway but non-terminal | not yet established by a terminal public run | underway; no terminal result published | not yet established | not yet established | not published |
-| Amazon Bedrock | Chat and Responses implemented | established for exact `zai.glm-4.7-flash` Mantle route in `us-east-1` | not yet established by a terminal public run | underway; no terminal result published | not yet established | not yet established | not published |
+| Amazon Bedrock | Chat, Responses, and native Converse implemented | established for the admitted exact native routes; comprehensive results remain non-terminal | not yet established by a terminal public run | underway; no terminal result published | not yet established | not yet established | not published |
 | Azure AI Foundry | Chat, Responses, and embeddings implemented | established for five exact text routes; embedding transport also live-proved | not yet established by a terminal public run | underway; no terminal result published | not yet established | not yet established | not published |
-| Google Vertex AI | Chat implemented | established for exact `google/gemini-3.6-flash` global OpenAI-compatible route | not yet established by a terminal public run | underway; no terminal result published | not yet established | not yet established | not published |
+| Google Vertex AI | OpenAI-compatible chat, native `generateContent`, and native `embedContent` implemented | established for five exact generation routes; Gemini Embedding 2 admission remains pending | not yet established by a terminal public run | underway; no terminal result published | not yet established | not yet established | not published |
 | OpenRouter | Chat implemented | not established by this repository package | not run here | not run here | not run here | not run here | not published |
 
 For DigitalOcean, the retained [method and data guide](reports/digitalocean/README.md) states exactly
@@ -43,9 +43,12 @@ rankings. A blank or “not established” cell is deliberately different from a
 |---|---|---|
 | Amazon Bedrock Mantle Chat Completions | `bedrock_mantle` | implemented |
 | Amazon Bedrock Mantle Responses | `bedrock_mantle_responses` | implemented |
+| Amazon Bedrock native Converse / ConverseStream | `bedrock_converse` | implemented |
 | Azure AI Foundry Chat Completions | `azure_model_inference` / `azure_openai` | implemented |
 | Azure AI Foundry Responses | `azure_responses` | implemented |
 | Google Vertex AI OpenAI-compatible Chat Completions | `vertex_openai` | implemented, renewable OAuth |
+| Google Vertex AI native generateContent / streamGenerateContent | `vertex_native` | implemented, renewable OAuth |
+| Google Vertex AI native embedContent | `vertex_embed_content` | implemented, singleton request contract; live admission pending |
 | OpenRouter Chat Completions | `openrouter` | implemented, exact upstream attested |
 | Alibaba Model Studio Chat Completions | `alibaba_model_studio` | implemented, region and pay-as-you-go isolated |
 | Alibaba Model Studio Responses | `alibaba_model_studio_responses` | implemented as a separate API contract |
@@ -54,10 +57,10 @@ rankings. A blank or “not established” cell is deliberately different from a
 | DigitalOcean Chat Completions | `openai_compatible` | implemented through a provider profile |
 | Generic OpenAI-compatible Chat Completions | `openai_compatible` | implemented |
 
-Native Bedrock Converse and native Gemini `generateContent` are not silently emulated. They remain
-explicit placeholders until a native-only capability makes their additional request and response
-surface worth maintaining. The main provider matrix uses the highest-level compatible API that can
-faithfully exercise the workload.
+Native Bedrock Converse, native Gemini `generateContent`, and native Gemini `embedContent` are
+separate typed transports rather than aliases for an OpenAI-compatible endpoint. Each binds its
+exact action URL, OAuth or SigV4 request contract, payload generator, response parser, and route
+identity. The remaining `azure_model_inference_native` name is an explicit fail-closed placeholder.
 
 OpenRouter is stricter than a request-side provider hint. Every request disables fallbacks,
 requires supported parameters, asks for routing metadata, and verifies the selected and attempted
