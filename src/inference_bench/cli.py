@@ -1165,6 +1165,14 @@ def _parser() -> argparse.ArgumentParser:
             "configuration as the rate-evidence source"
         ),
     )
+    derive_soak.add_argument(
+        "--censor-incomplete",
+        action="store_true",
+        help=(
+            "omit cells without a contract-complete confirmed healthy AIMD bound and record "
+            "their measured terminal disposition; never substitutes a fallback rate"
+        ),
+    )
     digitalocean = sub.add_parser(
         "report-digitalocean-summary",
         help="render a clean atlas from a sanitized DigitalOcean direct summary package",
@@ -1279,6 +1287,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.output,
                 fallback_rps=args.fallback_rps,
                 route_profile_overrides=args.route_profile_overrides,
+                censor_incomplete=args.censor_incomplete,
             )
         )
         return 0

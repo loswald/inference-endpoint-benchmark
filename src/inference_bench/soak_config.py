@@ -29,6 +29,10 @@ def _positive_number(value: str | None) -> float | None:
     return number if math.isfinite(number) and number > 0 else None
 
 
+def _csv_true(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes"}
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -81,17 +85,20 @@ def derive_soak_config(
     *,
     fallback_rps: float | None = None,
     route_profile_overrides: Path | None = None,
+    censor_incomplete: bool = False,
 ) -> Path:
     """Create a soak-only campaign from observed AIMD endpoint/workload bounds.
 
-    The measured healthy lower bound is copied exactly: this command does not invent production
-    headroom or silently turn a right-censored maximum into a recommendation.  A caller may provide
-    one explicit exploratory fallback for cells where AIMD found no healthy candidate; those cells
-    are named as such in the adjacent provenance JSON.
+    A contract-complete confirmed healthy lower bound is copied exactly: this command does not
+    invent production headroom or silently turn a right-censored maximum into a recommendation.
+    A caller may explicitly censor incomplete cells from confirmation or provide one exploratory
+    fallback; either disposition is named in the adjacent provenance JSON.
     """
 
     if fallback_rps is not None and (not math.isfinite(fallback_rps) or fallback_rps <= 0):
         raise ValueError("fallback_rps must be a finite positive number")
+    if fallback_rps is not None and censor_incomplete:
+        raise ValueError("fallback_rps and censor_incomplete are mutually exclusive")
     raw = yaml.safe_load(source_config.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise ValueError("source configuration must contain a mapping")
@@ -114,17 +121,58 @@ def derive_soak_config(
 
     rates: dict[str, dict[str, float]] = {}
     provenance: list[dict[str, Any]] = []
+    excluded: list[dict[str, Any]] = []
     missing: list[str] = []
     for route in validated.routes:
         for shape in shapes:
             row = indexed.get((route.id, shape))
-            measured = _positive_number(row.get("healthy_lower_bound_rps") if row else None)
+            confirmation_complete = _csv_true(
+                row.get("confirmation_complete") if row else None
+            )
+            confirmation_all_healthy = _csv_true(
+                row.get("confirmation_all_healthy") if row else None
+            )
+            measured = (
+                _positive_number(row.get("healthy_lower_bound_rps") if row else None)
+                if confirmation_complete and confirmation_all_healthy
+                else None
+            )
             if measured is not None:
                 rate = measured
-                basis = "observed_aimd_healthy_lower_bound"
+                basis = "observed_confirmed_healthy_aimd_lower_bound"
             elif fallback_rps is not None:
                 rate = fallback_rps
-                basis = "explicit_exploratory_fallback_no_healthy_aimd_bound"
+                basis = "explicit_exploratory_fallback_no_confirmed_healthy_aimd_bound"
+            elif censor_incomplete:
+                if row is None:
+                    reason = "no_controller_row"
+                elif not confirmation_complete:
+                    reason = "confirmation_incomplete"
+                elif not confirmation_all_healthy:
+                    reason = "confirmation_not_all_healthy"
+                else:
+                    reason = "no_positive_healthy_bound"
+                excluded.append(
+                    {
+                        "route_id": route.id,
+                        "shape": shape,
+                        "disposition": "censored_not_scheduled_for_fixed_rate_confirmation",
+                        "reason": reason,
+                        "aimd_controller_completion_state": (
+                            row.get("controller_completion_state") if row else None
+                        ),
+                        "aimd_capacity_bound_state": (
+                            row.get("capacity_bound_state") if row else None
+                        ),
+                        "aimd_confirmation_complete": (
+                            row.get("confirmation_complete") if row else None
+                        ),
+                        "aimd_confirmation_all_healthy": (
+                            row.get("confirmation_all_healthy") if row else None
+                        ),
+                    }
+                )
+                continue
             else:
                 missing.append(f"{route.id}:{shape}")
                 continue
@@ -150,9 +198,12 @@ def derive_soak_config(
     if missing:
         joined = ", ".join(missing)
         raise ValueError(
-            "AIMD has no positive healthy bound for these cells: "
-            f"{joined}. Re-run AIMD or pass an explicit --fallback-rps for an exploratory soak."
+            "AIMD has no confirmed positive healthy bound for these cells: "
+            f"{joined}. Re-run AIMD, pass --censor-incomplete to omit them from fixed-rate "
+            "confirmation, or pass an explicit --fallback-rps for an exploratory soak."
         )
+    if not provenance:
+        raise ValueError("AIMD produced no cells eligible for fixed-rate confirmation")
 
     suites = raw.get("suites")
     if not isinstance(suites, dict):
@@ -164,6 +215,7 @@ def derive_soak_config(
     suites["soak"] = {
         "enabled": True,
         "shapes": list(shapes),
+        "cells": [f"{cell['route_id']}:{cell['shape']}" for cell in provenance],
         "rate_rps_by_route_shape": rates,
         "blocks": 4,
         "block_seconds": 30,
@@ -207,8 +259,10 @@ def derive_soak_config(
                     if route_profile_overrides is not None
                     else None
                 ),
+                "incomplete_policy": "censor" if censor_incomplete else "error",
                 "derived_campaign_identity_sha256": derived.identity_hash,
                 "cells": provenance,
+                "excluded_cells": excluded,
             },
             indent=2,
             sort_keys=True,

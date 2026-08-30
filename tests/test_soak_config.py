@@ -106,7 +106,11 @@ def test_derive_soak_config_copies_observed_cell_rate(tmp_path: Path, route) -> 
     assert soak["block_seconds"] == 30
     assert soak["rate_rps_by_route_shape"][route_id]["mixed"] == 2.5
     provenance = json.loads(output.with_suffix(".rates.json").read_text(encoding="utf-8"))
-    assert {cell["basis"] for cell in provenance["cells"]} == {"observed_aimd_healthy_lower_bound"}
+    assert {cell["basis"] for cell in provenance["cells"]} == {
+        "observed_confirmed_healthy_aimd_lower_bound"
+    }
+    assert provenance["excluded_cells"] == []
+    assert provenance["incomplete_policy"] == "error"
     assert provenance["source_campaign_identity_sha256"] == load_config(source).identity_hash
     assert len(provenance["source_config_sha256"]) == 64
     assert len(provenance["controller_summary_sha256"]) == 64
@@ -130,8 +134,64 @@ def test_derive_soak_requires_explicit_fallback_for_missing_bound(tmp_path: Path
     assert raw["suites"]["soak"]["rate_rps_by_route_shape"][route_id]["short_short"] == 0.1
     provenance = json.loads(output.with_suffix(".rates.json").read_text(encoding="utf-8"))
     assert {cell["basis"] for cell in provenance["cells"]} == {
-        "explicit_exploratory_fallback_no_healthy_aimd_bound"
+        "explicit_exploratory_fallback_no_confirmed_healthy_aimd_bound"
     }
+
+
+def test_derive_soak_can_censor_incomplete_cells_without_scheduling_fallback(
+    tmp_path: Path, route
+) -> None:
+    source = _write_config(tmp_path, route)
+    route_id = load_config(source).routes[0].id
+    summary = tmp_path / "controller-summary.csv"
+    _controller_csv(summary, route_id)
+    rows = list(csv.DictReader(summary.read_text(encoding="utf-8").splitlines()))
+    rows[0]["confirmation_complete"] = "False"
+    rows[0]["confirmation_all_healthy"] = ""
+    rows[0]["controller_completion_state"] = "campaign_guard_censored"
+    with summary.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+    output = tmp_path / "censored.yaml"
+    derive_soak_config(source, summary, output, censor_incomplete=True)
+
+    loaded = load_config(output)
+    soak = loaded.suites["soak"]
+    assert f"{route_id}:short_short" not in soak["cells"]
+    assert len(soak["cells"]) == 3
+    assert "short_short" not in soak["rate_rps_by_route_shape"][route_id]
+    provenance = json.loads(output.with_suffix(".rates.json").read_text(encoding="utf-8"))
+    assert provenance["incomplete_policy"] == "censor"
+    assert provenance["excluded_cells"] == [
+        {
+            "aimd_capacity_bound_state": "bracketed_healthy_lower_unhealthy_upper",
+            "aimd_confirmation_all_healthy": "",
+            "aimd_confirmation_complete": "False",
+            "aimd_controller_completion_state": "campaign_guard_censored",
+            "disposition": "censored_not_scheduled_for_fixed_rate_confirmation",
+            "reason": "confirmation_incomplete",
+            "route_id": route_id,
+            "shape": "short_short",
+        }
+    ]
+
+
+def test_derive_soak_rejects_fallback_and_censoring_together(tmp_path: Path, route) -> None:
+    source = _write_config(tmp_path, route)
+    route_id = load_config(source).routes[0].id
+    summary = tmp_path / "controller-summary.csv"
+    _controller_csv(summary, route_id)
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        derive_soak_config(
+            source,
+            summary,
+            tmp_path / "blocked.yaml",
+            fallback_rps=0.1,
+            censor_incomplete=True,
+        )
 
 
 def test_derive_soak_applies_typed_route_profile_with_identity_provenance(
