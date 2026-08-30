@@ -1,0 +1,43 @@
+{
+  "facts": {
+    "api_action": "v1 :embedContent",
+    "default_output_dimensions": 3072,
+    "documented_global_input_tokens_per_minute": 200000000,
+    "documented_global_requests_per_minute": 60000,
+    "input_cardinality_per_http_request": 1,
+    "input_text_online_usd_per_million_tokens": 0.2,
+    "lifecycle": "generally_available",
+    "location": "us",
+    "max_input_tokens": 8192,
+    "max_output_dimensions": 3072,
+    "model_id": "gemini-embedding-2",
+    "over_limit_behavior": "silent_truncation",
+    "pricing_page_lifecycle_label_conflict": "The current pricing row still says Preview while the newer official release notes announce General Availability.",
+    "quota_scope": "global_shared_across_locations",
+    "transport": "native Vertex REST regional REP endpoint"
+  },
+  "retrieved_at_utc": "2026-08-30T12:09:42Z",
+  "schema": "provider-documentation-evidence/v1",
+  "sources": [
+    {
+      "role": "model_contract",
+      "url": "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/embedding-2"
+    },
+    {
+      "role": "native_api_and_limits",
+      "url": "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/embeddings/get-multimodal-embeddings"
+    },
+    {
+      "role": "quota_contract",
+      "url": "https://docs.cloud.google.com/gemini-enterprise-agent-platform/machine-learning/quotas"
+    },
+    {
+      "role": "release_state",
+      "url": "https://docs.cloud.google.com/gemini-enterprise-agent-platform/release-notes"
+    },
+    {
+      "role": "pricing",
+      "url": "https://cloud.google.com/gemini-enterprise-agent-platform/generative-ai/pricing"
+    }
+  ]
+}

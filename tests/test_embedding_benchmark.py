@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 
@@ -78,6 +79,9 @@ def test_public_embedding_profiles_bind_exact_models_and_documented_limits() -> 
     alibaba = load_embedding_config(
         ROOT / "examples/embedding-profiles/alibaba-text-embedding-v4-singapore.yaml"
     )
+    vertex = load_embedding_config(
+        ROOT / "examples/embedding-profiles/vertex-gemini-embedding-2-us.template.yaml"
+    )
 
     assert azure.route.model == "text-embedding-3-large"
     assert azure.route.api_family == "embeddings"
@@ -96,6 +100,16 @@ def test_public_embedding_profiles_bind_exact_models_and_documented_limits() -> 
         1024,
         1536,
         2048,
+    )
+    assert vertex.route.model == "gemini-embedding-2"
+    assert vertex.route.adapter == "vertex_embed_content"
+    assert vertex.route.region == "us"
+    assert vertex.route.capabilities.max_input_tokens_per_item == 8192
+    assert vertex.route.capabilities.default_dimensions == 3072
+    assert vertex.route.input_usd_per_million == 0.2
+    evidence = ROOT / "evidence/vertex-gemini-embedding-2-2026-08-30.json"
+    assert hashlib.sha256(evidence.read_bytes()).hexdigest() == (
+        vertex.route.evidence_bundle_sha256
     )
 
 

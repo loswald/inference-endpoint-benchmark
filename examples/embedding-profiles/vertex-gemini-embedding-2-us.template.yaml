@@ -1,0 +1,45 @@
+schema: embedding-benchmark/v1
+
+campaign:
+  name: vertex-gemini-embedding-2-us-native-admission
+  max_cost_usd: 0.01
+  concurrency: 1
+  retries: 0
+
+route:
+  id: vertex-gemini-embedding-2-us-native
+  provider: google-vertex-ai
+  adapter: vertex_embed_content
+  model: gemini-embedding-2
+  base_url: https://aiplatform.us.rep.googleapis.com/v1/projects/__PROJECT_ID__/locations/us/publishers/google/models/gemini-embedding-2:embedContent
+  auth:
+    env: GOOGLE_APPLICATION_CREDENTIALS
+    header: Authorization
+    prefix: "Bearer "
+  region: us
+  api_family: embeddings
+  billing_channel: vertex-paygo
+  api_version: v1
+  model_version: gemini-embedding-2
+  quota_scope: global-shared-per-base-model
+  capabilities:
+    max_input_tokens_per_item: 8192
+    max_batch_inputs: 1
+    max_total_tokens_per_request: 8192
+    default_dimensions: 3072
+    supported_dimensions: [128, 256, 512, 1408, 3072]
+    empty_input: unknown
+    unicode_input: documented_supported
+    over_limit_input: documented_truncate
+    repeatability_cosine_minimum: 0.999999
+    long_input_fraction: 0.90
+  input_usd_per_million: 0.20
+  request_timeout_seconds: 180
+  input_token_reservation_overhead: 128
+  http2: false
+  connection_reuse: true
+  transport_max_connections: 4
+  documentation_source_url: https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/embeddings/get-multimodal-embeddings
+  pricing_source_url: https://cloud.google.com/gemini-enterprise-agent-platform/generative-ai/pricing
+  evidence_retrieved_at_utc: "2026-08-30T12:09:42Z"
+  evidence_bundle_sha256: b0dc7e7077b96bab025be73b0aa2dd390de1b366f93c5171bb5921871beda5cf
