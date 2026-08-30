@@ -641,6 +641,9 @@ def build_capacity_closure_package(
     suite.update(
         {
             "enabled": True,
+            # A closure package is a completion instrument, not another provisional sweep.
+            # Validation below proves the registered stage/attempt budgets can reach the floor.
+            "require_floor_resolution": True,
             "shapes": sorted({shape for _route_id, _workload, shape in normalized_cells}),
             "cells": sorted(f"{route_id}:{shape}" for route_id, shape in runner_identities),
         }

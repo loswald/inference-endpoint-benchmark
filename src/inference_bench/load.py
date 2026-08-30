@@ -39,6 +39,77 @@ def _strict_nonnegative_int(value: Any, field_name: str) -> int:
     return value
 
 
+def _strict_bool(value: Any, field_name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{field_name} must be Boolean")
+    return value
+
+
+def rate_stages_to_floor(start_rps: float, minimum_rps: float, decrease: float) -> int:
+    """Return the inclusive stage count needed to test ``minimum_rps``.
+
+    Stage zero tests ``start_rps``. Each later stage applies the registered multiplicative
+    decrease once. This is a configuration proof, not a runtime estimate: a completion-bound
+    controller must reserve enough distinct stages to reach its declared floor from its largest
+    possible candidate rate.
+    """
+
+    if start_rps <= 0 or minimum_rps <= 0 or not 0 < decrease < 1:
+        raise ValueError("rate-stage proof requires positive rates and a decrease in (0, 1)")
+    if start_rps <= minimum_rps:
+        return 1
+    return math.ceil(math.log(minimum_rps / start_rps, decrease)) + 1
+
+
+def _validate_floor_resolution(
+    config: dict[str, Any],
+    *,
+    suite_name: str,
+    maximum_candidate_rps: float | None,
+    candidate_decrease: float,
+    candidate_stages: int,
+    minimum_rps: float,
+    baseline_rps: float,
+    baseline_decrease: float,
+    baseline_attempts: int,
+) -> None:
+    """Fail before spend when a declared complete search cannot reach its own floor."""
+
+    required = _strict_bool(
+        config.get("require_floor_resolution", False),
+        f"{suite_name}.require_floor_resolution",
+    )
+    if not required:
+        return
+    if maximum_candidate_rps is None:
+        raise ValueError(
+            f"{suite_name}.require_floor_resolution requires an explicit maximum candidate rate"
+        )
+    required_candidate_stages = rate_stages_to_floor(
+        maximum_candidate_rps, minimum_rps, candidate_decrease
+    )
+    if candidate_stages < required_candidate_stages:
+        raise ValueError(
+            f"{suite_name} candidate search needs at least {required_candidate_stages} stages "
+            f"to reach minimum_rps from {maximum_candidate_rps:g}"
+        )
+    if baseline_rps <= minimum_rps:
+        return
+    if baseline_decrease == 1:
+        raise ValueError(
+            f"{suite_name} baseline cannot reach minimum_rps when "
+            "baseline_multiplicative_decrease is 1"
+        )
+    required_baseline_attempts = rate_stages_to_floor(
+        baseline_rps, minimum_rps, baseline_decrease
+    )
+    if baseline_attempts < required_baseline_attempts:
+        raise ValueError(
+            f"{suite_name} baseline needs at least {required_baseline_attempts} attempts "
+            f"to reach minimum_rps from {baseline_rps:g}"
+        )
+
+
 def _iso_at(base: datetime, seconds: float) -> str:
     return (base + timedelta(seconds=seconds)).isoformat().replace("+00:00", "Z")
 
@@ -245,7 +316,9 @@ def validate_aimd_config(config: dict[str, Any], default_concurrency: int) -> No
     )
     if not 0 < baseline_decrease <= 1:
         raise ValueError("aimd.baseline_multiplicative_decrease must lie in (0, 1]")
-    _strict_positive_int(config.get("confirmation_max_stages", 4), "aimd.confirmation_max_stages")
+    confirmation_stages = _strict_positive_int(
+        config.get("confirmation_max_stages", 4), "aimd.confirmation_max_stages"
+    )
     _strict_positive_int(
         config.get("confirmation_separator_samples", samples),
         "aimd.confirmation_separator_samples",
@@ -264,7 +337,21 @@ def validate_aimd_config(config: dict[str, Any], default_concurrency: int) -> No
         float(config.get("epoch_seconds", 20)),
         default_rps=min(initial_rps, 0.5),
     )
-    baseline_attempt_count(config, effective_baseline_rate, field_prefix="aimd")
+    baseline_attempts = baseline_attempt_count(
+        config, effective_baseline_rate, field_prefix="aimd"
+    )
+    ceilings = [value for value in [max_rps, *map(float, by_shape.values())] if value is not None]
+    _validate_floor_resolution(
+        config,
+        suite_name="aimd",
+        maximum_candidate_rps=max(ceilings) if ceilings else None,
+        candidate_decrease=confirmation_decrease,
+        candidate_stages=confirmation_stages,
+        minimum_rps=minimum_rps,
+        baseline_rps=effective_baseline_rate,
+        baseline_decrease=baseline_decrease,
+        baseline_attempts=baseline_attempts,
+    )
 
 
 def validate_soak_config(config: dict[str, Any], default_concurrency: int) -> None:
@@ -285,20 +372,46 @@ def validate_soak_config(config: dict[str, Any], default_concurrency: int) -> No
     )
     if not 0 < baseline_decrease <= 1:
         raise ValueError("soak.baseline_multiplicative_decrease must lie in (0, 1]")
-    _strict_positive_int(config.get("max_rate_stages", 4), "soak.max_rate_stages")
+    rate_stages = _strict_positive_int(
+        config.get("max_rate_stages", 4), "soak.max_rate_stages"
+    )
     rate_decrease = _strict_positive_float(
         config.get("rate_multiplicative_decrease", 0.5),
         "soak.rate_multiplicative_decrease",
     )
     if not 0 < rate_decrease < 1:
         raise ValueError("soak.rate_multiplicative_decrease must lie in (0, 1)")
-    _strict_positive_float(config.get("minimum_rps", 0.01), "soak.minimum_rps")
+    minimum_rps = _strict_positive_float(
+        config.get("minimum_rps", 0.01), "soak.minimum_rps"
+    )
     _, _, effective_baseline_rate = baseline_design(
         config,
         float(config.get("block_seconds", 30)),
         default_rps=float(config.get("rate_rps", 0.25)),
     )
-    baseline_attempt_count(config, effective_baseline_rate, field_prefix="soak")
+    baseline_attempts = baseline_attempt_count(
+        config, effective_baseline_rate, field_prefix="soak"
+    )
+    configured_rates: list[float] = [float(config.get("rate_rps", 0.25))]
+    configured_rates.extend(
+        float(value) for value in (config.get("rate_rps_by_route") or {}).values()
+    )
+    for value in (config.get("rate_rps_by_route_shape") or {}).values():
+        if isinstance(value, dict):
+            configured_rates.extend(float(item) for item in value.values())
+        else:
+            configured_rates.append(float(value))
+    _validate_floor_resolution(
+        config,
+        suite_name="soak",
+        maximum_candidate_rps=max(configured_rates),
+        candidate_decrease=rate_decrease,
+        candidate_stages=rate_stages,
+        minimum_rps=minimum_rps,
+        baseline_rps=effective_baseline_rate,
+        baseline_decrease=baseline_decrease,
+        baseline_attempts=baseline_attempts,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1140,6 +1253,7 @@ async def run_aimd(
                     "highest_observed_healthy_rps": None,
                     "healthy_lower_bound_rps": None,
                     "unhealthy_upper_bound_rps": baseline_attempts[-1].offered_rps,
+                    "lowest_tested_rate_rps": baseline_attempts[-1].offered_rps,
                     "overload_observed": True,
                     "nonmonotonic_overload_observed": False,
                     "capacity_bound_state": "left_censored_no_healthy_at_lowest_tested_rate",
@@ -1660,6 +1774,7 @@ async def run_soak(
                 "shape": shape,
                 "requested_rate_rps": rate,
                 "rate_rps": None,
+                "lowest_tested_rate_rps": last_baseline.offered_rps,
                 "blocks": blocks,
                 "completed_blocks": 0,
                 "block_eligible": [],

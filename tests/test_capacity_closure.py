@@ -282,6 +282,7 @@ def test_provider_neutral_closure_uses_evidence_mapping_and_exact_cells(tmp_path
     }
     assert config.retries == 0
     assert config.suites["aimd"]["minimum_rps"] == 0.03125
+    assert config.suites["aimd"]["require_floor_resolution"] is True
     assert manifest["schema"] == "capacity-closure-plan/v1"
     assert manifest["selection"]["cell_count"] == 2
     assert manifest["selection"]["route_count"] == 2

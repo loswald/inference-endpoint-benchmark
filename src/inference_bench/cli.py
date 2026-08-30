@@ -41,6 +41,22 @@ from .workloads import plan_static_suites
 
 _RETRYABLE_STATUSES = {"rate_limited", "server_error", "timeout", "transport_error"}
 _DEFAULT_CAPACITY_SHAPES = ("short_short", "long_short", "short_long", "mixed")
+_FINAL_CAPACITY_STATES = {
+    "aimd": frozenset(
+        {
+            "completed_confirmations_healthy",
+            "completed_no_healthy_at_lowest_tested_rate",
+            "completed_no_healthy_rate_at_floor",
+        }
+    ),
+    "soak": frozenset(
+        {
+            "completed_healthy",
+            "completed_no_healthy_at_lowest_tested_rate",
+            "completed_unhealthy_at_floor",
+        }
+    ),
+}
 
 
 def _terminal_run_is_fully_sealed(output: Path) -> bool:
@@ -83,6 +99,80 @@ def _capacity_execution_order(
     cells = selected_capacity_cells(config, suite_name)
     random.Random(f"capacity-order/v1:{config.seed}:{suite_name}").shuffle(cells)
     return cells
+
+
+def _capacity_completion_audit(config: CampaignConfig, ledger: Ledger) -> dict[str, object]:
+    """Separate final capacity measurements from mandatory continuation work.
+
+    Controller-level censor and retry states remain useful crash-safe evidence, but they are never
+    allowed to masquerade as a scientifically complete provider campaign. This audit is entirely
+    ledger-local and contains only public route/workload identities.
+    """
+
+    resolved: list[dict[str, str]] = []
+    unresolved: list[dict[str, str]] = []
+    for suite_name in ("aimd", "soak"):
+        suite = config.suites.get(suite_name)
+        if not suite or not suite.get("enabled", True):
+            continue
+        for route, shape in _capacity_execution_order(config, suite_name):
+            row = ledger.event_by_key(f"{suite_name}_complete:{route.id}:{shape}")
+            payload = json.loads(row["payload_json"]) if row is not None else {}
+            state = str(payload.get("controller_completion_state") or "measurement_missing")
+            minimum_rps = float(suite.get("minimum_rps", 0.01))
+            if state in {
+                "completed_no_healthy_at_lowest_tested_rate",
+                "completed_no_healthy_rate_at_floor",
+                "completed_unhealthy_at_floor",
+            }:
+                observed_floor = payload.get("lowest_tested_rate_rps")
+                if observed_floor is None:
+                    observed_floor = payload.get(
+                        "unhealthy_upper_bound_rps" if suite_name == "aimd" else "rate_rps"
+                    )
+                floor_proven = (
+                    isinstance(observed_floor, (int, float))
+                    and not isinstance(observed_floor, bool)
+                    and 0 < float(observed_floor) <= minimum_rps * (1 + 1e-12)
+                )
+                if not floor_proven:
+                    state = f"{state}_without_floor_proof"
+            elif state == "completed_confirmations_healthy":
+                accepted = payload.get("healthy_lower_bound_rps")
+                if (
+                    not isinstance(accepted, (int, float))
+                    or isinstance(accepted, bool)
+                    or accepted <= 0
+                ):
+                    state = "completed_confirmations_healthy_without_rate_bound"
+            elif state == "completed_healthy":
+                accepted = payload.get("accepted_rate_rps")
+                if (
+                    not isinstance(accepted, (int, float))
+                    or isinstance(accepted, bool)
+                    or accepted <= 0
+                ):
+                    state = "completed_healthy_without_rate_bound"
+            cell = {"suite": suite_name, "route_id": route.id, "shape": shape, "state": state}
+            if state in _FINAL_CAPACITY_STATES[suite_name]:
+                resolved.append(cell)
+            else:
+                unresolved.append(cell)
+    return {
+        "schema": "capacity-completion-audit/v1",
+        "scientifically_complete": not unresolved,
+        "resolved_cells": len(resolved),
+        "unresolved_cells": unresolved,
+        "unresolved_cell_count": len(unresolved),
+    }
+
+
+def _record_capacity_completion_audit(
+    config: CampaignConfig, ledger: Ledger
+) -> dict[str, object]:
+    audit = _capacity_completion_audit(config, ledger)
+    ledger.record_event_once("capacity_completion_audit", "capacity_completion_audit", audit)
+    return audit
 
 
 def _record_capacity_execution_order(
@@ -913,9 +1003,21 @@ async def run_campaign(
                         "campaign_terminal", "campaign_terminal", {"reason": reason}
                     )
                     return
-        ledger.finalize_plan("plan_completed")
+        capacity_audit = _record_capacity_completion_audit(config, ledger)
+        terminal_reason = (
+            "plan_completed"
+            if capacity_audit["scientifically_complete"]
+            else "capacity_continuation_required"
+        )
+        ledger.finalize_plan(terminal_reason)
         ledger.record_event_once(
-            "campaign_terminal", "campaign_terminal", {"reason": "plan_completed"}
+            "campaign_terminal",
+            "campaign_terminal",
+            {
+                "reason": terminal_reason,
+                "scientifically_complete": capacity_audit["scientifically_complete"],
+                "unresolved_capacity_cells": capacity_audit["unresolved_cell_count"],
+            },
         )
     except (
         BudgetExceeded,

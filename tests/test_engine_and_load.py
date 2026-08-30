@@ -15,10 +15,13 @@ from inference_bench.load import (
     aimd_max_rps,
     baseline_design,
     fixed_count_offsets,
+    rate_stages_to_floor,
     run_aimd,
     run_open_loop_epoch,
     run_soak,
     scheduled_offsets,
+    validate_aimd_config,
+    validate_soak_config,
 )
 from inference_bench.models import InferenceResult, RequestSpec
 from inference_bench.payload import materialize_openai_compatible
@@ -108,6 +111,45 @@ def test_aimd_shape_ceiling_prefers_shape_specific_value() -> None:
     assert aimd_max_rps(config, "short_long") == pytest.approx(1.0)
     assert aimd_max_rps(config, "short_short") == pytest.approx(64)
     assert aimd_max_rps({}, "short_short") is None
+
+
+def test_completion_bound_configs_must_prove_they_can_reach_their_floor() -> None:
+    assert rate_stages_to_floor(4, 0.03125, 0.5) == 8
+    aimd = {
+        "require_floor_resolution": True,
+        "initial_rps": 0.25,
+        "additive_rps": 0.25,
+        "max_rps": 4,
+        "epochs": 4,
+        "epoch_seconds": 5,
+        "baseline_rps": 0.25,
+        "baseline_samples": 20,
+        "baseline_attempts": 4,
+        "baseline_multiplicative_decrease": 0.5,
+        "confirmation_max_stages": 7,
+        "confirmation_multiplicative_decrease": 0.5,
+        "minimum_rps": 0.03125,
+    }
+    with pytest.raises(ValueError, match="at least 8 stages"):
+        validate_aimd_config(aimd, 8)
+    validate_aimd_config({**aimd, "confirmation_max_stages": 8}, 8)
+
+    soak = {
+        "require_floor_resolution": True,
+        "rate_rps": 2,
+        "blocks": 3,
+        "block_seconds": 5,
+        "baseline_rps": 0.5,
+        "baseline_samples": 20,
+        "baseline_attempts": 2,
+        "baseline_multiplicative_decrease": 0.5,
+        "max_rate_stages": 3,
+        "rate_multiplicative_decrease": 0.5,
+        "minimum_rps": 0.25,
+    }
+    with pytest.raises(ValueError, match="at least 4 stages"):
+        validate_soak_config(soak, 8)
+    validate_soak_config({**soak, "max_rate_stages": 4}, 8)
 
 
 def _result(logical_id: str, *, status: str = "success", http_status: int = 200):
