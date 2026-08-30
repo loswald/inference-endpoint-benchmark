@@ -65,6 +65,31 @@ def test_public_config_redacts_alibaba_workspace_hostname(campaign: CampaignConf
     assert "base_url_workspace_identifier" in public["omitted_operational_fields"]
 
 
+def test_public_config_redacts_vertex_project_path(campaign: CampaignConfig) -> None:
+    private_project = "private-project-identity"
+    vertex = replace(
+        campaign.routes[0],
+        provider="google-vertex-ai",
+        adapter="vertex_native",
+        model="gemini-3.7-flash",
+        base_url=(
+            "https://aiplatform.googleapis.com/v1/projects/"
+            f"{private_project}/locations/global/publishers/google/models/"
+            "gemini-3.7-flash:generateContent"
+        ),
+        region="global",
+        api_family="generate_content",
+        api_version="v1",
+        output_limit_field="max_output_tokens",
+        billing_channel="startup_credits",
+    )
+    public = replace(campaign, routes=(vertex,)).public_dict()["routes"][0]
+
+    assert private_project not in public["base_url"]
+    assert "/projects/project-redacted/locations/global/" in public["base_url"]
+    assert "base_url_project_identifier" in public["omitted_operational_fields"]
+
+
 def test_route_identity_binds_safe_request_defaults(route: RouteConfig) -> None:
     changed = RouteConfig(
         id=route.id,

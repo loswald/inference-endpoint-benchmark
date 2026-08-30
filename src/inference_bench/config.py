@@ -326,6 +326,18 @@ _ALIBABA_WORKSPACE_HOST = re.compile(
     r"cn-hongkong|us-east-1)\.maas\.aliyuncs\.com$",
     re.IGNORECASE,
 )
+_VERTEX_PROJECT_PATH = re.compile(
+    r"^(?P<prefix>/v1/projects/)(?P<project>[^/]+)(?P<suffix>/locations/.+)$"
+)
+
+
+def _is_vertex_action_url(value: str) -> bool:
+    parsed = urlsplit(value)
+    hostname = (parsed.hostname or "").casefold()
+    return (
+        hostname == "aiplatform.googleapis.com"
+        or hostname.endswith("-aiplatform.googleapis.com")
+    ) and _VERTEX_PROJECT_PATH.fullmatch(parsed.path) is not None
 
 
 def _safe_public_url(value: str) -> str:
@@ -340,12 +352,17 @@ def _safe_public_url(value: str) -> str:
             "workspace-redacted."
             f"{workspace_match.group('region').casefold()}.maas.aliyuncs.com"
         )
+    path = parsed.path
+    if _is_vertex_action_url(value):
+        path = _VERTEX_PROJECT_PATH.sub(
+            r"\g<prefix>project-redacted\g<suffix>", parsed.path
+        )
     try:
         parsed_port = parsed.port
     except ValueError:
         parsed_port = None
     port = f":{parsed_port}" if parsed_port is not None else ""
-    return urlunsplit((parsed.scheme, hostname + port, parsed.path, "", ""))
+    return urlunsplit((parsed.scheme, hostname + port, path, "", ""))
 
 
 def _safe_capabilities(values: dict[str, bool | str]) -> dict[str, bool | str]:
@@ -567,6 +584,9 @@ class CampaignConfig:
                                     urlsplit(route.base_url).hostname or ""
                                 )
                                 is not None
+                            ),
+                            "base_url_project_identifier": _is_vertex_action_url(
+                                route.base_url
                             ),
                         }.items()
                         if present
