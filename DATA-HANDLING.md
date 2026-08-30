@@ -32,6 +32,10 @@ The generated report is a release candidate, not publication approval. Before an
    any request-level records authorized for release;
 5. state all censored, invalid, anomalous, and untested cells.
 
-No PDF builder, publication gate, legal review, or organization-specific secret scanner is included.
-The public campaign serializer uses an explicit allowlist and omits operational fields, but this is
-defense in depth—not proof that a full run directory is safe to publish.
+The repository includes a provider-neutral evidence-atlas PDF builder and a DigitalOcean-specific
+PDF builder, plus integrity and publication-verification helpers for the latter package. Producing
+a PDF is not a publication pass: the generic `report-matrix` command does not automatically run
+every typed completeness validator, recursive safety scan, or publication-manifest check. No legal
+review or organization-specific secret scanner is included. The public campaign serializer uses an
+explicit allowlist and omits operational fields, but this is defense in depth—not proof that a full
+run directory is safe to publish.

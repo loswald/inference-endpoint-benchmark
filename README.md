@@ -6,25 +6,30 @@ A reproducible laboratory for answering a practical question:
 
 It measures low-load responsiveness, load capacity, token throughput, reliability, long-context
 behavior, output length, tools, structured output, vision, sampling controls, quality under load,
-recovery after overload, and variation across the day. Results stay separated by endpoint and
-workload; the software does not manufacture a single global score.
+recovery after overload, and matched variation within a declared observation window. Results stay
+separated by endpoint and workload; the software does not manufacture a single global score.
 
 ## Evidence status
 
-Implementation and measurement are different claims. This table is the current public evidence
-boundary; “not run” means exactly that, not failure and not zero performance.
+Implementation, a one-request transport check, an active campaign, and a terminal benchmark are
+four different claims. Result columns count only checked-in public evidence; active work is named
+only to explain why no terminal result appears. “Not yet established” means exactly that, not
+failure and not zero performance. A campaign that is still running is listed as non-terminal rather
+than promoted to a result.
 
 | Provider | Adapter | Live transport proof | Static / capabilities | Adaptive load | Fixed-rate stability | Time variation | Public report |
 |---|---|---|---|---|---|---|---|
 | DigitalOcean hosted open models | implemented | established | partial: 564 / 2,891 planned cells | partial: 24 / 44 repeatedly confirmed; 20 need lower-rate closure | 48 / 48 executed: 3 pass, 38 tested-rate non-pass, 3 no-valid-test | complete: 7 matched panels, 1,232 required observations | withheld pending corrected closure and graphics |
-| Alibaba Cloud Model Studio, Singapore pay-as-you-go | Chat and Responses implemented | established for `qwen3.8-flash` by direct and packaged-library calls | not run | not run | not run | not run | not published |
-| Amazon Bedrock | Chat and Responses implemented | not established by this repository package | not run here | not run here | not run here | not run here | not published |
-| Azure AI Foundry | Chat and Responses implemented | not established by this repository package | not run here | not run here | not run here | not run here | not published |
-| Google Vertex AI | Chat implemented | not established by this repository package | not run here | not run here | not run here | not run here | not published |
+| Alibaba Cloud Model Studio, Singapore pay-as-you-go | Chat, Responses, and embeddings implemented | established for `qwen3.8-flash` by direct and packaged-library calls; the eight-route load campaign is underway but non-terminal | not yet established by a terminal public run | underway; no terminal result published | not yet established | not yet established | not published |
+| Amazon Bedrock | Chat and Responses implemented | established for exact `zai.glm-4.7-flash` Mantle route in `us-east-1` | not yet established by a terminal public run | underway; no terminal result published | not yet established | not yet established | not published |
+| Azure AI Foundry | Chat, Responses, and embeddings implemented | established for five exact text routes; embedding transport also live-proved | not yet established by a terminal public run | underway; no terminal result published | not yet established | not yet established | not published |
+| Google Vertex AI | Chat implemented | established for exact `google/gemini-3.6-flash` global OpenAI-compatible route | not yet established by a terminal public run | underway; no terminal result published | not yet established | not yet established | not published |
 | OpenRouter | Chat implemented | not established by this repository package | not run here | not run here | not run here | not run here | not published |
 
 For DigitalOcean, the retained [method and data guide](reports/digitalocean/README.md) states exactly
-what each measured state establishes. For Alibaba, the public
+what each measured state establishes. Provider admission receipts prove only that one exact
+transport worked with the tested parser and accounting path; they are not latency, reliability,
+quality, or capacity evidence. For Alibaba, the public
 [provider contract](docs/provider-contracts/alibaba-model-studio-2026-08-29.yaml) and its sanitized
 [receipts](docs/provider-contracts/receipts/) contain hash-bound proof metadata without credentials,
 prompts, or model output.
@@ -44,6 +49,8 @@ rankings. A blank or “not established” cell is deliberately different from a
 | OpenRouter Chat Completions | `openrouter` | implemented, exact upstream attested |
 | Alibaba Model Studio Chat Completions | `alibaba_model_studio` | implemented, region and pay-as-you-go isolated |
 | Alibaba Model Studio Responses | `alibaba_model_studio_responses` | implemented as a separate API contract |
+| Azure AI Foundry OpenAI-compatible embeddings | `openai_compatible_embeddings` | implemented as a separate embedding lane |
+| Alibaba Model Studio OpenAI-compatible embeddings | `openai_compatible_embeddings` | implemented as a separate embedding lane |
 | DigitalOcean Chat Completions | `openai_compatible` | implemented through a provider profile |
 | Generic OpenAI-compatible Chat Completions | `openai_compatible` | implemented |
 
@@ -66,7 +73,7 @@ upstream provider in the response. A missing or mismatched attestation is a fail
 - How does the answer change for short requests, long prompts, long outputs, and a mixed workload?
 - Which tool, JSON, vision, streaming, and parameter combinations work functionally?
 - At which context anchors are requests accepted, and can the model still retrieve separated facts?
-- Does performance vary across matched low-load panels during the day?
+- Does performance vary across matched low-load panels during the declared run window?
 - Does deterministic task quality deteriorate near saturation?
 
 ## Workload map
@@ -148,26 +155,41 @@ campaigns:
 Each provider appears once in a matrix. Its config may contain many endpoints. Capacity cell order
 is randomized and recorded, but endpoint sweeps execute one at a time inside that provider.
 
-## Measuring variation across the day
+## Measuring matched variation within a run
 
 `time_variation` is a dedicated low-load campaign. It repeats identical route-neutral prompts at
-fixed offsets—for example, 12 panels two hours apart—with randomized route order inside each panel.
-It cannot be enabled beside AIMD, soak, or capability traffic, because overlapping load would make
-the time-of-day result uninterpretable.
+fixed offsets from the run ledger's original start time—for example, seven hourly panels over six
+hours—with deterministic randomized route order inside each panel. Panel arrivals are open-loop:
+the sender launches them at their scheduled times without waiting for earlier responses. Planning
+rejects a campaign whose concurrency, timeout, panel deadline, send cutoff, or final drain window
+cannot preserve that schedule.
+
+Stable exact-prefix requests and panel-unique cache-cold requests are separate registered strata.
+They receive distinct identities, summaries, and plotted series; they are never pooled or connected
+across strata. Optional work may fill otherwise idle time only when it can stop before the next
+protected panel. It cannot change panel semantics or delay a required panel. No other workload may
+overlap this campaign for the same provider.
 
 ```yaml
+campaign:
+  max_wall_seconds: 22500
+  concurrency: 256
+  retries: 0
 suites:
   time_variation:
     enabled: true
-    panels: 12
-    interval_minutes: 120
-    samples_per_route_shape: 5
-    shapes: [short_short, long_short]
-    offered_rps: 0.2
+    panels: 7
+    interval_minutes: 60
+    samples_per_route_shape: 4
+    stable_exact_prompt_repeats: 2
+    panel_unique_cache_cold_repeats: 2
+    shapes: [short_short, long_short, short_long, mixed]
+    offered_rps: 1
 ```
 
-The report plots matched p50 latency, TTFT, and success rate through time with 95% intervals. A
-partial run is labelled as the observed time span; it is never called “24-hour variability.”
+The report plots matched p50 latency, TTFT, success rate, and paired cache-cold minus stable-prefix
+differences through time with 95% intervals. A partial run is labelled with its observed span; a
+six-hour run is not called a 24-hour, daily, diurnal, or indefinite sustainability study.
 
 ## Installation
 
@@ -303,7 +325,8 @@ Every report contains:
   drain, and block-level intervals;
 - `controller-summary.csv` — adaptive-load bracket, confirmations, recovery, and fixed-rate test completion for every
   endpoint × workload;
-- `time-variation-summary.csv` — matched low-load panels across the day;
+- `time-variation-summary.csv` — matched low-load panels within the declared observation window,
+  with cache strata kept separate;
 - `coverage-ledger.csv` — every planned cell and its completed, unsupported, inconclusive, or
   untested disposition;
 - `outlier-audit.jsonl` — the exact reason every suspicious observation was kept, excluded from a

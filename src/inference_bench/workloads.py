@@ -1166,10 +1166,10 @@ def plan_time_variation(
     for panel in range(panels):
         for shape in shapes:
             for repeat in range(repeats):
-                logical = f"time-variation:{route.id}:panel-{panel:03d}:{shape}:{repeat:03d}"
                 if repeat < stable_repeats:
                     repeat_index = repeat
                     cache_condition = "stable_exact_prompt_across_panels"
+                    variation_stratum = "stable_prefix"
                     prompt_identity = f"stable-{repeat_index:03d}"
                     workload_key = (
                         f"time-variation:{{route}}:{shape}:stable-repeat-{repeat_index:03d}"
@@ -1177,6 +1177,7 @@ def plan_time_variation(
                 else:
                     repeat_index = repeat - stable_repeats
                     cache_condition = "panel_unique_cache_cold"
+                    variation_stratum = "panel_unique_cold"
                     prompt_identity = f"panel-{panel:03d}-cold-{repeat_index:03d}"
                     stable_key = (
                         f"time-variation:{{route}}:{shape}:stable-repeat-{repeat_index:03d}"
@@ -1187,6 +1188,10 @@ def plan_time_variation(
                         panel,
                         repeat_index,
                     )
+                logical = (
+                    f"time-variation:{route.id}:panel-{panel:03d}:{shape}:"
+                    f"{variation_stratum}:{repeat_index:03d}"
+                )
                 spec = shape_spec(
                     route,
                     shape,
@@ -1194,7 +1199,9 @@ def plan_time_variation(
                     suite="time_variation",
                     seed=seed,
                     workload_key=workload_key,
-                    matched_cell_suffix=f":panel={panel:03d}",
+                    matched_cell_suffix=(
+                        f":variation_stratum={variation_stratum}:panel={panel:03d}"
+                    ),
                     shape_config=config,
                 )
                 result.append(
@@ -1206,7 +1213,9 @@ def plan_time_variation(
                             "time_variation_offset_seconds": panel * interval_seconds,
                             "time_variation_repeat": repeat,
                             "time_variation_prompt_identity": prompt_identity,
+                            "time_variation_stratum": variation_stratum,
                             "cache_condition": cache_condition,
+                            "cache_state": variation_stratum,
                         },
                     )
                 )

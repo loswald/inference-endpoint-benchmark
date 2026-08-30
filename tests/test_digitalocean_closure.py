@@ -161,6 +161,9 @@ def test_open_loop_panel_launches_concurrently_and_records_deadline() -> None:
         def attempts_for_logical(self, _logical_id: str) -> list[dict[str, object]]:
             return []
 
+        def event_by_key(self, _key: str):
+            return None
+
     active = 0
     peak = 0
 
@@ -191,8 +194,11 @@ def test_open_loop_panel_launches_concurrently_and_records_deadline() -> None:
         )
         for index in range(4)
     ]
-    reason = asyncio.run(
-        _run_time_variation_panel(
+
+    async def run() -> str | None:
+        loop = asyncio.get_running_loop()
+        panel_start = loop.time()
+        return await _run_time_variation_panel(
             FakeEngine(),
             0,
             specs,
@@ -200,8 +206,12 @@ def test_open_loop_panel_launches_concurrently_and_records_deadline() -> None:
             concurrency=4,
             planned_offset_seconds=0,
             deadline_seconds=2,
+            panel_start_monotonic=panel_start,
+            arrival_expiry_monotonic=panel_start,
+            resume_invocation=False,
         )
-    )
+
+    reason = asyncio.run(run())
     assert reason is None
     assert peak > 1
     start = next(payload for _, kind, payload in events if kind == "time_variation_panel_started")
@@ -222,6 +232,9 @@ def test_time_variation_panel_sends_nothing_when_arrivals_cross_hard_cutoff() ->
 
         def attempts_for_logical(self, _logical_id: str) -> list[dict[str, object]]:
             return []
+
+        def event_by_key(self, _key: str):
+            return None
 
     class FakeEngine:
         ledger = FakeLedger()
@@ -250,6 +263,7 @@ def test_time_variation_panel_sends_nothing_when_arrivals_cross_hard_cutoff() ->
 
     async def run() -> str | None:
         loop = asyncio.get_running_loop()
+        panel_start = loop.time()
         return await _run_time_variation_panel(
             FakeEngine(),
             6,
@@ -258,6 +272,9 @@ def test_time_variation_panel_sends_nothing_when_arrivals_cross_hard_cutoff() ->
             concurrency=2,
             planned_offset_seconds=21_600,
             deadline_seconds=600,
+            panel_start_monotonic=panel_start,
+            arrival_expiry_monotonic=panel_start,
+            resume_invocation=False,
             not_after_monotonic=loop.time() + 0.01,
         )
 

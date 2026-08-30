@@ -7,6 +7,7 @@ from inference_bench.atlas import (
     _plot_latency,
     _plot_load_response,
     _plot_time_variation,
+    _time_variation_series,
 )
 from inference_bench.matrix import CampaignMatrix, MatrixCampaign
 
@@ -143,12 +144,20 @@ def test_time_variation_uses_endpoint_small_multiples(tmp_path) -> None:
             "provider": "azure",
             "route_id": "route-a",
             "shape": "short_short",
+            "variation_stratum": stratum,
             "panel_index": panel,
-            "ttft_p50": 0.4 + panel * 0.1,
-            "latency_p50": 1.0 + panel * 0.2,
+            "ttft_p50": base + panel * 0.1,
+            "latency_p50": base + 0.6 + panel * 0.2,
         }
+        for stratum, base in (("stable_prefix", 0.4), ("panel_unique_cold", 0.7))
         for panel in range(4)
     ]
+    series = _time_variation_series(rows, "latency_p50")
+    assert [(stratum, x) for stratum, x, *_ in series] == [
+        ("stable_prefix", [1, 2, 3, 4]),
+        ("panel_unique_cold", [1, 2, 3, 4]),
+    ]
+    assert all(len(x) == 4 for _, x, *_ in series)
     created = _plot_time_variation(rows, figures)
     assert len(created) == 1
     assert created[0].read_bytes().startswith(b"\x89PNG")

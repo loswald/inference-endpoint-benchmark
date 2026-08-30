@@ -10,11 +10,13 @@ scope:
   billing_channel: azure_subscription_metered
   account_name_publication: redacted
   exact_text_routes: 5
+  exact_embedding_routes: 1
   performance_claim_eligible: false
   claim_boundary: >-
-    This bundle admits five exact deployment/API transports for future benchmarking. The
-    one-request canaries prove reachability, parser compatibility, streaming, and usage
-    accounting only. They do not prove quality, latency, capacity, reliability, or Pareto rank.
+    This bundle admits five exact text deployment/API transports and one text-embedding transport
+    for future benchmarking. The one-request canaries prove reachability, parser compatibility,
+    streaming where applicable, and usage accounting only. They do not prove quality, latency,
+    capacity, reliability, or Pareto rank.
 
 endpoint_contracts:
   responses:
@@ -262,12 +264,16 @@ live_proof:
       usage_complete: true
       ttft_recorded_with_512_token_allowance: true
 
-excluded_live_transport:
+embedding_transport:
   text-embedding-3-large:
     deployment_live: true
     dimensions: 3072
     receipt_sha256: d88c7240841ae7de90646f17a04006c3ac4259c66a8088e975cfd3ed3125df1f
-    profile_status: excluded_until_public_embedding_adapter_exists
+    adapter: openai_compatible_embeddings
+    public_profile: examples/embedding-profiles/azure-text-embedding-3-large.yaml
+    planned_contract_cells: 11
+    profile_status: runnable_public_adapter_and_profile_available
+    benchmark_evidence_status: no_terminal_embedding_benchmark_published
 
 explicit_gaps:
   - No quality, latency-distribution, capacity, reliability, cache-hit, or long-context benchmark was run during route admission.
@@ -275,7 +281,7 @@ explicit_gaps:
   - GPT-5.6 cache-write pricing cannot be represented by the current single cached-input price field.
   - Kimi-K2.6 is a preview deployment and its vision and tool-calling capabilities are documented but not live-proved by this text-only admission.
   - DeepSeek-V4-Flash and Kimi-K2.6 were proved on the legacy /models/chat/completions path; the recommended OpenAI v1 chat path requires its own canary before substitution.
-  - Embeddings transport is live, but the benchmark package does not yet expose an embedding adapter or embedding workloads.
+  - The embeddings transport, adapter, and 11-cell contract suite are available, but no terminal embedding benchmark is published yet.
 
 sources:
   - https://learn.microsoft.com/en-us/azure/foundry/foundry-models/concepts/models-sold-directly-by-azure
@@ -284,6 +290,7 @@ sources:
   - https://learn.microsoft.com/en-us/azure/foundry/foundry-models/quotas-limits
   - https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/quota
   - https://learn.microsoft.com/en-us/azure/foundry/openai/concepts/model-retirement-schedule
+  - https://learn.microsoft.com/en-us/rest/api/microsoft-foundry/azureopenai/embeddings
   - https://azure.microsoft.com/en-us/blog/gpt-5-6-now-available-in-microsoft-foundry/
   - https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/introducing-deepseek-v4-flash-and-v4-pro-in-microsoft-foundry/4515174
   - https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/introducing-kimi-k2-6-in-microsoft-foundry/4513125
@@ -308,3 +315,5 @@ source_bindings:
   quota_scope_and_rate_limit_semantics:
     - https://learn.microsoft.com/en-us/azure/foundry/foundry-models/quotas-limits
     - https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/quota
+  text_embedding_3_large_transport_and_limits:
+    - https://learn.microsoft.com/en-us/rest/api/microsoft-foundry/azureopenai/embeddings

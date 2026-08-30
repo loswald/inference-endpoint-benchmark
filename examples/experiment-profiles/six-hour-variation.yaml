@@ -1,5 +1,24 @@
 schema: benchmark-experiment/v1
 
+# These timeouts belong only to this bounded panel study. They deliberately do not change the
+# reusable provider catalogs or the timeout used by long-context/output-limit experiments.
+provider_route_overrides:
+  digitalocean:
+    request_timeout_seconds: 360
+    transport_max_connections: 256
+  azure-ai-foundry:
+    request_timeout_seconds: 800
+    transport_max_connections: 256
+  amazon-bedrock:
+    request_timeout_seconds: 180
+    transport_max_connections: 256
+  google-vertex-ai:
+    request_timeout_seconds: 800
+    transport_max_connections: 256
+  alibaba-model-studio:
+    request_timeout_seconds: 720
+    transport_max_connections: 256
+
 campaign:
   name: six-hour-within-run-variation-example
   seed: 20260829
@@ -7,7 +26,7 @@ campaign:
   max_cost_usd: 100
   launch_reserve_seconds: 300
   launch_reserve_usd: 5
-  concurrency: 16
+  concurrency: 256
   retries: 0
   input_token_reservation_factor: 1.5
   client_location: replace-with-exact-client-region
@@ -24,3 +43,9 @@ suites:
     panel_unique_cache_cold_repeats: 2
     shapes: [short_short, long_short, short_long, mixed]
     offered_rps: 1
+    concurrency: 256
+    interleave_gap_work: false
+    panel_guard_seconds: 300
+    panel_deadline_seconds: 1200
+    arrival_lateness_tolerance_seconds: 0.25
+    send_cutoff_seconds: 21840

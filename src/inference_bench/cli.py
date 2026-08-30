@@ -187,6 +187,13 @@ def _pending_static_specs(engine: BenchmarkEngine, specs: list[RequestSpec]) -> 
     return pending
 
 
+def _time_variation_panel_is_terminal(ledger: Ledger, panel: int) -> bool:
+    return any(
+        ledger.event_by_key(f"time_variation_panel_{state}:{panel}") is not None
+        for state in ("completed", "censored")
+    )
+
+
 async def _run_static(
     engine: BenchmarkEngine,
     specs: list[RequestSpec],
@@ -234,51 +241,66 @@ async def _run_static(
 
 
 async def _run_time_variation(
-    engine: BenchmarkEngine, specs: list[RequestSpec], config: CampaignConfig
+    engine: BenchmarkEngine,
+    specs: list[RequestSpec],
+    config: CampaignConfig,
+    *,
+    resume_invocation: bool = False,
 ) -> str | None:
-    """Execute fixed-offset, low-load panels without overlapping other benchmark traffic."""
+    """Execute resume-safe fixed-offset panels without optional gap traffic.
+
+    Dedicated and interleaved studies share the same concurrent open-loop panel executor.  The
+    persisted campaign start is the only schedule anchor: restarting the process cannot slide the
+    six-hour window or turn overdue panels into a fresh experiment.
+    """
 
     suite = config.suites["time_variation"]
     offered_rps = float(suite.get("offered_rps", 0.2))
+    panel_concurrency = int(suite.get("concurrency", config.concurrency))
+    deadline_seconds = float(suite.get("panel_deadline_seconds", 600))
+    arrival_lateness_tolerance = float(
+        suite.get("arrival_lateness_tolerance_seconds", 0.25)
+    )
+    cutoff_seconds = float(suite["send_cutoff_seconds"])
+    started_text = engine.ledger.meta("started_at_utc")
+    if not started_text:
+        raise RuntimeError("time variation requires the immutable campaign start time")
+    anchor = datetime.fromisoformat(started_text.replace("Z", "+00:00"))
     by_panel: dict[int, list[RequestSpec]] = {}
     for spec in specs:
         panel = int(spec.metadata["time_variation_panel"])
         by_panel.setdefault(panel, []).append(spec)
-    loop = asyncio.get_running_loop()
-    campaign_anchor = loop.time()
+
+    def elapsed() -> float:
+        return max(0.0, (datetime.now(UTC) - anchor).total_seconds())
+
     for panel in sorted(by_panel):
+        if _time_variation_panel_is_terminal(engine.ledger, panel):
+            continue
         panel_specs = by_panel[panel]
         offset = float(panel_specs[0].metadata["time_variation_offset_seconds"])
-        await asyncio.sleep(max(0.0, campaign_anchor + offset - loop.time()))
-        random.Random(f"time-variation-panel/v1:{config.seed}:{panel}").shuffle(panel_specs)
-        engine.ledger.record_event_once(
-            f"time_variation_panel_started:{panel}",
-            "time_variation_panel_started",
-            {"panel": panel, "planned_offset_seconds": offset, "requests": len(panel_specs)},
+        loop = asyncio.get_running_loop()
+        panel_admission_monotonic = loop.time()
+        arrival_expiry_monotonic = (
+            panel_admission_monotonic - arrival_lateness_tolerance
         )
-        pending = _pending_static_specs(engine, panel_specs)
-        for spec in pending:
-            scheduled_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
-            try:
-                result = await engine.execute(
-                    spec, scheduled_at_utc=scheduled_at, queue_delay_seconds=0.0
-                )
-            except BudgetExceeded:
-                return "cost_guard"
-            except TimeLimitReached:
-                return "time_guard"
-            except PaymentRequiredLatched:
-                return "http_402_latch"
-            except ReservationOverrunLatched:
-                return "reservation_overrun_latch"
-            if result is not None and result.http_status == 402:
-                return "http_402_latch"
-            await asyncio.sleep(1.0 / offered_rps)
-        engine.ledger.record_event_once(
-            f"time_variation_panel_completed:{panel}",
-            "time_variation_panel_completed",
-            {"panel": panel, "planned_offset_seconds": offset},
+        panel_start_monotonic = panel_admission_monotonic + offset - elapsed()
+        await asyncio.sleep(max(0.0, panel_start_monotonic - loop.time()))
+        reason = await _run_time_variation_panel(
+            engine,
+            panel,
+            panel_specs,
+            offered_rps=offered_rps,
+            concurrency=panel_concurrency,
+            planned_offset_seconds=offset,
+            deadline_seconds=deadline_seconds,
+            panel_start_monotonic=panel_start_monotonic,
+            arrival_expiry_monotonic=arrival_expiry_monotonic,
+            resume_invocation=resume_invocation,
+            not_after_monotonic=loop.time() + max(0.0, cutoff_seconds - elapsed()),
         )
+        if reason:
+            return reason
     return None
 
 
@@ -291,16 +313,28 @@ async def _run_time_variation_panel(
     concurrency: int,
     planned_offset_seconds: float,
     deadline_seconds: float,
+    panel_start_monotonic: float,
+    arrival_expiry_monotonic: float,
+    resume_invocation: bool,
     not_after_monotonic: float | None = None,
 ) -> str | None:
-    """Run one resume-safe open-loop panel with no concurrent gap traffic."""
+    """Run one resume-safe open-loop panel on its immutable absolute arrival schedule."""
 
-    pending = _pending_static_specs(engine, specs)
-    ordered = sorted(pending, key=lambda spec: spec.logical_id)
+    censored_key = f"time_variation_panel_censored:{panel}"
+    if engine.ledger.event_by_key(censored_key) is not None:
+        return None
+    started_key = f"time_variation_panel_started:{panel}"
+    ordered = sorted(specs, key=lambda spec: spec.logical_id)
     random.Random(f"time-variation-panel/v2:{engine.config.seed}:{panel}").shuffle(ordered)
+    pending_ids = {spec.logical_id for spec in _pending_static_specs(engine, specs)}
+    pending = [
+        (index, spec)
+        for index, spec in enumerate(ordered)
+        if spec.logical_id in pending_ids
+    ]
     if concurrency < len(ordered):
         raise ValueError(
-            f"time variation panel {panel} concurrency is below its pending arrival count"
+            f"time variation panel {panel} concurrency is below its registered arrival count"
         )
     launch_span = max(0.0, (len(ordered) - 1) / offered_rps)
     maximum_timeout = max((spec.timeout_seconds for spec in ordered), default=0.0)
@@ -309,16 +343,48 @@ async def _run_time_variation_panel(
             f"time variation panel {panel} cannot drain inside its explicit deadline"
         )
     loop = asyncio.get_running_loop()
-    panel_started = loop.time()
+    panel_deadline_monotonic = panel_start_monotonic + deadline_seconds
+    elapsed_pending = [
+        spec
+        for index, spec in pending
+        if panel_start_monotonic + index / offered_rps < arrival_expiry_monotonic
+    ]
+    if elapsed_pending:
+        censor_reason = (
+            "resume_missed_registered_panel_arrival"
+            if resume_invocation
+            else "missed_registered_panel_arrival"
+        )
+        for _, spec in pending:
+            engine.ledger.mark_plan_cell_if_planned(
+                f"request:{spec.logical_id}",
+                "time_censored",
+                censor_reason,
+            )
+        engine.ledger.record_event_once(
+            censored_key,
+            "time_variation_panel_censored",
+            {
+                "panel": panel,
+                "planned_offset_seconds": planned_offset_seconds,
+                "reason": censor_reason,
+                "resume_invocation": resume_invocation,
+                "registered_requests": len(ordered),
+                "previously_attempted_requests": len(ordered) - len(pending),
+                "elapsed_unsent_arrivals": len(elapsed_pending),
+                "remaining_unsent_requests_censored": len(pending),
+            },
+        )
+        return None
     if (
         not_after_monotonic is not None
-        and panel_started + launch_span > not_after_monotonic
+        and panel_start_monotonic + launch_span > not_after_monotonic
     ):
         # A matched panel is indivisible. If all registered arrivals cannot launch before
         # the provider cutoff, send none of it and preserve an honest time-guard result.
         return "time_guard"
     engine.ledger.record_event_once(
-        f"time_variation_panel_started:{panel}",
+        started_key,
         "time_variation_panel_started",
         {
             "panel": panel,
@@ -335,13 +401,15 @@ async def _run_time_variation_panel(
     semaphore = asyncio.Semaphore(concurrency)
 
     async def execute(index: int, spec: RequestSpec) -> str | None:
-        due = index / offered_rps
-        started = panel_started
-        await asyncio.sleep(max(0.0, started + due - loop.time()))
+        due_monotonic = panel_start_monotonic + index / offered_rps
+        await asyncio.sleep(max(0.0, due_monotonic - loop.time()))
         async with semaphore:
             if stop.is_set():
                 return None
             if not_after_monotonic is not None and loop.time() > not_after_monotonic:
+                stop.set()
+                return "time_guard"
+            if loop.time() + spec.timeout_seconds > panel_deadline_monotonic:
                 stop.set()
                 return "time_guard"
             scheduled_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
@@ -349,7 +417,7 @@ async def _run_time_variation_panel(
                 result = await engine.execute(
                     spec,
                     scheduled_at_utc=scheduled_at,
-                    queue_delay_seconds=max(0.0, loop.time() - (started + due)),
+                    queue_delay_seconds=max(0.0, loop.time() - due_monotonic),
                 )
             except BudgetExceeded:
                 reason = "cost_guard"
@@ -370,7 +438,7 @@ async def _run_time_variation_panel(
         return reason
 
     results = await asyncio.gather(
-        *(execute(index, spec) for index, spec in enumerate(ordered))
+        *(execute(index, spec) for index, spec in pending)
     )
     reason = next((value for value in results if value), None)
     if reason:
@@ -437,6 +505,8 @@ async def _run_interleaved_six_hour_study(
     variation_specs: list[RequestSpec],
     gap_static_specs: list[RequestSpec],
     config: CampaignConfig,
+    *,
+    resume_invocation: bool = False,
 ) -> str | None:
     """Protect matched time panels while filling every safe interval with gap work.
 
@@ -451,6 +521,9 @@ async def _run_interleaved_six_hour_study(
     panel_concurrency = int(suite.get("concurrency", config.concurrency))
     guard_seconds = float(suite.get("panel_guard_seconds", 300))
     deadline_seconds = float(suite.get("panel_deadline_seconds", 600))
+    arrival_lateness_tolerance = float(
+        suite.get("arrival_lateness_tolerance_seconds", 0.25)
+    )
     cutoff_seconds = float(suite["send_cutoff_seconds"])
     started_text = engine.ledger.meta("started_at_utc")
     if not started_text:
@@ -481,6 +554,7 @@ async def _run_interleaved_six_hour_study(
         *(("capacity", job) for job in soak_jobs),
         *(("static", spec) for spec in long_static),
     ]
+    awaited_panel_schedules: dict[int, tuple[float, float]] = {}
 
     def elapsed() -> float:
         return max(0.0, (datetime.now(UTC) - anchor).total_seconds())
@@ -489,7 +563,7 @@ async def _run_interleaved_six_hour_study(
         return [
             panel
             for panel in sorted(by_panel)
-            if engine.ledger.event_by_key(f"time_variation_panel_completed:{panel}") is None
+            if not _time_variation_panel_is_terminal(engine.ledger, panel)
         ]
 
     def pending_job(job: tuple[str, object]) -> bool:
@@ -504,9 +578,18 @@ async def _run_interleaved_six_hour_study(
         due = [panel for panel in panels if offsets[panel] <= elapsed()]
         if due:
             panel = due[0]
-            if elapsed() > offsets[panel] + deadline_seconds:
-                return "time_guard"
             loop = asyncio.get_running_loop()
+            stored_schedule = awaited_panel_schedules.pop(panel, None)
+            if stored_schedule is None:
+                panel_admission_monotonic = loop.time()
+                arrival_expiry_monotonic = (
+                    panel_admission_monotonic - arrival_lateness_tolerance
+                )
+                panel_start_monotonic = (
+                    panel_admission_monotonic + offsets[panel] - elapsed()
+                )
+            else:
+                panel_start_monotonic, arrival_expiry_monotonic = stored_schedule
             not_after_monotonic = loop.time() + max(0.0, cutoff_seconds - elapsed())
             reason = await _run_time_variation_panel(
                 engine,
@@ -516,6 +599,9 @@ async def _run_interleaved_six_hour_study(
                 concurrency=panel_concurrency,
                 planned_offset_seconds=offsets[panel],
                 deadline_seconds=deadline_seconds,
+                panel_start_monotonic=panel_start_monotonic,
+                arrival_expiry_monotonic=arrival_expiry_monotonic,
+                resume_invocation=resume_invocation,
                 not_after_monotonic=not_after_monotonic,
             )
             if reason:
@@ -549,6 +635,16 @@ async def _run_interleaved_six_hour_study(
                 break
         if selected_index is None:
             if panels:
+                panel = min(panels, key=lambda value: offsets[value])
+                loop = asyncio.get_running_loop()
+                panel_admission_monotonic = loop.time()
+                arrival_expiry_monotonic = (
+                    panel_admission_monotonic - arrival_lateness_tolerance
+                )
+                awaited_panel_schedules[panel] = (
+                    panel_admission_monotonic + next_panel - elapsed(),
+                    arrival_expiry_monotonic,
+                )
                 await asyncio.sleep(max(0.0, next_panel - elapsed()))
                 continue
             break
@@ -610,11 +706,21 @@ async def _run_interleaved_six_hour_study(
     if unfinished_panels():
         return "time_guard"
     remaining_gap_jobs = sum(pending_job(job) for job in gap_jobs)
+    completed_panels = sum(
+        engine.ledger.event_by_key(f"time_variation_panel_completed:{panel}") is not None
+        for panel in by_panel
+    )
+    censored_panels = sum(
+        engine.ledger.event_by_key(f"time_variation_panel_censored:{panel}") is not None
+        for panel in by_panel
+    )
     engine.ledger.record_event_once(
         "six_hour_window_completed",
         "six_hour_window_completed",
         {
-            "time_panels_completed": len(by_panel),
+            "time_panels_terminal": completed_panels + censored_panels,
+            "time_panels_completed": completed_panels,
+            "time_panels_censored": censored_panels,
             "optional_gap_jobs_remaining": remaining_gap_jobs,
             "send_cutoff_seconds": cutoff_seconds,
         },
@@ -642,6 +748,7 @@ async def run_campaign(
     run_manifest = _runtime_manifest(config, invocation, output_dir=output)
     output.mkdir(parents=True, exist_ok=True)
     ledger = Ledger(output, exclusive_owner=True)
+    resume_invocation = ledger.meta("started_at_utc") is not None
     try:
         ledger.initialize(
             campaign_hash=config.identity_hash, config_json=canonical_json(config.public_dict())
@@ -715,6 +822,7 @@ async def run_campaign(
                 time_variation_specs,
                 [spec for _, block in static_blocks for spec in block],
                 config,
+                resume_invocation=resume_invocation,
             )
             if reason == "six_hour_window_completed":
                 ledger.finalize_plan(reason)
@@ -748,7 +856,12 @@ async def run_campaign(
                     )
                     return
         if time_variation_specs:
-            time_variation_reason = await _run_time_variation(engine, time_variation_specs, config)
+            time_variation_reason = await _run_time_variation(
+                engine,
+                time_variation_specs,
+                config,
+                resume_invocation=resume_invocation,
+            )
             if time_variation_reason:
                 ledger.finalize_plan(time_variation_reason)
                 ledger.record_event_once(

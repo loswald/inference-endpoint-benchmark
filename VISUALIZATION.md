@@ -15,6 +15,8 @@ explain which lines matter, redesign it.
 - Use log axes only when orders of magnitude matter; show major ticks in ordinary engineering units.
 - Direct-label important series where possible. Keep palettes color-blind-safe and reserve red for
   actual failure, not merely a low rank.
+- Draw stable-prefix and cache-cold time observations as separate series. Never connect a point in
+  one cache stratum to a point in another.
 - Show qualified outliers; do not silently trim, winsorize, clip, or hide them.
 - Every public PDF page must be rendered and inspected at normal reading size before publication.
 

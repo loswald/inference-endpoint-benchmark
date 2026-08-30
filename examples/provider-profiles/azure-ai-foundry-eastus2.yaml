@@ -23,7 +23,7 @@ route_defaults:
   transport_max_connections: 128
   input_token_reservation_overhead: 1024
   evidence_retrieved_at_utc: "2026-08-29T23:00:00Z"
-  evidence_bundle_sha256: af8c7e1c0cf927854c167fbea819a7b8a49a3a3f1101a8213caded1f289b917a
+  evidence_bundle_sha256: 7ca7a36fd3a18a1dc610633441b1b8882abcf80efe18fa656db3336f3bc6e6bc
   capabilities:
     documentation_checked_utc: "2026-08-29T23:00:00Z"
     streaming: true

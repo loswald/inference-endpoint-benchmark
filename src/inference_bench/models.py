@@ -915,7 +915,13 @@ class InferenceResult:
     reasoning_tokens: int | None = None
     cache_read_input_tokens: int | None = None
     usage_parse_errors: tuple[str, ...] = ()
-    cache_state: Literal["cached_trial", "uncached_trial", "uncontrolled"] = "uncontrolled"
+    cache_state: Literal[
+        "cached_trial",
+        "uncached_trial",
+        "stable_prefix",
+        "panel_unique_cold",
+        "uncontrolled",
+    ] = "uncontrolled"
     finish_reason: str | None = None
     output_text: str = field(default="", repr=False)
     tool_calls: tuple[dict[str, Any], ...] = field(default=(), repr=False)

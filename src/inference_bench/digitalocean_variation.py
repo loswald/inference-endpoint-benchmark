@@ -22,13 +22,15 @@ from .statistics import (
 
 _LOGICAL_RE = re.compile(
     r"^time-variation:(?P<route>.+):panel-(?P<panel>\d{3}):"
-    r"(?P<shape>short_short|long_short|short_long|mixed):(?P<repeat>\d{3})$"
+    r"(?P<shape>short_short|long_short|short_long|mixed):"
+    r"(?:(?P<stratum>stable_prefix|panel_unique_cold):)?(?P<repeat>\d{3})$"
 )
 _PANEL_RE = re.compile(r"(?:^|:)panel=(?P<panel>\d{3})$")
 _SAFE_COLUMNS = (
     "logical_id",
     "route_id",
     "cell_id",
+    "cache_state",
     "state",
     "status",
     "http_status",
@@ -170,9 +172,15 @@ def _load_config(database: Path) -> dict[str, Any]:
 
 
 def _load_rows(database: Path) -> list[dict[str, Any]]:
-    columns = ", ".join(_SAFE_COLUMNS)
     with sqlite3.connect(f"file:{database.as_posix()}?mode=ro", uri=True) as connection:
         connection.row_factory = sqlite3.Row
+        available = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(attempts)").fetchall()
+        }
+        columns = ", ".join(
+            column if column in available else f"'uncontrolled' AS {column}"
+            for column in _SAFE_COLUMNS
+        )
         rows = connection.execute(
             f"SELECT {columns} FROM attempts "
             "WHERE suite='time_variation' AND final_logical=1 "
@@ -226,13 +234,22 @@ def _parse_row(row: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("unregistered time-variation repeat")
     shape = match["shape"]
     cell_prefix = str(row["cell_id"]).rsplit(":panel=", 1)[0]
+    cell_prefix = cell_prefix.split(":variation_stratum=", 1)[0]
     mixed_subtype = cell_prefix.removeprefix("mixed:") if shape == "mixed" else "not_applicable"
+    stratum = match["stratum"]
+    if stratum is None:
+        stratum = "stable_prefix" if repeat < 2 else "panel_unique_cold"
+    persisted = str(row.get("cache_state") or "uncontrolled")
+    if persisted != "uncontrolled" and persisted != stratum:
+        raise ValueError("persisted variation stratum disagrees with logical identity")
     return {
         **{key: value for key, value in row.items() if key != "logical_id"},
         "panel": panel,
         "shape": shape,
         "mixed_subtype": mixed_subtype,
-        "cache_stratum": "stable_exact_prompt" if repeat < 2 else "panel_unique_cold",
+        "cache_stratum": (
+            "stable_exact_prompt" if stratum == "stable_prefix" else "panel_unique_cold"
+        ),
     }
 
 

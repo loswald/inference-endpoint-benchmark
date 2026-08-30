@@ -128,6 +128,7 @@ _PUBLIC_SUITE_KEYS = {
         "interleave_gap_work",
         "panel_guard_seconds",
         "panel_deadline_seconds",
+        "arrival_lateness_tolerance_seconds",
         "send_cutoff_seconds",
     },
     "aimd": {
@@ -451,6 +452,10 @@ class CampaignConfig:
             self.concurrency,
             {route.id for route in self.routes},
             retries=self.retries,
+            max_wall_seconds=self.max_wall_seconds,
+            request_timeout_seconds_by_route={
+                route.id: route.request_timeout_seconds for route in self.routes
+            },
         )
 
     @property
@@ -933,6 +938,8 @@ def _validate_suites(
     route_ids: set[str],
     *,
     retries: int,
+    max_wall_seconds: float,
+    request_timeout_seconds_by_route: dict[str, float],
 ) -> None:
     plugins = suite_plugins()
     unknown_suites = sorted(set(suites) - set(plugins) - {"static", "aimd", "soak"})
@@ -1081,45 +1088,73 @@ def _validate_suites(
                 values.get("panel_deadline_seconds", 600),
                 "suites.time_variation.panel_deadline_seconds",
             )
-            if values.get("interleave_gap_work", False):
-                if retries:
-                    raise ValueError(
-                        "interleaved time_variation requires campaign.retries=0 so the "
-                        "panel deadline has one hard request-timeout bound"
-                    )
-                selected_route_count = len(values.get("route_ids", route_ids))
-                panel_arrivals = (
-                    selected_route_count
-                    * len(values.get("shapes", ["short_short", "long_short"]))
-                    * int(values.get("samples_per_route_shape", 3))
+            arrival_lateness_tolerance = _positive_number(
+                values.get("arrival_lateness_tolerance_seconds", 0.25),
+                "suites.time_variation.arrival_lateness_tolerance_seconds",
+                allow_zero=True,
+            )
+            # A time panel is always one concurrent open-loop burst, regardless of whether
+            # optional work is admitted between panels.  Prove the complete schedule before a
+            # credential is resolved so a dedicated campaign cannot silently degrade into a
+            # client-queued or sequential experiment.
+            if retries:
+                raise ValueError(
+                    "time_variation requires campaign.retries=0 so every panel has one hard "
+                    "request-timeout bound"
                 )
-                if int(values.get("concurrency", default_concurrency)) < panel_arrivals:
-                    raise ValueError(
-                        "interleaved time_variation concurrency must admit every registered "
-                        "panel arrival without client-side queueing"
-                    )
-                if cutoff <= 0:
-                    raise ValueError(
-                        "interleaved time_variation requires a positive send_cutoff_seconds"
-                    )
-                last_panel = (
-                    (int(values.get("panels", 12)) - 1)
-                    * float(values.get("interval_minutes", 120))
-                    * 60
+            selected_route_ids = set(values.get("route_ids", route_ids))
+            panel_arrivals = (
+                len(selected_route_ids)
+                * len(values.get("shapes", ["short_short", "long_short"]))
+                * int(values.get("samples_per_route_shape", 3))
+            )
+            panel_concurrency = int(values.get("concurrency", default_concurrency))
+            offered_rps = float(values.get("offered_rps", 0.2))
+            if arrival_lateness_tolerance >= 1.0 / offered_rps:
+                raise ValueError(
+                    "time_variation arrival lateness tolerance must be shorter than one "
+                    "registered inter-arrival interval"
                 )
-                if last_panel >= cutoff:
-                    raise ValueError(
-                        "the last time_variation panel must begin before send_cutoff_seconds"
-                    )
-                if guard >= float(values.get("interval_minutes", 120)) * 60:
-                    raise ValueError(
-                        "time_variation.panel_guard_seconds must be shorter than the panel interval"
-                    )
-                if deadline >= float(values.get("interval_minutes", 120)) * 60:
-                    raise ValueError(
-                        "time_variation.panel_deadline_seconds must be shorter than "
-                        "the panel interval"
-                    )
+            if panel_concurrency < panel_arrivals:
+                raise ValueError(
+                    "time_variation concurrency must admit every registered panel arrival "
+                    "without client-side queueing"
+                )
+            if cutoff <= 0:
+                raise ValueError("time_variation requires a positive send_cutoff_seconds")
+            if cutoff > max_wall_seconds:
+                raise ValueError(
+                    "time_variation.send_cutoff_seconds must not exceed campaign.max_wall_seconds"
+                )
+            interval_seconds = float(values.get("interval_minutes", 120)) * 60
+            last_panel = (int(values.get("panels", 12)) - 1) * interval_seconds
+            launch_span = max(0.0, (panel_arrivals - 1) / offered_rps)
+            maximum_timeout = max(
+                request_timeout_seconds_by_route[route_id]
+                for route_id in selected_route_ids
+            )
+            if launch_span + maximum_timeout > deadline:
+                raise ValueError(
+                    "time_variation panel launch span plus maximum route timeout exceeds "
+                    "panel_deadline_seconds"
+                )
+            if last_panel + launch_span > cutoff:
+                raise ValueError(
+                    "the last time_variation panel cannot launch every registered arrival "
+                    "before send_cutoff_seconds"
+                )
+            if last_panel + launch_span + maximum_timeout > max_wall_seconds:
+                raise ValueError(
+                    "the last time_variation panel cannot drain before campaign.max_wall_seconds"
+                )
+            if guard >= interval_seconds:
+                raise ValueError(
+                    "time_variation.panel_guard_seconds must be shorter than the panel interval"
+                )
+            if deadline >= interval_seconds:
+                raise ValueError(
+                    "time_variation.panel_deadline_seconds must be shorter than the panel interval"
+                )
         if name == "context":
             percentages = values.get("percentages", [1, 10, 25, 50, 75, 90, 95, 99])
             fixed_tokens = values.get("fixed_tokens", [])

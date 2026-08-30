@@ -114,9 +114,17 @@ Separate:
 
 ## 8. Measure time variation separately
 
-Run a dedicated low-load sentinel campaign. Repeat identical prompts at fixed offsets across the
-desired horizon and randomize route order within each panel. Do not overlap capacity or capability
-traffic from the same provider account.
+Run a dedicated low-load sentinel campaign. Repeat identical prompts at fixed offsets from the
+ledger's immutable original start time and deterministically randomize route order within each
+panel. Send panel arrivals open-loop and concurrently: a slow response must not delay later arrivals
+or move a later panel. Credential-free planning must prove that concurrency covers every panel
+arrival and that launch span plus the longest route timeout fits both the panel deadline and final
+wall-clock drain window.
+
+Register stable exact-prefix and panel-unique cache-cold requests as separate strata with separate
+identities and summaries. Do not pool the strata or connect them as one time series. Optional work
+may use idle time only when it can drain before the next protected panel. Do not overlap capacity or
+capability traffic from the same provider account.
 
 For a 24-hour screen, use 12 panels two hours apart or 24 hourly panels. Report the observed span,
 panel count, per-panel sample count, and uncertainty. Adjacent panels are temporally correlated;
@@ -125,8 +133,9 @@ they are not independent days.
 ## 9. Parallelize at the correct level
 
 Run independent providers concurrently. Keep capacity sweeps endpoint-isolated inside each
-provider. Low-load time panels can include all endpoints serially in randomized order. This gives
-fast execution without turning shared quota contention into a false endpoint property.
+provider. Low-load time panels may include every endpoint in one deterministic open-loop arrival
+schedule, provided the concurrency and drain checks above pass. This gives fast execution without
+turning an earlier slow response into a false shift in the next endpoint's scheduled arrival.
 
 ## 10. Statistical units
 

@@ -159,6 +159,7 @@ def _collect(
             row.get("route_id"),
             row.get("shape"),
             row.get("panel_index"),
+            row.get("variation_stratum") or row.get("cache_state"),
         ),
     )
     tables["coverage-ledger.csv"] = _latest_run_groups(
@@ -653,6 +654,46 @@ def _plot_context(rows: list[dict[str, Any]], destination: Path) -> Path | None:
     return path
 
 
+def _time_variation_series(
+    rows: list[dict[str, Any]], metric: str
+) -> list[tuple[str, list[int], list[float], list[float], list[float]]]:
+    """Build one connected sequence per registered cache stratum.
+
+    Keeping this transformation independent of Matplotlib makes the no-cross-stratum-segment
+    invariant directly testable.
+    """
+
+    result: list[tuple[str, list[int], list[float], list[float], list[float]]] = []
+    for stratum in ("stable_prefix", "panel_unique_cold"):
+        eligible = sorted(
+            (
+                row
+                for row in rows
+                if (row.get("variation_stratum") or row.get("cache_state")) == stratum
+                and _number(row.get(metric)) is not None
+            ),
+            key=lambda row: _integer(row.get("panel_index")),
+        )
+        if not eligible:
+            continue
+        x = [_integer(row.get("panel_index")) + 1 for row in eligible]
+        y = [_number(row.get(metric)) or 0 for row in eligible]
+        low = [
+            _number(row.get(f"{metric}_ci95_low"))
+            if _number(row.get(f"{metric}_ci95_low")) is not None
+            else value
+            for row, value in zip(eligible, y, strict=True)
+        ]
+        high = [
+            _number(row.get(f"{metric}_ci95_high"))
+            if _number(row.get(f"{metric}_ci95_high")) is not None
+            else value
+            for row, value in zip(eligible, y, strict=True)
+        ]
+        result.append((stratum, x, y, low, high))
+    return result
+
+
 def _plot_time_variation(rows: list[dict[str, Any]], destination: Path) -> list[Path]:
     """Plot matched sequential panels as endpoint-specific small multiples.
 
@@ -685,32 +726,23 @@ def _plot_time_variation(rows: list[dict[str, Any]], destination: Path) -> list[
                     squeeze=False,
                 )
                 for row_index, route in enumerate(route_chunk):
-                    route_rows = sorted(
-                        (row for row in shape_rows if row.get("route_id") == route),
-                        key=lambda row: _integer(row.get("panel_index")),
-                    )
+                    route_rows = [row for row in shape_rows if row.get("route_id") == route]
                     for column, (metric, label) in enumerate(
                         (("ttft_p50", "TTFT p50 (s)"), ("latency_p50", "Latency p50 (s)"))
                     ):
                         axis = axes[row_index][column]
-                        eligible = [
-                            row for row in route_rows if _number(row.get(metric)) is not None
-                        ]
-                        x = [_integer(row.get("panel_index")) + 1 for row in eligible]
-                        y = [_number(row.get(metric)) or 0 for row in eligible]
-                        low = [
-                            _number(row.get(f"{metric}_ci95_low"))
-                            if _number(row.get(f"{metric}_ci95_low")) is not None
-                            else value
-                            for row, value in zip(eligible, y, strict=True)
-                        ]
-                        high = [
-                            _number(row.get(f"{metric}_ci95_high"))
-                            if _number(row.get(f"{metric}_ci95_high")) is not None
-                            else value
-                            for row, value in zip(eligible, y, strict=True)
-                        ]
-                        if eligible:
+                        styles = {
+                            "stable_prefix": ("stable prefix", "#0F766E", "o", "-"),
+                            "panel_unique_cold": (
+                                "panel-unique cold",
+                                "#C2410C",
+                                "s",
+                                "--",
+                            ),
+                        }
+                        series = _time_variation_series(route_rows, metric)
+                        for stratum, x, y, low, high in series:
+                            stratum_label, color, marker, line_style = styles[stratum]
                             axis.errorbar(
                                 x,
                                 y,
@@ -724,13 +756,26 @@ def _plot_time_variation(rows: list[dict[str, Any]], destination: Path) -> list[
                                         for value, bound in zip(y, high, strict=True)
                                     ],
                                 ],
-                                fmt="o-",
-                                color="#0F766E",
+                                fmt=marker,
+                                linestyle=line_style,
+                                color=color,
                                 ecolor="#64748B",
                                 linewidth=1.4,
                                 capsize=2.5,
+                                label=stratum_label,
                             )
-                            axis.set_xticks(sorted(set(x)))
+                            axis.annotate(
+                                stratum_label,
+                                (x[-1], y[-1]),
+                                xytext=(5, 0),
+                                textcoords="offset points",
+                                color=color,
+                                fontsize=7,
+                                va="center",
+                            )
+                        all_x = sorted({value for _, x, _, _, _ in series for value in x})
+                        if all_x:
+                            axis.set_xticks(all_x)
                         axis.set_xlabel("Matched panel (equal spacing)")
                         axis.set_ylabel(label)
                         axis.set_title(route, loc="left", fontsize=9, fontweight="bold")
@@ -746,7 +791,8 @@ def _plot_time_variation(rows: list[dict[str, Any]], destination: Path) -> list[
                     0.06,
                     0.006,
                     "Same prompts and offered load in every panel; whiskers are request-level "
-                    "95% intervals. This is an intra-session panel, not a 24-hour claim.",
+                    "95% intervals. Stable-prefix and panel-unique-cold series are never pooled. "
+                    "This is an intra-session panel, not a 24-hour claim.",
                     fontsize=7.5,
                     color="#475569",
                 )

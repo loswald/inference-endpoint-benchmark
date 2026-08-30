@@ -1867,10 +1867,76 @@ def _slug(value: str) -> str:
 
 
 _TIME_PANEL_RE = re.compile(r":panel=(\d{3,})$")
+_TIME_STRATUM_RE = re.compile(r":variation_stratum=([^:]+):panel=\d{3,}$")
+
+
+def _paired_stratum_difference(
+    cold: dict[str, Any], stable: dict[str, Any], metric: str
+) -> dict[str, Any]:
+    """Return one transparent cold-minus-stable matched-panel contrast.
+
+    The request-level estimands remain separate.  The difference and conservative interval are
+    derived only after matching the same route, workload, and panel; no cross-stratum pooling is
+    used to create either point estimate.
+    """
+
+    cold_value = cold.get(metric)
+    stable_value = stable.get(metric)
+    prefix = f"paired_cold_minus_stable_{metric}"
+    if not isinstance(cold_value, (int, float)) or not isinstance(
+        stable_value, (int, float)
+    ):
+        return {
+            prefix: None,
+            f"{prefix}_n": 0,
+            f"{prefix}_unit": cold.get(f"{metric}_unit")
+            or stable.get(f"{metric}_unit"),
+            f"{prefix}_ci95_low": None,
+            f"{prefix}_ci95_high": None,
+            f"{prefix}_ci_method": "not estimable because one stratum lacks this metric",
+            f"{prefix}_state": "not_estimable_missing_metric",
+        }
+    if isinstance(cold_value, bool) or isinstance(stable_value, bool):
+        return {
+            prefix: None,
+            f"{prefix}_n": 0,
+            f"{prefix}_unit": cold.get(f"{metric}_unit")
+            or stable.get(f"{metric}_unit"),
+            f"{prefix}_ci95_low": None,
+            f"{prefix}_ci95_high": None,
+            f"{prefix}_ci_method": "not estimable because one stratum lacks this metric",
+            f"{prefix}_state": "not_estimable_missing_metric",
+        }
+    result: dict[str, Any] = {
+        prefix: float(cold_value) - float(stable_value),
+        f"{prefix}_n": min(
+            int(cold.get(f"{metric}_n") or 0), int(stable.get(f"{metric}_n") or 0)
+        ),
+        f"{prefix}_unit": cold.get(f"{metric}_unit") or stable.get(f"{metric}_unit"),
+        f"{prefix}_ci_method": (
+            "matched-panel difference of separate stratum estimates; conservative CI "
+            "subtraction"
+        ),
+        f"{prefix}_state": "estimated",
+    }
+    cold_low = cold.get(f"{metric}_ci95_low")
+    cold_high = cold.get(f"{metric}_ci95_high")
+    stable_low = stable.get(f"{metric}_ci95_low")
+    stable_high = stable.get(f"{metric}_ci95_high")
+    if all(
+        isinstance(value, (int, float)) and not isinstance(value, bool)
+        for value in (cold_low, cold_high, stable_low, stable_high)
+    ):
+        result[f"{prefix}_ci95_low"] = float(cold_low) - float(stable_high)
+        result[f"{prefix}_ci95_high"] = float(cold_high) - float(stable_low)
+    else:
+        result[f"{prefix}_ci95_low"] = None
+        result[f"{prefix}_ci95_high"] = None
+    return result
 
 
 def summarize_time_variation(summary: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Project matched-cell estimates onto an explicit route × shape × time panel table."""
+    """Project separate variation strata and their matched-panel contrasts."""
 
     result: list[dict[str, Any]] = []
     for row in summary:
@@ -1881,11 +1947,61 @@ def summarize_time_variation(summary: list[dict[str, Any]]) -> list[dict[str, An
         if match is None:
             raise ValueError(f"time-variation cell lacks a panel identity: {cell}")
         shape = cell.split(":", 1)[0]
+        stratum_match = _TIME_STRATUM_RE.search(cell)
+        stratum = str(row.get("cache_state") or "")
+        if stratum_match is not None:
+            cell_stratum = stratum_match.group(1)
+            if stratum and stratum != cell_stratum:
+                raise ValueError(
+                    "time-variation cell stratum disagrees with persisted cache_state"
+                )
+            stratum = cell_stratum
+        if stratum not in {"stable_prefix", "panel_unique_cold"}:
+            raise ValueError(f"time-variation cell lacks a registered stratum: {cell}")
         projected = dict(row)
         projected["shape"] = shape
         projected["panel_index"] = int(match.group(1))
+        projected["variation_stratum"] = stratum
         result.append(projected)
-    return sorted(result, key=lambda row: (row["route_id"], row["shape"], row["panel_index"]))
+
+    by_panel: dict[tuple[str, str, int], dict[str, dict[str, Any]]] = defaultdict(dict)
+    for row in result:
+        key = (str(row["route_id"]), str(row["shape"]), int(row["panel_index"]))
+        stratum = str(row["variation_stratum"])
+        row["paired_contrast_state"] = "counterpart_stratum_not_observed"
+        row["paired_contrast_row_role"] = (
+            "stable_reference" if stratum == "stable_prefix" else "cold_target"
+        )
+        if stratum in by_panel[key]:
+            raise ValueError("duplicate time-variation stratum for one route/workload/panel")
+        by_panel[key][stratum] = row
+    for strata in by_panel.values():
+        if set(strata) != {"stable_prefix", "panel_unique_cold"}:
+            continue
+        stable = strata["stable_prefix"]
+        cold = strata["panel_unique_cold"]
+        stable["paired_contrast_state"] = "matched_reference_row"
+        cold["paired_contrast_state"] = "matched_contrast_reported_here"
+        cold["paired_reference_stratum"] = "stable_prefix"
+        cold["paired_difference_direction"] = "panel_unique_cold_minus_stable_prefix"
+        for metric in (
+            "success_rate",
+            "latency_p50",
+            "service_latency_p50",
+            "ttft_p50",
+            "decode_proxy_tps_p50",
+            "quality_mean",
+        ):
+            cold.update(_paired_stratum_difference(cold, stable, metric))
+    return sorted(
+        result,
+        key=lambda row: (
+            row["route_id"],
+            row["shape"],
+            row["panel_index"],
+            row["variation_stratum"],
+        ),
+    )
 
 
 def _plot_time_variation(summary: list[dict[str, Any]], output: Path) -> list[str]:
@@ -1915,32 +2031,51 @@ def _plot_time_variation(summary: list[dict[str, Any]], output: Path) -> list[st
             squeeze=False,
         )
         for shape_index, shape in enumerate(shapes):
-            rows = sorted(
-                (row for row in route_rows if row["shape"] == shape),
-                key=lambda row: int(row["panel_index"]),
-            )
+            rows = [row for row in route_rows if row["shape"] == shape]
             for metric_index, (metric, title, unit) in enumerate(metrics):
                 axis = axes[shape_index][metric_index]
-                eligible = [row for row in rows if row.get(metric) is not None]
-                x = [int(row["panel_index"]) for row in eligible]
-                y = [float(row[metric]) for row in eligible]
-                lower = [float(row.get(f"{metric}_ci95_low") or row[metric]) for row in eligible]
-                upper = [float(row.get(f"{metric}_ci95_high") or row[metric]) for row in eligible]
-                if eligible:
-                    yerr = [
-                        [value - low for value, low in zip(y, lower, strict=True)],
-                        [high - value for value, high in zip(y, upper, strict=True)],
-                    ]
-                    axis.errorbar(
-                        x,
-                        y,
-                        yerr=yerr,
-                        fmt="o-",
-                        linewidth=1.4,
-                        markersize=4,
-                        capsize=2.5,
-                        color="#176B87",
+                for stratum, label, color, marker, line_style in (
+                    ("stable_prefix", "stable prefix", "#176B87", "o", "-"),
+                    ("panel_unique_cold", "panel-unique cold", "#C2410C", "s", "--"),
+                ):
+                    eligible = sorted(
+                        (
+                            row
+                            for row in rows
+                            if row.get("variation_stratum") == stratum
+                            and row.get(metric) is not None
+                        ),
+                        key=lambda row: int(row["panel_index"]),
                     )
+                    x = [int(row["panel_index"]) for row in eligible]
+                    y = [float(row[metric]) for row in eligible]
+                    lower = [
+                        float(row.get(f"{metric}_ci95_low") or row[metric])
+                        for row in eligible
+                    ]
+                    upper = [
+                        float(row.get(f"{metric}_ci95_high") or row[metric])
+                        for row in eligible
+                    ]
+                    if eligible:
+                        yerr = [
+                            [value - low for value, low in zip(y, lower, strict=True)],
+                            [high - value for value, high in zip(y, upper, strict=True)],
+                        ]
+                        axis.errorbar(
+                            x,
+                            y,
+                            yerr=yerr,
+                            fmt=marker,
+                            linestyle=line_style,
+                            linewidth=1.4,
+                            markersize=4,
+                            capsize=2.5,
+                            color=color,
+                            label=label,
+                        )
+                if metric_index == len(metrics) - 1:
+                    axis.legend(frameon=False, fontsize=8, loc="best")
                 axis.set_title(title)
                 axis.set_xlabel("Fixed time panel (equal spacing)")
                 axis.set_ylabel(unit)
@@ -2295,7 +2430,10 @@ def _generate_report_locked(run_dir: Path, ledger: Ledger, source_snapshot: dict
             "missing_value": "unknown/not reported",
             "explicit_zero": "provider-reported cache miss",
             "positive_value": "provider-reported cache-read token count",
-            "pooling": "cached_trial, uncached_trial, and uncontrolled are separate cells",
+            "pooling": (
+                "cached_trial, uncached_trial, stable_prefix, panel_unique_cold, and "
+                "uncontrolled are separate cells"
+            ),
         },
         "warm_state": {
             "standalone_warmup_suite": (
@@ -2391,7 +2529,8 @@ def _generate_report_locked(run_dir: Path, ledger: Ledger, source_snapshot: dict
         "or unreported reasoning counts are retained as counts but censored from that metric.",
         "- Quality is end-to-end across every predeclared scored trial: non-success is zero, and "
         "unrelated usage/timing invalidity cannot remove a deterministic task score.",
-        "- Cached, uncached, and uncontrolled cells are never pooled.",
+        "- Cached, uncached, stable-prefix, panel-unique-cold, and uncontrolled cells are "
+        "never pooled.",
         "- Missing cache-read usage is kept distinct from an explicit provider-reported zero.",
         "- The warmup suite is standalone diagnostic traffic. Measured cells are labelled "
         "uncontrolled_not_paired and support no warm/cold latency claim.",
@@ -2406,8 +2545,9 @@ def _generate_report_locked(run_dir: Path, ledger: Ledger, source_snapshot: dict
         "",
         "- `matched-cell-summary.csv`: estimates, units, n, CI bounds, and methods.",
         "- `load-block-summary.csv`: epoch/block RPM and effective TPM with 95% intervals.",
-        "- `time-variation-summary.csv`: matched low-load panels across the day with 95% "
-        "request-level intervals.",
+        "- `time-variation-summary.csv`: matched low-load panels with stable-prefix and "
+        "panel-unique-cold strata kept separate, request-level 95% intervals, and matched "
+        "cold-minus-stable panel contrasts.",
         "- `controller-summary.csv` / `.json`: AIMD bound/censor semantics, confirmations, "
         "recovery, and soak completion state for every configured endpoint × shape controller.",
         "- `coverage-ledger.csv`: every registered completed, untested, conditional, or "

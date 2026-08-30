@@ -11,10 +11,13 @@ The layer deliberately has two small, strict YAML contracts:
 ``benchmark-experiment/v1``
     ``schema`` (exact string), ``campaign`` (the normal campaign mapping), ``suites`` (the
     normal suite mapping), optional ``route_selection`` with ``include``/``exclude`` ID lists,
-    and optional ``route_overrides`` keyed by catalog route ID.  Overrides cannot change route
-    identity fields ``id`` or ``provider``.
+    optional ``provider_route_overrides`` keyed by provider identity, and optional
+    ``route_overrides`` keyed by catalog route ID.  Overrides cannot change route identity fields
+    ``id`` or ``provider``.  Provider-scoped overrides let one portable experiment tighten a
+    transport timeout without mutating the reusable provider catalog.
 
-Composition uses the precedence ``profile defaults < catalog row < experiment override``.
+Composition uses the precedence ``profile defaults < catalog row < provider experiment override
+< exact-route experiment override``.
 The mapping-valued route fields ``auth``, ``capabilities``, ``extra_headers``, and
 ``request_defaults`` merge one level deep; every other field replaces the earlier value.
 Selected routes are emitted in route-ID order.  The result then crosses the same strict
@@ -50,6 +53,7 @@ _EXPERIMENT_PROFILE_KEYS = {
     "schema",
     "campaign",
     "route_selection",
+    "provider_route_overrides",
     "route_overrides",
     "suites",
 }
@@ -164,6 +168,21 @@ def compose_profile_config(
         experiment_profile.get("route_overrides", {}),
         "experiment profile.route_overrides",
     )
+    provider_overrides = _mapping(
+        experiment_profile.get("provider_route_overrides", {}),
+        "experiment profile.provider_route_overrides",
+    )
+    for provider_id, raw_override in provider_overrides.items():
+        _nonempty_string(provider_id, "experiment profile.provider_route_overrides key")
+        provider_override = _mapping(
+            raw_override,
+            f"experiment profile.provider_route_overrides.{provider_id}",
+        )
+        _validate_route_fields(
+            provider_override,
+            f"experiment profile.provider_route_overrides.{provider_id}",
+            forbidden=_PROFILE_CONTROLLED_ROUTE_FIELDS,
+        )
     unknown_overrides = sorted(set(overrides) - set(catalog))
     if unknown_overrides:
         raise ValueError(
@@ -176,6 +195,10 @@ def compose_profile_config(
         )
 
     compiled_routes: list[dict[str, Any]] = []
+    selected_provider_override = _mapping(
+        provider_overrides.get(provider, {}),
+        f"experiment profile.provider_route_overrides.{provider}",
+    )
     for route_id in selected_ids:
         override = _mapping(
             overrides.get(route_id, {}), f"experiment profile.route_overrides.{route_id}"
@@ -185,7 +208,12 @@ def compose_profile_config(
             f"experiment profile.route_overrides.{route_id}",
             forbidden=_PROFILE_CONTROLLED_ROUTE_FIELDS,
         )
-        compiled = _merge_route_layers(route_defaults, catalog[route_id], override)
+        compiled = _merge_route_layers(
+            route_defaults,
+            catalog[route_id],
+            selected_provider_override,
+            override,
+        )
         compiled["id"] = route_id
         compiled["provider"] = provider
         compiled_routes.append(compiled)
